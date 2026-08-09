@@ -10,7 +10,7 @@ desactivado hasta contratar la suscripción de datos correspondiente en IBKR.
 - Python 3.10+
 - IB Gateway o Trader Workstation (TWS) corriendo y con la API habilitada
   (puerto por defecto `4002` para IB Gateway paper trading, configurado en
-  `main()` dentro de `bot_intradia.py`)
+  `main()` dentro de `bot_completo.py`)
 - Dependencias de Python:
 
 ```
@@ -20,7 +20,7 @@ pip install -r requirements.txt
 ## Ejecución
 
 ```
-python bot_intradia.py
+python bot_completo.py
 ```
 
 El bot corre en bucle continuo (revisión cada 4 minutos mientras algún
