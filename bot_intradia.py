@@ -61,6 +61,10 @@ HORA_CIERRE_KR = dt_time(15, 30)   # 15:30 hora de Corea
 INTENTOS_MAXIMOS = 3
 ESPERA_ENTRE_INTENTOS_SEGUNDOS = 15
 
+# --- Reintentos de reconexion con IB Gateway tras un corte de conexion ---
+REINTENTOS_RECONEXION = 5
+ESPERA_ENTRE_REINTENTOS_RECONEXION_SEGUNDOS = 15
+
 # --- Ventanas de cierre de mercado ---
 MINUTOS_SIN_COMPRAR_ANTES_CIERRE = 90    # 1.5 horas: no se compra nada en este margen antes del cierre
 MINUTOS_VENTA_FORZADA_ANTES_CIERRE = 15  # ultimos 15 min: se vende lo que tenga entre +0.5% y +2% de beneficio
@@ -939,6 +943,26 @@ def conexion_esta_viva(ib):
         return False
 
 
+def esperar_pumpeando(ib, segundos_totales, intervalo_chequeo=30):
+    """Espera el numero de segundos indicado, pero en tramos cortos y usando
+    ib.sleep() en lugar de time.sleep(). time.sleep() congela todo el
+    programa, incluida la parte de ib_async que escucha la conexion, asi que
+    un corte de red (p.ej. el WinError 10054) no se detecta hasta que acaba
+    la espera completa; con esperas largas (varias horas fuera de horario de
+    mercado) eso deja al bot funcionando "a ciegas" con una conexion ya
+    muerta. Usando ib.sleep() en tramos cortos, la conexion se puede
+    comprobar periodicamente y la espera se corta antes si se pierde, para
+    poder reconectar cuanto antes."""
+    restante = segundos_totales
+    while restante > 0:
+        tramo = min(intervalo_chequeo, restante)
+        ib.sleep(tramo)
+        restante -= tramo
+        if not ib.isConnected():
+            log("Conexion perdida durante la espera, se corta la espera para reconectar antes.")
+            return
+
+
 def main():
     evitar_suspension_windows()
 
@@ -952,19 +976,28 @@ def main():
         while True:
             if not conexion_esta_viva(ib):
                 log("Conexion con IB Gateway perdida. Intentando reconectar...")
-                try:
-                    ib.disconnect()
-                except Exception:
-                    pass
-                try:
-                    ib.connect('127.0.0.1', 4002, clientId=1)
-                    ib.RequestTimeout = 30
-                    log("Reconexion con IB Gateway completada.")
-                except Exception as e:
-                    log(f"No se pudo reconectar con IB Gateway: {e}. "
+                reconectado = False
+                for intento in range(1, REINTENTOS_RECONEXION + 1):
+                    try:
+                        ib.disconnect()
+                    except Exception:
+                        pass
+                    try:
+                        ib.connect('127.0.0.1', 4002, clientId=1)
+                        ib.RequestTimeout = 30
+                        log(f"Reconexion con IB Gateway completada (intento {intento}/{REINTENTOS_RECONEXION}).")
+                        reconectado = True
+                        break
+                    except Exception as e:
+                        log(f"Fallo el intento {intento}/{REINTENTOS_RECONEXION} de reconexion: {e}")
+                        if intento < REINTENTOS_RECONEXION:
+                            ib.sleep(ESPERA_ENTRE_REINTENTOS_RECONEXION_SEGUNDOS)
+
+                if not reconectado:
+                    log(f"No se pudo reconectar con IB Gateway tras {REINTENTOS_RECONEXION} intentos. "
                         f"Se reintentara en la siguiente vuelta.")
                     log(f"Esperando {INTERVALO_SEGUNDOS // 60} minutos hasta la siguiente revision...")
-                    time.sleep(INTERVALO_SEGUNDOS)
+                    esperar_pumpeando(ib, INTERVALO_SEGUNDOS)
                     continue
 
             hoy = datetime.now().date()
@@ -987,7 +1020,7 @@ def main():
                 log(f"Fuera de horario operativo en todos los mercados (US, HK, KR). "
                     f"Esperando {minutos_espera:.0f} minutos hasta {MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR} "
                     f"min antes de la proxima apertura...")
-                time.sleep(segundos_espera)
+                esperar_pumpeando(ib, segundos_espera)
                 continue
 
             try:
@@ -996,7 +1029,7 @@ def main():
                 log(f"ERROR en el ciclo: {e}")
 
             log(f"Esperando {INTERVALO_SEGUNDOS // 60} minutos hasta la siguiente revision...")
-            time.sleep(INTERVALO_SEGUNDOS)
+            esperar_pumpeando(ib, INTERVALO_SEGUNDOS)
     except KeyboardInterrupt:
         log("Detenido manualmente por el usuario (Ctrl+C).")
     finally:
