@@ -528,12 +528,11 @@ def revisar_ventas(ib):
 
         if bajista:
             log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden limitada).")
-            precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
-            orden = crear_orden_limitada('SELL', cantidad, precio_limite)
+                f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden a mercado).")
+            orden = crear_orden_mercado('SELL', cantidad)
             trade = ib.placeOrder(contrato, orden)
             ib.sleep(3)
-            log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
+            log(f"VENTAS: {contrato.symbol} - orden a mercado, "
                 f"estado: {trade.orderStatus.status}")
         else:
             log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
