@@ -1,0 +1,1019 @@
+"""
+BOT COMPLETO - bucle automatico cada 5 minutos. Soporta estos mercados:
+  - US (NYSE/Nasdaq, en USD): premercado 4:00-9:30 ET + mercado regular 9:30-16:00 ET.
+  - HK (Hong Kong Stock Exchange, en HKD): sesion 9:30-16:00 hora de Hong Kong
+    (simplificado, ignora la pausa de mediodia real del mercado).
+  - KR (Korea Exchange / KRX, en KRW): sesion 9:00-15:30 hora de Corea.
+
+EU (Euronext / Borsa Italiana, en EUR) esta definido en el codigo (ACTIVOS_EU)
+pero DESACTIVADO: pendiente de contratar la suscripcion de datos de mercado
+de Europa en IBKR. Para reactivarlo, añade ACTIVOS_EU a la lista ACTIVOS y
+vuelve a incluir es_horario_operativo("EU") en la comprobacion de main().
+
+En cada ciclo:
+  1. Revisa las posiciones abiertas y vende las que cumplan la regla de venta
+     (a partir de +0.5% de beneficio, vender si el MACD de 5 min esta bajista;
+     sin stop loss de perdida).
+  2. Escanea todos los valores buscando senal de COMPRA (MACD en 7 temporalidades,
+     con la excepcion de "solo 1 de 7 en contra"). Cada valor solo se analiza si
+     su mercado esta en horario operativo en ese momento.
+  3. Compra (hasta 1000 EUR o equivalente, acciones enteras, redondeo hacia
+     abajo) cualquier valor con senal de COMPRA, respetando el limite del 15%
+     del valor total de la cartera por valor (calculado en USD equivalente).
+
+Ante fallos de datos (p.ej. error 162 "sesion conectada desde otra IP"), se
+reintenta automaticamente antes de omitir el valor.
+
+Se detiene con Ctrl+C. Todo el log se imprime en pantalla con fecha y hora.
+
+IMPORTANTE: este script envia ordenes REALES (aunque en cuenta paper).
+Los tipos de cambio EUR/USD, USD/HKD y USD/KRW son aproximados y fijos;
+actualizalos manualmente si quieres mas precision.
+Revisa bien la configuracion antes de dejarlo corriendo desatendido.
+"""
+
+import time
+from datetime import datetime, time as dt_time, timedelta
+from collections import defaultdict
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+from ib_async import IB, Stock, MarketOrder, LimitOrder, ExecutionFilter
+
+# --- Horarios por mercado ---
+ZONA_NY = ZoneInfo("America/New_York")
+HORA_INICIO_US = dt_time(4, 0)     # 4:00 ET (premercado)
+HORA_CIERRE_US = dt_time(16, 0)    # 16:00 ET (cierre regular)
+
+ZONA_EU = ZoneInfo("Europe/Paris")
+HORA_INICIO_EU = dt_time(9, 0)     # 9:00 hora de Paris/Amsterdam/Bruselas/Milan
+HORA_CIERRE_EU = dt_time(17, 30)   # 17:30 hora de Paris/Amsterdam/Bruselas/Milan
+
+ZONA_HK = ZoneInfo("Asia/Hong_Kong")
+HORA_INICIO_HK = dt_time(9, 30)    # 9:30 hora de Hong Kong (simplificado, ignora pausa de mediodia)
+HORA_CIERRE_HK = dt_time(16, 0)    # 16:00 hora de Hong Kong
+
+ZONA_KR = ZoneInfo("Asia/Seoul")
+HORA_INICIO_KR = dt_time(9, 0)     # 9:00 hora de Corea
+HORA_CIERRE_KR = dt_time(15, 30)   # 15:30 hora de Corea
+
+# --- Reintentos ante el error 162 (sesion de datos conectada desde otra IP) ---
+INTENTOS_MAXIMOS = 3
+ESPERA_ENTRE_INTENTOS_SEGUNDOS = 15
+
+# --- Ventanas de cierre de mercado ---
+MINUTOS_SIN_COMPRAR_ANTES_CIERRE = 90    # 1.5 horas: no se compra nada en este margen antes del cierre
+MINUTOS_VENTA_FORZADA_ANTES_CIERRE = 15  # ultimos 15 min: se vende lo que tenga entre +0.5% y +2% de beneficio
+BENEFICIO_MAX_VENTA_FORZADA_PCT = 2.0     # por encima de este %, se deja correr con la logica normal del MACD
+
+CIERRE_POR_MERCADO = {
+    "US": (ZONA_NY, HORA_CIERRE_US),
+    "HK": (ZONA_HK, HORA_CIERRE_HK),
+    "KR": (ZONA_KR, HORA_CIERRE_KR),
+}
+
+APERTURA_POR_MERCADO = {
+    "US": (ZONA_NY, HORA_INICIO_US),
+    "HK": (ZONA_HK, HORA_INICIO_HK),
+    "KR": (ZONA_KR, HORA_INICIO_KR),
+}
+
+MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR = 15  # con todos los mercados cerrados, despertar 15 min antes de la mas proxima
+
+CURRENCY_A_MERCADO = {"USD": "US", "HKD": "HK", "KRW": "KR", "EUR": "EU"}
+
+# --- Configuracion general ---
+IMPORTE_EUROS = 1000
+IMPORTE_EUROS_HK = 3500  # HK opera en lotes fijos (a veces 500+ acciones): presupuesto mayor para poder cubrirlos
+TIPO_CAMBIO_EUR_USD = 1.14   # Actualiza estos valores cuando quieras, a mano
+TIPO_CAMBIO_USD_HKD = 7.80   # 1 USD = 7.80 HKD (aprox, el HKD esta fijado al USD)
+TIPO_CAMBIO_USD_KRW = 1480   # 1 USD = 1480 KRW (aprox)
+UMBRAL_BENEFICIO_PCT = 0.5  # % minimo de beneficio para activar la vigilancia de venta
+MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2  # % por debajo del precio actual al vender con orden limitada
+INTERVALO_SEGUNDOS = 5 * 60  # 5 minutos
+LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera (en USD equivalente) por valor
+
+# --- Lista de valores: mercado US (NYSE, SMART, USD) ---
+ACTIVOS_US = [
+    {"ticker": t, "exchange": "SMART", "currency": "USD", "mercado": "US"}
+    for t in ["LLY", "WMT", "JPM", "BRK B", "V", "JNJ", "XOM",
+              "MA", "ORCL", "BAC", "CAT", "ABBV", "KO",
+              "T", "AMC", "PATH", "JOBY", "PFE", "VZ", "F", "NOK",
+              "NU", "BMNR", "BBD", "HL", "ACHR", "ABEV", "MBGL"]
+]
+
+# --- Lista de valores: mercado EU (Euronext / Borsa Italiana, EUR) ---
+# exchange segun IBKR: AEB=Amsterdam, SBF=Paris, ENEXT.BE=Bruselas, BVME=Milan (Borsa Italiana)
+ACTIVOS_EU = [
+    {"ticker": "ASML", "exchange": "AEB",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "MC",    "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "TTE",   "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "RMS",   "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "OR",    "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "SU",    "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "SAN",   "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "AIR",   "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "AI",    "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "SAF",   "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "ABI",   "exchange": "ENEXT.BE","currency": "EUR", "mercado": "EU"},
+    {"ticker": "RACE",  "exchange": "BVME",    "currency": "EUR", "mercado": "EU"},
+    {"ticker": "BNP",   "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "PRX",   "exchange": "AEB",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "STLAM", "exchange": "BVME",    "currency": "EUR", "mercado": "EU"},
+    {"ticker": "UCG",   "exchange": "BVME",    "currency": "EUR", "mercado": "EU"},
+    {"ticker": "ISP",   "exchange": "BVME",    "currency": "EUR", "mercado": "EU"},
+    {"ticker": "CS",    "exchange": "SBF",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "INGA",  "exchange": "AEB",     "currency": "EUR", "mercado": "EU"},
+    {"ticker": "ARGX",  "exchange": "ENEXT.BE","currency": "EUR", "mercado": "EU"},
+]
+
+# --- Lista de valores: mercado HK (Hong Kong Stock Exchange, HKD) ---
+# Top 10 por capitalizacion, excluyendo dobles cotizaciones en Singapur/ADR en US.
+ACTIVOS_HK = [
+    {"ticker": "1299", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # AIA
+    {"ticker": "388",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # HKEX
+    {"ticker": "2388", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # BOC Hong Kong
+    {"ticker": "16",   "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Sun Hung Kai Properties
+    {"ticker": "2259", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Zijin Gold International
+    {"ticker": "992",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Lenovo
+    {"ticker": "19",   "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Swire Pacific
+    {"ticker": "1",    "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # CK Hutchison Holdings
+    {"ticker": "1109", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # China Resources Land
+    {"ticker": "762",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # China Unicom
+]
+
+# --- Lista de valores: mercado KR (Korea Exchange / KRX, KRW) ---
+# Top 10 por capitalizacion, excluyendo ADRs cotizados en US (KB, SHG, SKM, KEP...).
+ACTIVOS_KR = [
+    {"ticker": "005930", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Samsung Electronics
+    {"ticker": "000660", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # SK Hynix
+    {"ticker": "005380", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Hyundai Motor
+    {"ticker": "402340", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # SK Square
+    {"ticker": "373220", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # LG Energy Solution
+    {"ticker": "028260", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Samsung C&T
+    {"ticker": "032830", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Samsung Life Insurance
+    {"ticker": "329180", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # HD Hyundai Heavy Industries
+    {"ticker": "012330", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Hyundai Mobis
+    {"ticker": "000270", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Kia
+]
+
+ACTIVOS = ACTIVOS_US + ACTIVOS_HK + ACTIVOS_KR  # EU excluido: pendiente de suscripcion de datos de mercado
+
+TEMPORALIDADES = [
+    {"nombre": "1 minuto",   "barSize": "1 min",   "duration": "1 D",  "tipo": "corta"},
+    {"nombre": "5 minutos",  "barSize": "5 mins",  "duration": "2 D",  "tipo": "corta"},
+    {"nombre": "15 minutos", "barSize": "15 mins", "duration": "5 D",  "tipo": "corta"},
+    {"nombre": "30 minutos", "barSize": "30 mins", "duration": "10 D", "tipo": "corta"},
+    {"nombre": "1 hora",     "barSize": "1 hour",  "duration": "1 M",  "tipo": "corta"},
+    {"nombre": "1 dia",      "barSize": "1 day",   "duration": "1 Y",  "tipo": "larga"},
+    {"nombre": "1 semana",   "barSize": "1 week",  "duration": "5 Y",  "tipo": "larga"},
+]
+
+
+def log(mensaje):
+    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ahora}] {mensaje}")
+
+
+def es_horario_operativo(mercado):
+    """True si el mercado indicado ('US', 'EU', 'HK' o 'KR') esta en horario
+    operativo ahora mismo, de lunes a viernes."""
+    if mercado == "US":
+        ahora = datetime.now(ZONA_NY)
+        if ahora.weekday() >= 5:
+            return False
+        return HORA_INICIO_US <= ahora.time() < HORA_CIERRE_US
+    elif mercado == "EU":
+        ahora = datetime.now(ZONA_EU)
+        if ahora.weekday() >= 5:
+            return False
+        return HORA_INICIO_EU <= ahora.time() < HORA_CIERRE_EU
+    elif mercado == "HK":
+        ahora = datetime.now(ZONA_HK)
+        if ahora.weekday() >= 5:
+            return False
+        return HORA_INICIO_HK <= ahora.time() < HORA_CIERRE_HK
+    elif mercado == "KR":
+        ahora = datetime.now(ZONA_KR)
+        if ahora.weekday() >= 5:
+            return False
+        return HORA_INICIO_KR <= ahora.time() < HORA_CIERRE_KR
+    return False
+
+
+def minutos_hasta_cierre(mercado):
+    """Devuelve los minutos que faltan para el cierre de ese mercado, o None
+    si el mercado no esta operativo ahora mismo o no tiene cierre definido."""
+    if mercado not in CIERRE_POR_MERCADO:
+        return None
+    if not es_horario_operativo(mercado):
+        return None
+
+    zona, hora_cierre = CIERRE_POR_MERCADO[mercado]
+    ahora = datetime.now(zona)
+    cierre_hoy = ahora.replace(hour=hora_cierre.hour, minute=hora_cierre.minute,
+                                second=0, microsecond=0)
+    return (cierre_hoy - ahora).total_seconds() / 60
+
+
+def en_ventana_sin_compra(mercado):
+    """True si estamos dentro de los ultimos MINUTOS_SIN_COMPRAR_ANTES_CIERRE
+    minutos antes del cierre de ese mercado (no se compra nada en ese margen)."""
+    minutos = minutos_hasta_cierre(mercado)
+    if minutos is None:
+        return False
+    return 0 <= minutos <= MINUTOS_SIN_COMPRAR_ANTES_CIERRE
+
+
+def en_ventana_venta_forzada(mercado):
+    """True si estamos dentro de los ultimos MINUTOS_VENTA_FORZADA_ANTES_CIERRE
+    minutos antes del cierre de ese mercado (se vende todo lo que tenga
+    beneficio >= UMBRAL_BENEFICIO_PCT, sin mirar el MACD)."""
+    minutos = minutos_hasta_cierre(mercado)
+    if minutos is None:
+        return False
+    return 0 <= minutos <= MINUTOS_VENTA_FORZADA_ANTES_CIERRE
+
+
+def proxima_apertura(mercado):
+    """Devuelve el datetime (con zona horaria) de la proxima apertura de ese
+    mercado, saltando fines de semana."""
+    zona, hora_apertura = APERTURA_POR_MERCADO[mercado]
+    ahora = datetime.now(zona)
+    candidato = ahora.replace(hour=hora_apertura.hour, minute=hora_apertura.minute,
+                              second=0, microsecond=0)
+    if candidato <= ahora:
+        candidato += timedelta(days=1)
+    while candidato.weekday() >= 5:  # 5=sabado, 6=domingo
+        candidato += timedelta(days=1)
+    return candidato
+
+
+def segundos_hasta_pre_apertura():
+    """Con todos los mercados cerrados, calcula cuantos segundos hay que
+    esperar hasta MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR minutos antes de
+    la apertura mas proxima entre todos los mercados soportados."""
+    ahora = datetime.now(ZONA_NY)  # solo para tener un instante de referencia comparable
+    esperas = []
+    for mercado in APERTURA_POR_MERCADO:
+        apertura = proxima_apertura(mercado)
+        zona_mercado = APERTURA_POR_MERCADO[mercado][0]
+        ahora_mercado = datetime.now(zona_mercado)
+        segundos = (apertura - ahora_mercado).total_seconds()
+        esperas.append(segundos)
+
+    segundos_hasta_mas_proxima = min(esperas)
+    segundos_despertar = segundos_hasta_mas_proxima - (MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR * 60)
+    return max(segundos_despertar, 0)
+
+
+def en_alguna_ventana_pre_apertura():
+    """True si algun mercado esta dentro de los ultimos
+    MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR minutos antes de su apertura.
+    Evita que el bucle principal se quede reintentando sin avanzar de verdad
+    justo antes de que abra un mercado."""
+    for mercado in APERTURA_POR_MERCADO:
+        zona_mercado = APERTURA_POR_MERCADO[mercado][0]
+        ahora_mercado = datetime.now(zona_mercado)
+        apertura = proxima_apertura(mercado)
+        minutos_para_abrir = (apertura - ahora_mercado).total_seconds() / 60
+        if 0 <= minutos_para_abrir <= MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR:
+            return True
+    return False
+
+
+def calcular_macd(cierres, rapida=12, lenta=26, senal=9):
+    ema_rapida = cierres.ewm(span=rapida, adjust=False).mean()
+    ema_lenta = cierres.ewm(span=lenta, adjust=False).mean()
+    macd = ema_rapida - ema_lenta
+    linea_senal = macd.ewm(span=senal, adjust=False).mean()
+    histograma = macd - linea_senal
+    return macd, linea_senal, histograma
+
+
+def pedir_velas(ib, contrato, duration, barSize):
+    """Pide velas historicas con reintentos automaticos: si la respuesta viene
+    vacia o falla (por ejemplo por el error 162 de sesion conectada desde otra
+    IP, o por timeout de conexion), espera y reintenta antes de rendirse."""
+    for intento in range(1, INTENTOS_MAXIMOS + 1):
+        try:
+            velas = ib.reqHistoricalData(
+                contrato, endDateTime='', durationStr=duration,
+                barSizeSetting=barSize, whatToShow='TRADES',
+                useRTH=False, formatDate=1,
+            )
+        except Exception as e:
+            log(f"{contrato.symbol} - error al pedir datos en el intento {intento}/{INTENTOS_MAXIMOS}: "
+                f"{type(e).__name__}: {e}")
+            velas = []
+
+        if velas:
+            return velas
+
+        if intento < INTENTOS_MAXIMOS:
+            log(f"{contrato.symbol} - sin datos en el intento {intento}/{INTENTOS_MAXIMOS}, "
+                f"reintentando en {ESPERA_ENTRE_INTENTOS_SEGUNDOS}s...")
+            ib.sleep(ESPERA_ENTRE_INTENTOS_SEGUNDOS)
+
+    return []
+
+
+def crear_contrato(activo):
+    return Stock(activo["ticker"], activo["exchange"], activo["currency"])
+
+
+def analizar_activo(ib, activo):
+    contrato = crear_contrato(activo)
+    ib.qualifyContracts(contrato)
+
+    if not contrato.conId:
+        # El contrato ni siquiera se ha podido resolver (simbolo/exchange
+        # incorrecto, o falta de permisos en ese mercado). No tiene sentido
+        # gastar reintentos en pedir datos historicos de un contrato invalido.
+        return contrato, "SIMBOLO_NO_RESUELTO"
+
+    detalle = {}
+    for tf in TEMPORALIDADES:
+        velas = pedir_velas(ib, contrato, tf['duration'], tf['barSize'])
+        if len(velas) < 35:
+            detalle[tf['nombre']] = None
+            continue
+
+        cierres = pd.Series([v.close for v in velas])
+        macd, linea_senal, histograma = calcular_macd(cierres)
+
+        if tf['tipo'] == 'corta':
+            detalle[tf['nombre']] = bool(macd.iloc[-1] > linea_senal.iloc[-1])
+        else:
+            ultimas_3 = histograma.iloc[-3:]
+            detalle[tf['nombre']] = bool(ultimas_3.iloc[2] > ultimas_3.iloc[0])
+
+    faltan_datos = any(detalle[tf['nombre']] is None for tf in TEMPORALIDADES)
+    total_false = sum(1 for tf in TEMPORALIDADES if detalle[tf['nombre']] is False)
+    cortas_ok = all(detalle[tf['nombre']] for tf in TEMPORALIDADES
+                     if tf['tipo'] == 'corta' and detalle[tf['nombre']] is not None)
+    largas_ok = all(detalle[tf['nombre']] for tf in TEMPORALIDADES
+                     if tf['tipo'] == 'larga' and detalle[tf['nombre']] is not None)
+
+    if faltan_datos:
+        decision = "SIN_DATOS"
+    elif total_false == 0:
+        decision = "COMPRA"
+    elif total_false == 1:
+        decision = "COMPRA"
+    elif cortas_ok and not largas_ok:
+        decision = "BLOQUEADO"
+    else:
+        decision = "SIN_SENAL"
+
+    return contrato, decision
+
+
+def macd_5min_bajista(ib, contrato):
+    velas = pedir_velas(ib, contrato, '2 D', '5 mins')
+    if len(velas) < 35:
+        return None
+    cierres = pd.Series([v.close for v in velas])
+    macd, linea_senal, _ = calcular_macd(cierres)
+    return bool(macd.iloc[-1] < linea_senal.iloc[-1])
+
+
+def valor_en_usd(valor, currency):
+    """Convierte un valor a USD segun la divisa (USD, EUR, HKD, KRW)."""
+    if currency == "USD":
+        return valor
+    if currency == "EUR":
+        return valor * TIPO_CAMBIO_EUR_USD
+    if currency == "HKD":
+        return valor / TIPO_CAMBIO_USD_HKD
+    if currency == "KRW":
+        return valor / TIPO_CAMBIO_USD_KRW
+    return valor  # fallback, no deberia ocurrir con esta lista de activos
+
+
+COMISION_PCT = 0.0007        # 0.07% por operacion (compra o venta)
+MINIMO_COMISION_EUR = 1.0    # minimo 1 EUR por operacion, convertido a la divisa local
+
+
+def minimo_comision_en_moneda(currency):
+    """Convierte el minimo de 1 EUR a la divisa indicada."""
+    if currency == "EUR":
+        return MINIMO_COMISION_EUR
+    if currency == "USD":
+        return MINIMO_COMISION_EUR * TIPO_CAMBIO_EUR_USD
+    if currency == "HKD":
+        return MINIMO_COMISION_EUR * TIPO_CAMBIO_EUR_USD * TIPO_CAMBIO_USD_HKD
+    if currency == "KRW":
+        return MINIMO_COMISION_EUR * TIPO_CAMBIO_EUR_USD * TIPO_CAMBIO_USD_KRW
+    return MINIMO_COMISION_EUR
+
+
+def estimar_comision(valor_operacion, currency):
+    """Comision estimada de una operacion: 0.07% del valor, con minimo de
+    1 EUR (convertido a la divisa local)."""
+    return max(valor_operacion * COMISION_PCT, minimo_comision_en_moneda(currency))
+
+
+def revisar_ventas(ib):
+    ib.reqPositions()
+    ib.sleep(1)  # da tiempo a que la respuesta llegue antes de leer ib.positions()
+    posiciones = ib.positions()
+
+    if not posiciones:
+        log("VENTAS: no hay posiciones abiertas.")
+        return
+
+    posiciones_con_mercado = [
+        (CURRENCY_A_MERCADO.get(pos.contract.currency, "?"), pos)
+        for pos in posiciones if pos.position > 0
+    ]
+    posiciones_con_mercado.sort(key=lambda x: x[0])
+
+    mercado_actual = None
+    for mercado, pos in posiciones_con_mercado:
+        if mercado != mercado_actual:
+            log(f"\n########## VENTAS - MERCADO {mercado} ##########")
+            mercado_actual = mercado
+
+        contrato = pos.contract
+        cantidad = pos.position
+        coste_medio = pos.avgCost
+
+        # Salvaguarda explicita: nunca vender mas acciones de las que
+        # realmente hay en cartera (sin apalancamiento, sin venta en corto).
+        # Esto ya esta garantizado por construccion (cantidad = pos.position,
+        # y solo se procesan posiciones con position > 0), pero se deja esta
+        # comprobacion como defensa adicional ante cualquier cambio futuro.
+        if cantidad <= 0:
+            continue
+
+        # Nota: el contrato que llega de ib.positions() ya viene calificado
+        # (trae conId), asi que no hace falta volver a llamar a qualifyContracts.
+        velas_precio = pedir_velas(ib, contrato, '1 D', '1 min')
+        if not velas_precio:
+            log(f"VENTAS: {contrato.symbol} - no se pudo obtener precio actual, se omite.")
+            continue
+
+        precio_actual = velas_precio[-1].close
+        beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
+
+        # Comision total estimada para la operacion de ida y vuelta (compra +
+        # venta juntas), no dos comisiones separadas: 0.07% del valor de la
+        # posicion, con minimo de 1 EUR (convertido a la divisa local).
+        valor_compra = cantidad * coste_medio
+        comision_total = estimar_comision(valor_compra, contrato.currency)
+        comision_total_pct = comision_total / valor_compra * 100
+        beneficio_pct = beneficio_pct_bruto - comision_total_pct
+
+        # Prefijo comun con los datos base de la posicion, reutilizado en
+        # todas las lineas de log de esta operacion.
+        info_posicion = (f"{cantidad:.0f} acciones, precio medio {coste_medio:.4f} {contrato.currency}, "
+                          f"comision estimada {comision_total:.2f} {contrato.currency}")
+
+        if (mercado != "?" and en_ventana_venta_forzada(mercado)
+                and UMBRAL_BENEFICIO_PCT <= beneficio_pct <= BENEFICIO_MAX_VENTA_FORZADA_PCT):
+            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                f"(bruto {beneficio_pct_bruto:.2f}%), dentro de los ultimos "
+                f"{MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del cierre de {mercado} -> VENTA FORZADA (orden limitada).")
+            precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
+            orden = LimitOrder('SELL', cantidad, precio_limite)
+            trade = ib.placeOrder(contrato, orden)
+            ib.sleep(3)
+            log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
+                f"estado: {trade.orderStatus.status}")
+            continue
+
+        if beneficio_pct < UMBRAL_BENEFICIO_PCT:
+            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
+            continue
+
+        bajista = macd_5min_bajista(ib, contrato)
+        if bajista is None:
+            log(f"VENTAS: {contrato.symbol} - {info_posicion} - datos insuficientes para MACD 5min, se mantiene por precaucion.")
+            continue
+
+        if bajista:
+            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden limitada).")
+            precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
+            orden = LimitOrder('SELL', cantidad, precio_limite)
+            trade = ib.placeOrder(contrato, orden)
+            ib.sleep(3)
+            log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
+                f"estado: {trade.orderStatus.status}")
+        else:
+            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
+
+
+def obtener_valor_total_cartera_usd(ib):
+    """Devuelve el NetLiquidation total de la cuenta en USD."""
+    try:
+        resumen = ib.accountSummary()
+    except Exception as e:
+        log(f"No se pudo obtener el resumen de la cuenta: {e}")
+        return None
+    for item in resumen:
+        if item.tag == 'NetLiquidation' and item.currency == 'USD':
+            return float(item.value)
+    for item in resumen:
+        if item.tag == 'NetLiquidation':
+            return float(item.value)
+    return None
+
+
+def obtener_valor_posicion_actual_usd(posiciones, ticker, precio_actual, currency):
+    """Devuelve el valor en USD de la posicion actual de un ticker (0 si no hay)."""
+    for pos in posiciones:
+        if pos.contract.symbol == ticker and pos.position > 0:
+            return valor_en_usd(pos.position * precio_actual, currency)
+    return 0.0
+
+
+def tick_size_krx(precio):
+    """Devuelve el incremento de precio minimo (tick) que exige KRX segun
+    el rango de precio del valor. Tabla oficial de Korea Exchange."""
+    if precio < 2000:
+        return 1
+    elif precio < 5000:
+        return 5
+    elif precio < 20000:
+        return 10
+    elif precio < 50000:
+        return 50
+    elif precio < 200000:
+        return 100
+    elif precio < 500000:
+        return 500
+    else:
+        return 1000
+
+
+def calcular_precio_limite_venta(precio_actual, currency):
+    """Calcula el precio limite para una orden de venta: un margen pequeno
+    por debajo del precio actual, para seguir siendo ejecutable rapido pero
+    con proteccion frente a deslizamientos grandes."""
+    precio_limite = precio_actual * (1 - MARGEN_ORDEN_LIMITADA_VENTA_PCT / 100)
+    if currency == "KRW":
+        # KRX exige que el precio caiga en un "escalon" (tick) concreto
+        # segun el rango de precio; redondeamos hacia abajo al escalon
+        # valido mas cercano (mas favorable para que la venta se ejecute).
+        tick = tick_size_krx(precio_limite)
+        return int((precio_limite // tick) * tick)
+    return round(precio_limite, 2)
+
+
+def obtener_incremento_lote(ib, contrato):
+    """Consulta a IBKR el tamano minimo de lote/incremento para un contrato
+    (relevante sobre todo en Hong Kong, donde las acciones se compran en
+    lotes fijos, no en unidades sueltas). Devuelve (minSize, sizeIncrement)
+    como ENTEROS limpios (los lotes de bolsa siempre son numeros enteros de
+    acciones; IBKR a veces devuelve estos valores con ruido de coma flotante,
+    p.ej. 0.999999999 en vez de 1.0, que hay que corregir aqui)."""
+    try:
+        detalles = ib.reqContractDetails(contrato)
+        if detalles:
+            cd = detalles[0]
+            min_size = round(float(getattr(cd, 'minSize', 0) or 1))
+            incremento = round(float(getattr(cd, 'sizeIncrement', 0) or 1))
+            if min_size <= 0:
+                min_size = 1
+            if incremento <= 0:
+                incremento = 1
+            return min_size, incremento
+    except Exception:
+        pass
+    return 1, 1
+
+
+def revisar_compras(ib):
+    valor_total_cartera_usd = obtener_valor_total_cartera_usd(ib)
+    if valor_total_cartera_usd is None:
+        log("COMPRAS: no se pudo obtener el valor total de la cartera, se omite este ciclo de compras.")
+        return
+
+    limite_por_valor_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_PCT / 100)
+
+    ib.reqPositions()
+    ib.sleep(1)  # da tiempo a que la respuesta llegue antes de leer ib.positions()
+    posiciones_actuales = ib.positions()
+
+    mercados_ya_avisados = set()
+    mercado_actual = None
+    contadores = {"analizados": 0, "senales": 0, "errores": 0}
+
+    def imprimir_resumen_mercado():
+        if mercado_actual is not None:
+            log(f"{mercado_actual}: {contadores['analizados']} analizados, "
+                f"{contadores['senales']} señales de compra, {contadores['errores']} errores.")
+
+    for activo in ACTIVOS:
+        if activo["mercado"] != mercado_actual:
+            imprimir_resumen_mercado()
+            log(f"\n########## COMPRAS - MERCADO {activo['mercado']} ##########")
+            mercado_actual = activo["mercado"]
+            contadores = {"analizados": 0, "senales": 0, "errores": 0}
+
+        if not es_horario_operativo(activo["mercado"]):
+            continue  # este valor esta fuera de horario en su mercado, se omite en este ciclo
+
+        contadores["analizados"] += 1
+        ticker = activo["ticker"]
+        try:
+            contrato, decision = analizar_activo(ib, activo)
+        except Exception as e:
+            log(f"COMPRAS: {ticker} ({activo['mercado']}) - ERROR al analizar: {e}")
+            contadores["errores"] += 1
+            continue
+
+        if decision == "SIMBOLO_NO_RESUELTO":
+            log(f"COMPRAS: {ticker} ({activo['mercado']}) - simbolo/exchange no reconocido por IBKR "
+                f"(revisar permisos de trading en ese mercado o el codigo de simbolo), se omite.")
+            contadores["errores"] += 1
+            continue
+
+        if decision != "COMPRA":
+            continue
+
+        contadores["senales"] += 1
+
+        velas_precio = pedir_velas(ib, contrato, '1 D', '1 min')
+        if not velas_precio:
+            log(f"COMPRAS: {ticker} - senal de COMPRA pero no se pudo obtener precio, se omite.")
+            continue
+
+        precio_actual = velas_precio[-1].close
+        currency = activo["currency"]
+
+        if en_ventana_sin_compra(activo["mercado"]):
+            # Dentro de los ultimos MINUTOS_SIN_COMPRAR_ANTES_CIERRE minutos:
+            # solo se compra si ya se tiene el valor Y el precio actual es
+            # MENOR que el coste medio (es decir, comprar ahora bajaria el
+            # precio medio de adquisicion). En cualquier otro caso, se omite.
+            pos_existente = next((p for p in posiciones_actuales
+                                   if p.contract.symbol == ticker and p.position > 0), None)
+
+            if pos_existente is None or precio_actual >= pos_existente.avgCost:
+                if activo["mercado"] not in mercados_ya_avisados:
+                    log(f"COMPRAS: mercado {activo['mercado']} dentro de la ventana de no-compra "
+                        f"(ultimos {MINUTOS_SIN_COMPRAR_ANTES_CIERRE} min antes del cierre) -> solo se compra "
+                        f"si promedia a la baja una posicion existente.")
+                    mercados_ya_avisados.add(activo["mercado"])
+                continue
+
+            log(f"COMPRAS: {ticker} - dentro de la ventana de no-compra, pero el precio actual "
+                f"({precio_actual} {currency}) es menor que el coste medio existente "
+                f"({pos_existente.avgCost:.4f} {currency}) -> se permite comprar para promediar a la baja.")
+
+        valor_posicion_actual_usd = obtener_valor_posicion_actual_usd(posiciones_actuales, ticker, precio_actual, currency)
+        margen_disponible_usd = limite_por_valor_usd - valor_posicion_actual_usd
+
+        if margen_disponible_usd <= 0:
+            log(f"COMPRAS: {ticker} - senal de COMPRA pero ya tiene {valor_posicion_actual_usd:.2f} USD "
+                f"({LIMITE_EXPOSICION_PCT}% del limite = {limite_por_valor_usd:.2f} USD alcanzado) -> se omite.")
+            continue
+
+        # Presupuesto maximo por operacion: equivalente a IMPORTE_EUROS, en la
+        # divisa del propio valor, capado ademas por el margen disponible del
+        # limite del 15% (convertido a esa divisa).
+        if currency == "USD":
+            presupuesto_operacion = IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD
+            margen_disponible_moneda = margen_disponible_usd
+        elif currency == "EUR":
+            presupuesto_operacion = IMPORTE_EUROS
+            margen_disponible_moneda = margen_disponible_usd / TIPO_CAMBIO_EUR_USD
+        elif currency == "HKD":
+            presupuesto_operacion = IMPORTE_EUROS_HK * TIPO_CAMBIO_EUR_USD * TIPO_CAMBIO_USD_HKD
+            margen_disponible_moneda = margen_disponible_usd * TIPO_CAMBIO_USD_HKD
+        elif currency == "KRW":
+            presupuesto_operacion = IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD * TIPO_CAMBIO_USD_KRW
+            margen_disponible_moneda = margen_disponible_usd * TIPO_CAMBIO_USD_KRW
+        else:
+            presupuesto_operacion = 0
+            margen_disponible_moneda = 0
+
+        importe_a_usar = min(presupuesto_operacion, margen_disponible_moneda)
+        cantidad_bruta = int(importe_a_usar // precio_actual)
+
+        min_size, incremento = obtener_incremento_lote(ib, contrato)
+        # Redondeamos hacia abajo al multiplo de lote mas cercano, y si no
+        # llega ni a un lote minimo, no se compra (evita el error 388 de
+        # IBKR: "tamano de orden menor al minimo requerido").
+        cantidad = int((cantidad_bruta // incremento) * incremento)
+        if cantidad < min_size:
+            cantidad = 0
+
+        if cantidad == 0:
+            log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
+                f"({importe_a_usar:.2f} {currency}) no alcanza para 1 lote minimo "
+                f"({min_size} unidades, incremento {incremento}) al precio actual "
+                f"({precio_actual} {currency}), se omite.")
+            continue
+
+        log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad} acciones "
+            f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
+            f"limite: {limite_por_valor_usd:.2f} USD).")
+        orden = MarketOrder('BUY', cantidad)
+        trade = ib.placeOrder(contrato, orden)
+        ib.sleep(3)
+        log(f"COMPRAS: {ticker} - estado de la orden: {trade.orderStatus.status}")
+
+    imprimir_resumen_mercado()  # resumen del ultimo mercado procesado en el bucle
+
+
+def justo_cerro_mercado(mercado):
+    """True si el mercado ha cerrado en las ultimas horas (con un margen
+    amplio para no perder el resumen si el bot estuvo desconectado o
+    congelado justo en el momento del cierre). El control de duplicados
+    (resumenes_enviados_hoy) evita que se dispare mas de una vez al dia."""
+    if mercado not in CIERRE_POR_MERCADO:
+        return False
+    zona, hora_cierre = CIERRE_POR_MERCADO[mercado]
+    ahora = datetime.now(zona)
+    if ahora.weekday() >= 5:
+        return False
+    cierre_hoy = ahora.replace(hour=hora_cierre.hour, minute=hora_cierre.minute,
+                                second=0, microsecond=0)
+    minutos_desde_cierre = (ahora - cierre_hoy).total_seconds() / 60
+    margen = 240  # 4 horas: amplio margen de seguridad frente a caidas/congelaciones
+    return 0 <= minutos_desde_cierre <= margen
+
+
+def valor_en_eur(valor, currency):
+    """Convierte un valor a EUR, pasando por USD como paso intermedio."""
+    return valor_en_usd(valor, currency) / TIPO_CAMBIO_EUR_USD
+
+
+def generar_resumen_cierre_mercado(ib, mercado):
+    """Genera y muestra una tabla con las posiciones abiertas (desde cuando,
+    cantidad, coste medio con comision estimada) y las operaciones cerradas
+    hoy (abierta desde, cerrada a las, beneficio % aprox., ganancia), para
+    los valores del mercado indicado. Los importes se muestran en moneda
+    local del mercado y tambien su equivalente en EUR."""
+    monedas_del_mercado = [c for c, m in CURRENCY_A_MERCADO.items() if m == mercado]
+
+    def clave_orden(symbol):
+        """Orden numerico si el simbolo son solo digitos (HK/Corea), alfabetico si no (US)."""
+        return (0, int(symbol)) if symbol.isdigit() else (1, symbol)
+
+    posiciones = sorted(
+        [p for p in ib.positions()
+         if p.position > 0 and p.contract.currency in monedas_del_mercado],
+        key=lambda p: clave_orden(p.contract.symbol)
+    )
+
+    try:
+        ejecuciones = ib.reqExecutions(ExecutionFilter())
+    except Exception as e:
+        log(f"RESUMEN {mercado}: no se pudieron obtener las ejecuciones ({e}), se omite el resumen.")
+        return
+
+    # Agrupamos las ejecuciones por simbolo UNA SOLA VEZ (en vez de recorrer
+    # la lista completa por cada posicion/simbolo), para que esto no se
+    # vuelva mas lento cada dia segun crece el historial de la cuenta.
+    compras_por_simbolo = defaultdict(list)
+    ventas_por_simbolo = defaultdict(list)
+    for e in ejecuciones:
+        if e.contract.currency not in monedas_del_mercado:
+            continue
+        if e.execution.side == 'BOT':
+            compras_por_simbolo[e.contract.symbol].append(e)
+        elif e.execution.side == 'SLD':
+            ventas_por_simbolo[e.contract.symbol].append(e)
+
+    hoy = datetime.now().date()
+
+    log(f"\n========== RESUMEN DE CIERRE - MERCADO {mercado} ==========")
+
+    # --- Posiciones abiertas ---
+    log("--- Posiciones abiertas ---")
+    log(f"{'Simbolo':<10}{'Abierta desde':<20}{'Cantidad':>10}{'Coste medio c/com.':>20}"
+        f"{'Invertido (local)':>20}{'Invertido (EUR)':>18}{'Beneficio %':>13}")
+    if not posiciones:
+        log("(ninguna)")
+
+    total_invertido_eur_acumulado = 0.0
+    total_valor_actual_eur_acumulado = 0.0
+
+    for pos in posiciones:
+        symbol = pos.contract.symbol
+        compras = compras_por_simbolo.get(symbol, [])
+        abierta_desde = min((e.execution.time for e in compras), default=None)
+        abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
+
+        comision_estimada = estimar_comision(pos.position * pos.avgCost, pos.contract.currency)
+        coste_medio_con_comision = pos.avgCost + (comision_estimada / pos.position)
+        total_invertido = pos.position * coste_medio_con_comision
+        total_invertido_eur = valor_en_eur(total_invertido, pos.contract.currency)
+        total_invertido_eur_acumulado += total_invertido_eur
+
+        # Precio actual, para calcular el beneficio/perdida no realizado de
+        # cada posicion abierta.
+        velas_precio = pedir_velas(ib, pos.contract, '1 D', '1 min')
+        if velas_precio:
+            precio_actual = velas_precio[-1].close
+            valor_actual = pos.position * precio_actual
+            valor_actual_eur = valor_en_eur(valor_actual, pos.contract.currency)
+            total_valor_actual_eur_acumulado += valor_actual_eur
+            beneficio_pct_pos = (valor_actual - total_invertido) / total_invertido * 100
+            beneficio_str = f"{beneficio_pct_pos:.2f}%"
+        else:
+            total_valor_actual_eur_acumulado += total_invertido_eur  # fallback: asumimos sin cambio
+            beneficio_str = "N/D"
+
+        log(f"{symbol:<10}{abierta_desde_str:<20}{pos.position:>10.0f}{coste_medio_con_comision:>20.4f}"
+            f"{total_invertido:>20.2f}{total_invertido_eur:>18.2f}{beneficio_str:>13}")
+
+    if posiciones:
+        beneficio_pct_total = ((total_valor_actual_eur_acumulado - total_invertido_eur_acumulado)
+                                / total_invertido_eur_acumulado * 100) if total_invertido_eur_acumulado else 0.0
+        log("-" * 90)
+        log(f"{'TOTAL':<10}{'':<20}{'':<10}{'':<20}{'':<20}{total_invertido_eur_acumulado:>18.2f}{beneficio_pct_total:>12.2f}%")
+        log("(Total invertido en EUR y beneficio/perdida no realizado global de todas las posiciones abiertas.)")
+
+    # --- Operaciones cerradas hoy ---
+    log("--- Operaciones cerradas hoy ---")
+    log(f"{'Simbolo':<10}{'Abierta desde':<18}{'Cerrada a las':<18}{'Cantidad':>10}"
+        f"{'Coste medio':>14}{'Invertido':>14}{'Beneficio %':>13}{'Ganancia':>12}")
+
+    simbolos_con_venta_hoy = sorted(
+        (symbol for symbol, ventas in ventas_por_simbolo.items()
+         if any(e.execution.time.date() == hoy for e in ventas)),
+        key=clave_orden
+    )
+
+    if not simbolos_con_venta_hoy:
+        log("(ninguna)")
+
+    for symbol in simbolos_con_venta_hoy:
+        ventas_hoy = [e for e in ventas_por_simbolo.get(symbol, [])
+                      if e.execution.time.date() == hoy]
+        cerrada_a_las = max(e.execution.time for e in ventas_hoy)
+
+        # Solo contamos compras ANTERIORES a la ultima venta del dia: si el
+        # bot volvio a comprar este valor DESPUES de venderlo (una ronda
+        # nueva, quiza aun abierta), esas compras no deben mezclarse con el
+        # calculo de beneficio de la ronda ya cerrada.
+        compras = [e for e in compras_por_simbolo.get(symbol, [])
+                   if e.execution.time <= cerrada_a_las]
+
+        abierta_desde = min((e.execution.time for e in compras), default=None)
+
+        valor_base = sum(abs(e.execution.shares) * e.execution.avgPrice for e in ventas_hoy)
+        cantidad_vendida = sum(abs(e.execution.shares) for e in ventas_hoy)
+        total_comprado_acciones = sum(e.execution.shares for e in compras)
+        total_comprado_valor = sum(e.execution.shares * e.execution.avgPrice for e in compras)
+
+        abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
+        cerrada_a_las_str = cerrada_a_las.strftime("%Y-%m-%d %H:%M")
+
+        if total_comprado_acciones <= 0:
+            # No tenemos en esta sesion el historial de compra de este valor
+            # (reqExecutions no siempre trae todo el pasado) -> no podemos
+            # calcular el beneficio con fiabilidad, lo marcamos como N/D en
+            # vez de mostrar un 0% enganoso.
+            log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.0f}"
+                f"{'N/D':>14}{'N/D':>14}{'N/D':>13}{'N/D':>12}")
+            continue
+
+        coste_medio_compra = total_comprado_valor / total_comprado_acciones
+        total_invertido = cantidad_vendida * coste_medio_compra
+
+        # Ganancia calculada directamente a partir de precios y cantidades
+        # (no depende de commissionReport.realizedPNL, que puede venir vacio
+        # tras una reconexion): venta - coste de compra - comision estimada.
+        ganancia_bruta = valor_base - total_invertido
+        comision_estimada = estimar_comision(total_invertido, ventas_hoy[0].contract.currency)
+        ganancia = ganancia_bruta - comision_estimada
+        beneficio_pct = (ganancia / total_invertido * 100) if total_invertido else 0.0
+
+        log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.0f}"
+            f"{coste_medio_compra:>14.4f}{total_invertido:>14.2f}{beneficio_pct:>12.2f}%{ganancia:>12.2f}")
+
+    log("=" * 60)
+    log("(Beneficio % es aproximado: se calcula sobre el valor de la venta, "
+        "no lote a lote, cuando ha habido varias compras/ventas parciales del mismo valor.)")
+
+
+def ciclo_completo(ib):
+    log("=" * 60)
+    log("Iniciando nuevo ciclo de revision.")
+    revisar_ventas(ib)
+    revisar_compras(ib)
+    log("Ciclo completado.")
+
+
+def evitar_suspension_windows():
+    """Pide a Windows que no suspenda el sistema ni el display mientras el
+    bot esta activo. No evita un cierre de tapa forzado, pero si la mayoria
+    de mecanismos de ahorro de energia por inactividad, incluyendo el modo
+    de suspension moderna en portatiles. No tiene efecto en otros sistemas
+    operativos."""
+    try:
+        import ctypes
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ES_DISPLAY_REQUIRED = 0x00000002
+        ES_AWAYMODE_REQUIRED = 0x00000040
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_AWAYMODE_REQUIRED
+        )
+        log("Suspension automatica de Windows desactivada (sistema, pantalla y modo ausente) "
+            "mientras el bot este en marcha.")
+    except Exception:
+        pass  # no es Windows, o no se pudo aplicar; no es critico para el funcionamiento
+
+
+def conexion_esta_viva(ib):
+    """Comprueba activamente si la conexion funciona de verdad, en vez de
+    fiarse solo de ib.isConnected() (que puede no detectar ciertos cortes
+    bruscos, como un WinError 10054, y seguir reportando 'conectado' aunque
+    ya no lo este)."""
+    if not ib.isConnected():
+        return False
+    try:
+        ib.reqCurrentTime()
+        return True
+    except Exception:
+        return False
+
+
+def main():
+    evitar_suspension_windows()
+
+    ib = IB()
+    ib.connect('127.0.0.1', 4002, clientId=1)
+    ib.RequestTimeout = 30  # segundos: evita que cualquier peticion se quede colgada sin limite
+
+    resumenes_enviados_hoy = set()  # claves (mercado, fecha) para no repetir el resumen
+
+    try:
+        while True:
+            if not conexion_esta_viva(ib):
+                log("Conexion con IB Gateway perdida. Intentando reconectar...")
+                try:
+                    ib.disconnect()
+                except Exception:
+                    pass
+                try:
+                    ib.connect('127.0.0.1', 4002, clientId=1)
+                    ib.RequestTimeout = 30
+                    log("Reconexion con IB Gateway completada.")
+                except Exception as e:
+                    log(f"No se pudo reconectar con IB Gateway: {e}. "
+                        f"Se reintentara en la siguiente vuelta.")
+                    log(f"Esperando {INTERVALO_SEGUNDOS // 60} minutos hasta la siguiente revision...")
+                    time.sleep(INTERVALO_SEGUNDOS)
+                    continue
+
+            hoy = datetime.now().date()
+            for mercado in ("US", "HK", "KR"):
+                if justo_cerro_mercado(mercado) and (mercado, hoy) not in resumenes_enviados_hoy:
+                    try:
+                        generar_resumen_cierre_mercado(ib, mercado)
+                    except Exception as e:
+                        log(f"RESUMEN {mercado}: error al generar el resumen: {e}")
+                    resumenes_enviados_hoy.add((mercado, hoy))
+
+            hay_mercado_abierto = (es_horario_operativo("US")
+                                    or es_horario_operativo("HK") or es_horario_operativo("KR")
+                                    or en_alguna_ventana_pre_apertura())
+
+            if not hay_mercado_abierto:
+                segundos_espera = segundos_hasta_pre_apertura()
+                segundos_espera = max(segundos_espera, 60)  # suelo minimo: nunca esperar casi 0
+                minutos_espera = segundos_espera / 60
+                log(f"Fuera de horario operativo en todos los mercados (US, HK, KR). "
+                    f"Esperando {minutos_espera:.0f} minutos hasta {MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR} "
+                    f"min antes de la proxima apertura...")
+                time.sleep(segundos_espera)
+                continue
+
+            try:
+                ciclo_completo(ib)
+            except Exception as e:
+                log(f"ERROR en el ciclo: {e}")
+
+            log(f"Esperando {INTERVALO_SEGUNDOS // 60} minutos hasta la siguiente revision...")
+            time.sleep(INTERVALO_SEGUNDOS)
+    except KeyboardInterrupt:
+        log("Detenido manualmente por el usuario (Ctrl+C).")
+    finally:
+        ib.disconnect()
+        log("Desconectado de IB Gateway.")
+
+
+if __name__ == "__main__":
+    SEGUNDOS_ESPERA_TRAS_FALLO = 15
+
+    while True:
+        try:
+            main()
+            break  # main() termino de forma normal (Ctrl+C gestionado dentro) -> salir del todo
+        except KeyboardInterrupt:
+            break  # parada manual justo al arrancar/conectar, antes de entrar en el bucle interno
+        except Exception as e:
+            log(f"ERROR FATAL fuera del ciclo principal: {e}. "
+                f"Reiniciando el bot en {SEGUNDOS_ESPERA_TRAS_FALLO} segundos...")
+            time.sleep(SEGUNDOS_ESPERA_TRAS_FALLO)
