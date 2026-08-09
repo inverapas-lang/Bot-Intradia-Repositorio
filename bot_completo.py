@@ -15,8 +15,10 @@ En cada ciclo:
      (a partir de +0.5% de beneficio, vender si el MACD de 5 min esta bajista;
      sin stop loss de perdida).
   2. Escanea todos los valores buscando senal de COMPRA (MACD en 7 temporalidades,
-     con la excepcion de "solo 1 de 7 en contra"). Cada valor solo se analiza si
-     su mercado esta en horario operativo en ese momento.
+     con la excepcion de "solo 1 de 7 en contra"; o directamente si las 4
+     temporalidades cortas -1min, 5min, 15min y 30min- estan todas alcistas).
+     Cada valor solo se analiza si su mercado esta en horario operativo en
+     ese momento.
   3. Compra (hasta 1000 EUR o equivalente) cualquier valor con senal de
      COMPRA, respetando el limite del 15% del valor total de la cartera por
      valor (calculado en USD equivalente). En el mercado US se permite
@@ -220,6 +222,10 @@ TEMPORALIDADES = [
     {"nombre": "1 semana",   "barSize": "1 week",  "duration": "5 Y",  "tipo": "larga"},
 ]
 
+# Atajo de compra: si estas 4 temporalidades cortas estan todas alcistas,
+# se compra sin mirar el resto (vease analizar_activo).
+NOMBRES_4_CORTAS = ["1 minuto", "5 minutos", "15 minutos", "30 minutos"]
+
 
 def log(mensaje):
     ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -417,6 +423,14 @@ def analizar_activo(ib, activo):
             ultimas_3 = histograma.iloc[-3:]
             detalle[tf['nombre']] = bool(ultimas_3.iloc[2] > ultimas_3.iloc[0])
 
+    # Atajo: si las 4 temporalidades mas cortas (1min, 5min, 15min, 30min)
+    # estan todas alcistas, se compra directamente, sin mirar 1h/dia/semana
+    # ni la regla de "maximo 1 de 7 en contra" de mas abajo.
+    cuatro_cortas_alcistas = (
+        all(detalle[n] is not None for n in NOMBRES_4_CORTAS)
+        and all(detalle[n] for n in NOMBRES_4_CORTAS)
+    )
+
     faltan_datos = any(detalle[tf['nombre']] is None for tf in TEMPORALIDADES)
     total_false = sum(1 for tf in TEMPORALIDADES if detalle[tf['nombre']] is False)
     cortas_ok = all(detalle[tf['nombre']] for tf in TEMPORALIDADES
@@ -424,7 +438,9 @@ def analizar_activo(ib, activo):
     largas_ok = all(detalle[tf['nombre']] for tf in TEMPORALIDADES
                      if tf['tipo'] == 'larga' and detalle[tf['nombre']] is not None)
 
-    if faltan_datos:
+    if cuatro_cortas_alcistas:
+        decision = "COMPRA"
+    elif faltan_datos:
         decision = "SIN_DATOS"
     elif total_false == 0:
         decision = "COMPRA"
