@@ -130,7 +130,27 @@ ACTIVOS_US = [
               "V",      # Visa
               "MA",     # Mastercard
               "UNH",    # UnitedHealth Group
-              "PFE"]    # Pfizer
+              "PFE",    # Pfizer
+              "AAPL",   # Apple Inc.
+              "MSFT",   # Microsoft Corporation
+              "NVDA",   # NVIDIA Corporation
+              "GOOGL",  # Alphabet Inc.
+              "AMZN",   # Amazon.com, Inc.
+              "META",   # Meta Platforms, Inc.
+              "AVGO",   # Broadcom Inc.
+              "TSLA",   # Tesla, Inc.
+              "COST",   # Costco Wholesale Corporation
+              "AMD",    # Advanced Micro Devices, Inc.
+              "NFLX",   # Netflix, Inc.
+              "ASML",   # ASML Holding N.V.
+              "QCOM",   # Qualcomm Incorporated
+              "INTC",   # Intel Corporation
+              "HON",    # Honeywell International Inc.
+              "CSCO",   # Cisco Systems, Inc.
+              "CMCSA",  # Comcast Corporation
+              "AMGN",   # Amgen Inc.
+              "ISRG",   # Intuitive Surgical, Inc.
+              "AMAT"]   # Applied Materials, Inc.
 ]
 
 # --- Lista de valores: mercado EU (Euronext / Borsa Italiana, EUR) ---
