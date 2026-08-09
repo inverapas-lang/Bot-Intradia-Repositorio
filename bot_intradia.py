@@ -1098,13 +1098,23 @@ def main():
                 esperar_pumpeando(ib, segundos_espera)
                 continue
 
+            inicio_ciclo = time.monotonic()
             try:
                 ciclo_completo(ib)
             except Exception as e:
                 log(f"ERROR en el ciclo: {e}")
+            duracion_ciclo = time.monotonic() - inicio_ciclo
 
-            log(f"Esperando {INTERVALO_SEGUNDOS // 60} minutos hasta la siguiente revision...")
-            esperar_pumpeando(ib, INTERVALO_SEGUNDOS)
+            if duracion_ciclo > INTERVALO_SEGUNDOS:
+                log(f"AVISO: el ciclo ha tardado {duracion_ciclo:.0f}s, mas que el intervalo "
+                    f"configurado ({INTERVALO_SEGUNDOS}s). Se pasa a la siguiente revision sin esperar; "
+                    f"considera subir INTERVALO_SEGUNDOS o reducir el numero de valores/temporalidades.")
+                segundos_espera_siguiente = 0
+            else:
+                segundos_espera_siguiente = INTERVALO_SEGUNDOS - duracion_ciclo
+                log(f"Ciclo completado en {duracion_ciclo:.0f}s. Esperando "
+                    f"{segundos_espera_siguiente:.0f}s hasta la siguiente revision...")
+            esperar_pumpeando(ib, segundos_espera_siguiente)
     except KeyboardInterrupt:
         log("Detenido manualmente por el usuario (Ctrl+C).")
     finally:
