@@ -508,71 +508,82 @@ def revisar_ventas(ib):
         cantidad = pos.position
         coste_medio = pos.avgCost
 
-        # Salvaguarda explicita: nunca vender mas acciones de las que
-        # realmente hay en cartera (sin apalancamiento, sin venta en corto).
-        # Esto ya esta garantizado por construccion (cantidad = pos.position,
-        # y solo se procesan posiciones con position > 0), pero se deja esta
-        # comprobacion como defensa adicional ante cualquier cambio futuro.
-        if cantidad <= 0:
-            continue
+        try:
+            # Salvaguarda explicita: nunca vender mas acciones de las que
+            # realmente hay en cartera (sin apalancamiento, sin venta en corto).
+            # Esto ya esta garantizado por construccion (cantidad = pos.position,
+            # y solo se procesan posiciones con position > 0), pero se deja esta
+            # comprobacion como defensa adicional ante cualquier cambio futuro.
+            if cantidad <= 0:
+                continue
 
-        # Nota: el contrato que llega de ib.positions() ya viene calificado
-        # (trae conId), asi que no hace falta volver a llamar a qualifyContracts.
-        velas_precio = pedir_velas(ib, contrato, '1 D', '1 min')
-        if not velas_precio:
-            log(f"VENTAS: {contrato.symbol} - no se pudo obtener precio actual, se omite.")
-            continue
+            if coste_medio <= 0:
+                log(f"VENTAS: {contrato.symbol} - precio medio invalido ({coste_medio}), se omite por seguridad.")
+                continue
 
-        precio_actual = velas_precio[-1].close
-        beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
+            # Nota: el contrato que llega de ib.positions() ya viene calificado
+            # (trae conId), asi que no hace falta volver a llamar a qualifyContracts.
+            velas_precio = pedir_velas(ib, contrato, '1 D', '1 min')
+            if not velas_precio:
+                log(f"VENTAS: {contrato.symbol} - no se pudo obtener precio actual, se omite.")
+                continue
 
-        # Comision total estimada para la operacion de ida y vuelta (compra +
-        # venta juntas), no dos comisiones separadas: 0.07% del valor de la
-        # posicion, con minimo de 1 EUR (convertido a la divisa local).
-        valor_compra = cantidad * coste_medio
-        comision_total = estimar_comision(valor_compra, contrato.currency)
-        comision_total_pct = comision_total / valor_compra * 100
-        beneficio_pct = beneficio_pct_bruto - comision_total_pct
+            precio_actual = velas_precio[-1].close
+            beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
 
-        # Prefijo comun con los datos base de la posicion, reutilizado en
-        # todas las lineas de log de esta operacion.
-        info_posicion = (f"{cantidad:g} acciones, precio medio {coste_medio:.4f} {contrato.currency}, "
-                          f"comision estimada {comision_total:.2f} {contrato.currency}")
+            # Comision total estimada para la operacion de ida y vuelta (compra +
+            # venta juntas), no dos comisiones separadas: 0.07% del valor de la
+            # posicion, con minimo de 1 EUR (convertido a la divisa local).
+            valor_compra = cantidad * coste_medio
+            comision_total = estimar_comision(valor_compra, contrato.currency)
+            comision_total_pct = comision_total / valor_compra * 100
+            beneficio_pct = beneficio_pct_bruto - comision_total_pct
 
-        if (mercado != "?" and en_ventana_venta_forzada(mercado)
-                and UMBRAL_BENEFICIO_PCT <= beneficio_pct <= BENEFICIO_MAX_VENTA_FORZADA_PCT):
-            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                f"(bruto {beneficio_pct_bruto:.2f}%), dentro de los ultimos "
-                f"{MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del cierre de {mercado} -> VENTA FORZADA (orden limitada).")
-            precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
-            orden = crear_orden_limitada('SELL', cantidad, precio_limite)
-            trade = ib.placeOrder(contrato, orden)
-            ib.sleep(3)
-            log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
-                f"estado: {trade.orderStatus.status}")
-            continue
+            # Prefijo comun con los datos base de la posicion, reutilizado en
+            # todas las lineas de log de esta operacion.
+            info_posicion = (f"{cantidad:g} acciones, precio medio {coste_medio:.4f} {contrato.currency}, "
+                              f"comision estimada {comision_total:.2f} {contrato.currency}")
 
-        if beneficio_pct < UMBRAL_BENEFICIO_PCT:
-            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
-            continue
+            if (mercado != "?" and en_ventana_venta_forzada(mercado)
+                    and UMBRAL_BENEFICIO_PCT <= beneficio_pct <= BENEFICIO_MAX_VENTA_FORZADA_PCT):
+                log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                    f"(bruto {beneficio_pct_bruto:.2f}%), dentro de los ultimos "
+                    f"{MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del cierre de {mercado} -> VENTA FORZADA (orden limitada).")
+                precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
+                orden = crear_orden_limitada('SELL', cantidad, precio_limite)
+                trade = ib.placeOrder(contrato, orden)
+                ib.sleep(3)
+                log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
+                    f"estado: {trade.orderStatus.status}")
+                continue
 
-        bajista = macd_5min_bajista(ib, contrato)
-        if bajista is None:
-            log(f"VENTAS: {contrato.symbol} - {info_posicion} - datos insuficientes para MACD 5min, se mantiene por precaucion.")
-            continue
+            if beneficio_pct < UMBRAL_BENEFICIO_PCT:
+                log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                    f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
+                continue
 
-        if bajista:
-            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden a mercado).")
-            orden = crear_orden_mercado('SELL', cantidad)
-            trade = ib.placeOrder(contrato, orden)
-            ib.sleep(3)
-            log(f"VENTAS: {contrato.symbol} - orden a mercado, "
-                f"estado: {trade.orderStatus.status}")
-        else:
-            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
+            bajista = macd_5min_bajista(ib, contrato)
+            if bajista is None:
+                log(f"VENTAS: {contrato.symbol} - {info_posicion} - datos insuficientes para MACD 5min, se mantiene por precaucion.")
+                continue
+
+            if bajista:
+                log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden a mercado).")
+                orden = crear_orden_mercado('SELL', cantidad)
+                trade = ib.placeOrder(contrato, orden)
+                ib.sleep(3)
+                log(f"VENTAS: {contrato.symbol} - orden a mercado, "
+                    f"estado: {trade.orderStatus.status}")
+            else:
+                log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
+        except Exception as e:
+            # Un fallo al procesar UNA posicion (p.ej. dato raro, error de red al
+            # colocar la orden) no debe abortar la revision de las demas
+            # posiciones abiertas ni saltarse por completo el escaneo de compras
+            # de este ciclo.
+            log(f"VENTAS: {contrato.symbol} - ERROR inesperado al procesar la posicion: {e}. Se omite.")
 
 
 def obtener_valor_total_cartera_usd(ib):
@@ -706,97 +717,104 @@ def revisar_compras(ib):
 
         contadores["senales"] += 1
 
-        velas_precio = pedir_velas(ib, contrato, '1 D', '1 min')
-        if not velas_precio:
-            log(f"COMPRAS: {ticker} - senal de COMPRA pero no se pudo obtener precio, se omite.")
-            continue
-
-        precio_actual = velas_precio[-1].close
-        currency = activo["currency"]
-
-        if en_ventana_sin_compra(activo["mercado"]):
-            # Dentro de los ultimos MINUTOS_SIN_COMPRAR_ANTES_CIERRE minutos:
-            # solo se compra si ya se tiene el valor Y el precio actual es
-            # MENOR que el coste medio (es decir, comprar ahora bajaria el
-            # precio medio de adquisicion). En cualquier otro caso, se omite.
-            pos_existente = next((p for p in posiciones_actuales
-                                   if p.contract.symbol == ticker and p.position > 0), None)
-
-            if pos_existente is None or precio_actual >= pos_existente.avgCost:
-                if activo["mercado"] not in mercados_ya_avisados:
-                    log(f"COMPRAS: mercado {activo['mercado']} dentro de la ventana de no-compra "
-                        f"(ultimos {MINUTOS_SIN_COMPRAR_ANTES_CIERRE} min antes del cierre) -> solo se compra "
-                        f"si promedia a la baja una posicion existente.")
-                    mercados_ya_avisados.add(activo["mercado"])
+        try:
+            velas_precio = pedir_velas(ib, contrato, '1 D', '1 min')
+            if not velas_precio:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero no se pudo obtener precio, se omite.")
                 continue
 
-            log(f"COMPRAS: {ticker} - dentro de la ventana de no-compra, pero el precio actual "
-                f"({precio_actual} {currency}) es menor que el coste medio existente "
-                f"({pos_existente.avgCost:.4f} {currency}) -> se permite comprar para promediar a la baja.")
+            precio_actual = velas_precio[-1].close
+            currency = activo["currency"]
 
-        valor_posicion_actual_usd = obtener_valor_posicion_actual_usd(posiciones_actuales, ticker, precio_actual, currency)
-        margen_disponible_usd = limite_por_valor_usd - valor_posicion_actual_usd
+            if en_ventana_sin_compra(activo["mercado"]):
+                # Dentro de los ultimos MINUTOS_SIN_COMPRAR_ANTES_CIERRE minutos:
+                # solo se compra si ya se tiene el valor Y el precio actual es
+                # MENOR que el coste medio (es decir, comprar ahora bajaria el
+                # precio medio de adquisicion). En cualquier otro caso, se omite.
+                pos_existente = next((p for p in posiciones_actuales
+                                       if p.contract.symbol == ticker and p.position > 0), None)
 
-        if margen_disponible_usd <= 0:
-            log(f"COMPRAS: {ticker} - senal de COMPRA pero ya tiene {valor_posicion_actual_usd:.2f} USD "
-                f"({LIMITE_EXPOSICION_PCT}% del limite = {limite_por_valor_usd:.2f} USD alcanzado) -> se omite.")
-            continue
+                if pos_existente is None or precio_actual >= pos_existente.avgCost:
+                    if activo["mercado"] not in mercados_ya_avisados:
+                        log(f"COMPRAS: mercado {activo['mercado']} dentro de la ventana de no-compra "
+                            f"(ultimos {MINUTOS_SIN_COMPRAR_ANTES_CIERRE} min antes del cierre) -> solo se compra "
+                            f"si promedia a la baja una posicion existente.")
+                        mercados_ya_avisados.add(activo["mercado"])
+                    continue
 
-        # Presupuesto maximo por operacion: equivalente a IMPORTE_EUROS, en la
-        # divisa del propio valor, capado ademas por el margen disponible del
-        # limite del 15% (convertido a esa divisa).
-        if currency == "USD":
-            presupuesto_operacion = IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD
-            margen_disponible_moneda = margen_disponible_usd
-        elif currency == "EUR":
-            presupuesto_operacion = IMPORTE_EUROS
-            margen_disponible_moneda = margen_disponible_usd / TIPO_CAMBIO_EUR_USD
-        elif currency == "HKD":
-            presupuesto_operacion = IMPORTE_EUROS_HK * TIPO_CAMBIO_EUR_USD * TIPO_CAMBIO_USD_HKD
-            margen_disponible_moneda = margen_disponible_usd * TIPO_CAMBIO_USD_HKD
-        elif currency == "KRW":
-            presupuesto_operacion = IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD * TIPO_CAMBIO_USD_KRW
-            margen_disponible_moneda = margen_disponible_usd * TIPO_CAMBIO_USD_KRW
-        else:
-            presupuesto_operacion = 0
-            margen_disponible_moneda = 0
+                log(f"COMPRAS: {ticker} - dentro de la ventana de no-compra, pero el precio actual "
+                    f"({precio_actual} {currency}) es menor que el coste medio existente "
+                    f"({pos_existente.avgCost:.4f} {currency}) -> se permite comprar para promediar a la baja.")
 
-        importe_a_usar = min(presupuesto_operacion, margen_disponible_moneda)
+            valor_posicion_actual_usd = obtener_valor_posicion_actual_usd(posiciones_actuales, ticker, precio_actual, currency)
+            margen_disponible_usd = limite_por_valor_usd - valor_posicion_actual_usd
 
-        if FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False):
-            # Mercado US: se permite comprar una fraccion de accion, para
-            # poder invertir el presupuesto disponible aunque sea menor que
-            # el precio de una accion entera (util con carteras pequeñas).
-            cantidad = round(importe_a_usar / precio_actual, DECIMALES_FRACCION)
-            if cantidad <= 0 or cantidad * precio_actual < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
-                log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
-                    f"({importe_a_usar:.2f} {currency}) no llega al minimo de "
-                    f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} {currency} por operacion, se omite.")
-                continue
-        else:
-            cantidad_bruta = int(importe_a_usar // precio_actual)
-            min_size, incremento = obtener_incremento_lote(ib, contrato)
-            # Redondeamos hacia abajo al multiplo de lote mas cercano, y si no
-            # llega ni a un lote minimo, no se compra (evita el error 388 de
-            # IBKR: "tamano de orden menor al minimo requerido").
-            cantidad = int((cantidad_bruta // incremento) * incremento)
-            if cantidad < min_size:
-                cantidad = 0
-
-            if cantidad == 0:
-                log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
-                    f"({importe_a_usar:.2f} {currency}) no alcanza para 1 lote minimo "
-                    f"({min_size} unidades, incremento {incremento}) al precio actual "
-                    f"({precio_actual} {currency}), se omite.")
+            if margen_disponible_usd <= 0:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero ya tiene {valor_posicion_actual_usd:.2f} USD "
+                    f"({LIMITE_EXPOSICION_PCT}% del limite = {limite_por_valor_usd:.2f} USD alcanzado) -> se omite.")
                 continue
 
-        log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad:g} acciones "
-            f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
-            f"limite: {limite_por_valor_usd:.2f} USD).")
-        orden = crear_orden_mercado('BUY', cantidad)
-        trade = ib.placeOrder(contrato, orden)
-        ib.sleep(3)
-        log(f"COMPRAS: {ticker} - estado de la orden: {trade.orderStatus.status}")
+            # Presupuesto maximo por operacion: equivalente a IMPORTE_EUROS, en la
+            # divisa del propio valor, capado ademas por el margen disponible del
+            # limite del 15% (convertido a esa divisa).
+            if currency == "USD":
+                presupuesto_operacion = IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD
+                margen_disponible_moneda = margen_disponible_usd
+            elif currency == "EUR":
+                presupuesto_operacion = IMPORTE_EUROS
+                margen_disponible_moneda = margen_disponible_usd / TIPO_CAMBIO_EUR_USD
+            elif currency == "HKD":
+                presupuesto_operacion = IMPORTE_EUROS_HK * TIPO_CAMBIO_EUR_USD * TIPO_CAMBIO_USD_HKD
+                margen_disponible_moneda = margen_disponible_usd * TIPO_CAMBIO_USD_HKD
+            elif currency == "KRW":
+                presupuesto_operacion = IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD * TIPO_CAMBIO_USD_KRW
+                margen_disponible_moneda = margen_disponible_usd * TIPO_CAMBIO_USD_KRW
+            else:
+                presupuesto_operacion = 0
+                margen_disponible_moneda = 0
+
+            importe_a_usar = min(presupuesto_operacion, margen_disponible_moneda)
+
+            if FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False):
+                # Mercado US: se permite comprar una fraccion de accion, para
+                # poder invertir el presupuesto disponible aunque sea menor que
+                # el precio de una accion entera (util con carteras pequeñas).
+                cantidad = round(importe_a_usar / precio_actual, DECIMALES_FRACCION)
+                if cantidad <= 0 or cantidad * precio_actual < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
+                    log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
+                        f"({importe_a_usar:.2f} {currency}) no llega al minimo de "
+                        f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} {currency} por operacion, se omite.")
+                    continue
+            else:
+                cantidad_bruta = int(importe_a_usar // precio_actual)
+                min_size, incremento = obtener_incremento_lote(ib, contrato)
+                # Redondeamos hacia abajo al multiplo de lote mas cercano, y si no
+                # llega ni a un lote minimo, no se compra (evita el error 388 de
+                # IBKR: "tamano de orden menor al minimo requerido").
+                cantidad = int((cantidad_bruta // incremento) * incremento)
+                if cantidad < min_size:
+                    cantidad = 0
+
+                if cantidad == 0:
+                    log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
+                        f"({importe_a_usar:.2f} {currency}) no alcanza para 1 lote minimo "
+                        f"({min_size} unidades, incremento {incremento}) al precio actual "
+                        f"({precio_actual} {currency}), se omite.")
+                    continue
+
+            log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad:g} acciones "
+                f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
+                f"limite: {limite_por_valor_usd:.2f} USD).")
+            orden = crear_orden_mercado('BUY', cantidad)
+            trade = ib.placeOrder(contrato, orden)
+            ib.sleep(3)
+            log(f"COMPRAS: {ticker} - estado de la orden: {trade.orderStatus.status}")
+        except Exception as e:
+            # Un fallo al procesar UNA señal de compra (precio raro, error de
+            # red al colocar la orden, etc.) no debe abortar el escaneo del
+            # resto de valores de la lista.
+            log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {e}. Se omite.")
+            contadores["errores"] += 1
 
     imprimir_resumen_mercado()  # resumen del ultimo mercado procesado en el bucle
 
