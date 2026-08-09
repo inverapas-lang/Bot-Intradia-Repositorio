@@ -23,9 +23,14 @@ pip install -r requirements.txt
 python bot_intradia.py
 ```
 
-El bot corre en bucle continuo (revisión cada 5 minutos mientras algún
+El bot corre en bucle continuo (revisión cada 4 minutos mientras algún
 mercado esté operativo), imprime todo el log en pantalla y se detiene con
 `Ctrl+C`.
+
+En el mercado US se compran fracciones de acción (hasta 4 decimales) cuando
+el presupuesto disponible no alcanza para una acción entera, pensado para
+carteras pequeñas. En HK y KR, donde IBKR no admite fracciones, se sigue
+comprando en acciones/lotes enteros.
 
 **IMPORTANTE:** este script envía órdenes reales a través de la API de IBKR
 (aunque sea sobre una cuenta paper). Revisa bien la configuración

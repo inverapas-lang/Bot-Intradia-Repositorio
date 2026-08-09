@@ -1,5 +1,5 @@
 """
-BOT COMPLETO - bucle automatico cada 5 minutos. Soporta estos mercados:
+BOT COMPLETO - bucle automatico cada 4 minutos. Soporta estos mercados:
   - US (NYSE/Nasdaq, en USD): premercado 4:00-9:30 ET + mercado regular 9:30-16:00 ET.
   - HK (Hong Kong Stock Exchange, en HKD): sesion 9:30-16:00 hora de Hong Kong
     (simplificado, ignora la pausa de mediodia real del mercado).
@@ -17,9 +17,12 @@ En cada ciclo:
   2. Escanea todos los valores buscando senal de COMPRA (MACD en 7 temporalidades,
      con la excepcion de "solo 1 de 7 en contra"). Cada valor solo se analiza si
      su mercado esta en horario operativo en ese momento.
-  3. Compra (hasta 1000 EUR o equivalente, acciones enteras, redondeo hacia
-     abajo) cualquier valor con senal de COMPRA, respetando el limite del 15%
-     del valor total de la cartera por valor (calculado en USD equivalente).
+  3. Compra (hasta 1000 EUR o equivalente) cualquier valor con senal de
+     COMPRA, respetando el limite del 15% del valor total de la cartera por
+     valor (calculado en USD equivalente). En el mercado US se permite
+     comprar fracciones de accion (hasta 4 decimales); en HK y KR, donde
+     IBKR no admite fracciones, se compran acciones/lotes enteros con
+     redondeo hacia abajo.
 
 Ante fallos de datos (p.ej. error 162 "sesion conectada desde otra IP"), se
 reintenta automaticamente antes de omitir el valor.
@@ -94,8 +97,16 @@ TIPO_CAMBIO_USD_HKD = 7.80   # 1 USD = 7.80 HKD (aprox, el HKD esta fijado al US
 TIPO_CAMBIO_USD_KRW = 1480   # 1 USD = 1480 KRW (aprox)
 UMBRAL_BENEFICIO_PCT = 0.5  # % minimo de beneficio para activar la vigilancia de venta
 MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2  # % por debajo del precio actual al vender con orden limitada
-INTERVALO_SEGUNDOS = 5 * 60  # 5 minutos
+INTERVALO_SEGUNDOS = 4 * 60  # 4 minutos
 LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera (en USD equivalente) por valor
+
+# --- Fracciones de accion ---
+# IBKR solo admite comprar fracciones de accion en el mercado US (y solo para
+# una parte de los valores, los que tengan ese permiso habilitado). En HK y
+# KR las acciones se compran siempre en unidades/lotes enteros.
+FRACCIONABLE_POR_MERCADO = {"US": True, "EU": False, "HK": False, "KR": False}
+DECIMALES_FRACCION = 4  # precision al calcular la cantidad fraccionaria a comprar
+VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0  # por debajo de esto, IBKR rechaza la orden
 
 # --- Lista de valores: mercado US (NYSE, SMART, USD) ---
 ACTIVOS_US = [
@@ -326,6 +337,24 @@ def crear_contrato(activo):
     return Stock(activo["ticker"], activo["exchange"], activo["currency"])
 
 
+def _sin_flags_legacy(orden):
+    """Las ordenes con cantidad fraccionaria (acciones no enteras) son
+    rechazadas por IBKR si estos dos flags heredados de la API antigua se
+    quedan en su valor por defecto (True); hay que ponerlos explicitamente
+    a False. No afecta a las ordenes con cantidad entera."""
+    orden.eTradeOnly = False
+    orden.firmQuoteOnly = False
+    return orden
+
+
+def crear_orden_mercado(accion, cantidad):
+    return _sin_flags_legacy(MarketOrder(accion, cantidad))
+
+
+def crear_orden_limitada(accion, cantidad, precio_limite):
+    return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite))
+
+
 def analizar_activo(ib, activo):
     contrato = crear_contrato(activo)
     ib.qualifyContracts(contrato)
@@ -471,7 +500,7 @@ def revisar_ventas(ib):
 
         # Prefijo comun con los datos base de la posicion, reutilizado en
         # todas las lineas de log de esta operacion.
-        info_posicion = (f"{cantidad:.0f} acciones, precio medio {coste_medio:.4f} {contrato.currency}, "
+        info_posicion = (f"{cantidad:g} acciones, precio medio {coste_medio:.4f} {contrato.currency}, "
                           f"comision estimada {comision_total:.2f} {contrato.currency}")
 
         if (mercado != "?" and en_ventana_venta_forzada(mercado)
@@ -480,7 +509,7 @@ def revisar_ventas(ib):
                 f"(bruto {beneficio_pct_bruto:.2f}%), dentro de los ultimos "
                 f"{MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del cierre de {mercado} -> VENTA FORZADA (orden limitada).")
             precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
-            orden = LimitOrder('SELL', cantidad, precio_limite)
+            orden = crear_orden_limitada('SELL', cantidad, precio_limite)
             trade = ib.placeOrder(contrato, orden)
             ib.sleep(3)
             log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
@@ -501,7 +530,7 @@ def revisar_ventas(ib):
             log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
                 f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden limitada).")
             precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
-            orden = LimitOrder('SELL', cantidad, precio_limite)
+            orden = crear_orden_limitada('SELL', cantidad, precio_limite)
             trade = ib.placeOrder(contrato, orden)
             ib.sleep(3)
             log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
@@ -698,27 +727,38 @@ def revisar_compras(ib):
             margen_disponible_moneda = 0
 
         importe_a_usar = min(presupuesto_operacion, margen_disponible_moneda)
-        cantidad_bruta = int(importe_a_usar // precio_actual)
 
-        min_size, incremento = obtener_incremento_lote(ib, contrato)
-        # Redondeamos hacia abajo al multiplo de lote mas cercano, y si no
-        # llega ni a un lote minimo, no se compra (evita el error 388 de
-        # IBKR: "tamano de orden menor al minimo requerido").
-        cantidad = int((cantidad_bruta // incremento) * incremento)
-        if cantidad < min_size:
-            cantidad = 0
+        if FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False):
+            # Mercado US: se permite comprar una fraccion de accion, para
+            # poder invertir el presupuesto disponible aunque sea menor que
+            # el precio de una accion entera (util con carteras pequeñas).
+            cantidad = round(importe_a_usar / precio_actual, DECIMALES_FRACCION)
+            if cantidad <= 0 or cantidad * precio_actual < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
+                    f"({importe_a_usar:.2f} {currency}) no llega al minimo de "
+                    f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} {currency} por operacion, se omite.")
+                continue
+        else:
+            cantidad_bruta = int(importe_a_usar // precio_actual)
+            min_size, incremento = obtener_incremento_lote(ib, contrato)
+            # Redondeamos hacia abajo al multiplo de lote mas cercano, y si no
+            # llega ni a un lote minimo, no se compra (evita el error 388 de
+            # IBKR: "tamano de orden menor al minimo requerido").
+            cantidad = int((cantidad_bruta // incremento) * incremento)
+            if cantidad < min_size:
+                cantidad = 0
 
-        if cantidad == 0:
-            log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
-                f"({importe_a_usar:.2f} {currency}) no alcanza para 1 lote minimo "
-                f"({min_size} unidades, incremento {incremento}) al precio actual "
-                f"({precio_actual} {currency}), se omite.")
-            continue
+            if cantidad == 0:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
+                    f"({importe_a_usar:.2f} {currency}) no alcanza para 1 lote minimo "
+                    f"({min_size} unidades, incremento {incremento}) al precio actual "
+                    f"({precio_actual} {currency}), se omite.")
+                continue
 
-        log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad} acciones "
+        log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad:g} acciones "
             f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
             f"limite: {limite_por_valor_usd:.2f} USD).")
-        orden = MarketOrder('BUY', cantidad)
+        orden = crear_orden_mercado('BUY', cantidad)
         trade = ib.placeOrder(contrato, orden)
         ib.sleep(3)
         log(f"COMPRAS: {ticker} - estado de la orden: {trade.orderStatus.status}")
@@ -826,7 +866,7 @@ def generar_resumen_cierre_mercado(ib, mercado):
             total_valor_actual_eur_acumulado += total_invertido_eur  # fallback: asumimos sin cambio
             beneficio_str = "N/D"
 
-        log(f"{symbol:<10}{abierta_desde_str:<20}{pos.position:>10.0f}{coste_medio_con_comision:>20.4f}"
+        log(f"{symbol:<10}{abierta_desde_str:<20}{pos.position:>10.4f}{coste_medio_con_comision:>20.4f}"
             f"{total_invertido:>20.2f}{total_invertido_eur:>18.2f}{beneficio_str:>13}")
 
     if posiciones:
@@ -877,7 +917,7 @@ def generar_resumen_cierre_mercado(ib, mercado):
             # (reqExecutions no siempre trae todo el pasado) -> no podemos
             # calcular el beneficio con fiabilidad, lo marcamos como N/D en
             # vez de mostrar un 0% enganoso.
-            log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.0f}"
+            log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.4f}"
                 f"{'N/D':>14}{'N/D':>14}{'N/D':>13}{'N/D':>12}")
             continue
 
@@ -892,7 +932,7 @@ def generar_resumen_cierre_mercado(ib, mercado):
         ganancia = ganancia_bruta - comision_estimada
         beneficio_pct = (ganancia / total_invertido * 100) if total_invertido else 0.0
 
-        log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.0f}"
+        log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.4f}"
             f"{coste_medio_compra:>14.4f}{total_invertido:>14.2f}{beneficio_pct:>12.2f}%{ganancia:>12.2f}")
 
     log("=" * 60)
