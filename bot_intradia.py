@@ -111,10 +111,26 @@ VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0  # por debajo de esto, IBKR rechaz
 # --- Lista de valores: mercado US (NYSE, SMART, USD) ---
 ACTIVOS_US = [
     {"ticker": t, "exchange": "SMART", "currency": "USD", "mercado": "US"}
-    for t in ["LLY", "WMT", "JPM", "BRK B", "V", "JNJ", "XOM",
-              "MA", "ORCL", "BAC", "CAT", "ABBV", "KO",
-              "T", "AMC", "PATH", "JOBY", "PFE", "VZ", "F", "NOK",
-              "NU", "BMNR", "BBD", "HL", "ACHR", "ABEV", "MBGL"]
+    for t in ["LLY",    # Eli Lilly and Company
+              "UBER",   # Uber Technologies
+              "ORCL",   # Oracle Corporation
+              "PLTR",   # Palantir Technologies
+              "SNOW",   # Snowflake
+              "CRM",    # Salesforce
+              "JPM",    # JPMorgan Chase & Co.
+              "BAC",    # Bank of America
+              "C",      # Citigroup
+              "GS",     # Goldman Sachs
+              "MS",     # Morgan Stanley
+              "XOM",    # Exxon Mobil
+              "CVX",    # Chevron
+              "GE",     # General Electric Aerospace (ticker GE)
+              "CAT",    # Caterpillar
+              "WMT",    # Walmart
+              "V",      # Visa
+              "MA",     # Mastercard
+              "UNH",    # UnitedHealth Group
+              "PFE"]    # Pfizer
 ]
 
 # --- Lista de valores: mercado EU (Euronext / Borsa Italiana, EUR) ---
