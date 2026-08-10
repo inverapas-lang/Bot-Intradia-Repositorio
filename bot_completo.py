@@ -66,6 +66,21 @@ HORA_CIERRE_KR = dt_time(15, 30)   # 15:30 hora de Corea
 INTENTOS_MAXIMOS = 3
 ESPERA_ENTRE_INTENTOS_SEGUNDOS = 15
 
+# --- Cortacircuitos ante una caida generalizada de los datos de mercado ---
+# Si el socket API sigue "conectado" (ib.isConnected() y reqCurrentTime()
+# funcionan) pero TWS/IB Gateway ha perdido la conexion con los "market data
+# farms" de IBKR, reqHistoricalData falla en TODOS los valores sin
+# excepcion. Sin este cortacircuitos, el bot se queda horas reintentando
+# 3 veces x 15s por cada valor de la lista, uno detras de otro, sin avisar
+# claramente de que el problema es de datos de mercado (visto en produccion:
+# un ciclo tardo 3003s). Tras UMBRAL_FALLOS_SEGUIDOS_DATOS valores SEGUIDOS
+# sin ningun dato en ninguno de sus intentos, se deja de reintentar (una
+# sola llamada rapida por valor) y se avisa una vez, hasta que algun valor
+# vuelva a traer datos.
+UMBRAL_FALLOS_SEGUIDOS_DATOS = 8
+_fallos_seguidos_datos = 0
+_aviso_datos_caidos_emitido = False
+
 # --- Reintentos de reconexion con IB Gateway tras un corte de conexion ---
 REINTENTOS_RECONEXION = 5
 ESPERA_ENTRE_REINTENTOS_RECONEXION_SEGUNDOS = 15
@@ -351,8 +366,27 @@ def calcular_macd(cierres, rapida=12, lenta=26, senal=9):
 def pedir_velas(ib, contrato, duration, barSize):
     """Pide velas historicas con reintentos automaticos: si la respuesta viene
     vacia o falla (por ejemplo por el error 162 de sesion conectada desde otra
-    IP, o por timeout de conexion), espera y reintenta antes de rendirse."""
-    for intento in range(1, INTENTOS_MAXIMOS + 1):
+    IP, o por timeout de conexion), espera y reintenta antes de rendirse.
+
+    Cortacircuitos: si ya se han encadenado UMBRAL_FALLOS_SEGUIDOS_DATOS
+    valores SEGUIDOS sin ningun dato (senal de que TWS/IB Gateway ha perdido
+    la conexion con los market data farms, no solo un fallo puntual de un
+    valor concreto), se hace un unico intento rapido sin esperas de 15s, para
+    no perder horas reintentando algo que muy probablemente va a seguir
+    fallando igual en el siguiente valor tambien."""
+    global _fallos_seguidos_datos, _aviso_datos_caidos_emitido
+
+    disyuntor_activo = _fallos_seguidos_datos >= UMBRAL_FALLOS_SEGUIDOS_DATOS
+    if disyuntor_activo and not _aviso_datos_caidos_emitido:
+        log(f"AVISO: {UMBRAL_FALLOS_SEGUIDOS_DATOS} valores seguidos sin ningun dato historico. "
+            f"Probable caida de la conexion de TWS/IB Gateway con los market data farms de IBKR "
+            f"(el socket API puede seguir 'conectado' aunque esto pase). Revisa TWS/IB Gateway; "
+            f"mientras tanto se deja de reintentar 3 veces por valor para no perder horas.")
+        _aviso_datos_caidos_emitido = True
+
+    intentos = 1 if disyuntor_activo else INTENTOS_MAXIMOS
+
+    for intento in range(1, intentos + 1):
         try:
             velas = ib.reqHistoricalData(
                 contrato, endDateTime='', durationStr=duration,
@@ -360,18 +394,21 @@ def pedir_velas(ib, contrato, duration, barSize):
                 useRTH=False, formatDate=1,
             )
         except Exception as e:
-            log(f"{contrato.symbol} - error al pedir datos en el intento {intento}/{INTENTOS_MAXIMOS}: "
+            log(f"{contrato.symbol} - error al pedir datos en el intento {intento}/{intentos}: "
                 f"{type(e).__name__}: {e}")
             velas = []
 
         if velas:
+            _fallos_seguidos_datos = 0
+            _aviso_datos_caidos_emitido = False
             return velas
 
-        if intento < INTENTOS_MAXIMOS:
-            log(f"{contrato.symbol} - sin datos en el intento {intento}/{INTENTOS_MAXIMOS}, "
+        if intento < intentos:
+            log(f"{contrato.symbol} - sin datos en el intento {intento}/{intentos}, "
                 f"reintentando en {ESPERA_ENTRE_INTENTOS_SEGUNDOS}s...")
             ib.sleep(ESPERA_ENTRE_INTENTOS_SEGUNDOS)
 
+    _fallos_seguidos_datos += 1
     return []
 
 
