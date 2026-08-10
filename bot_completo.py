@@ -635,7 +635,7 @@ def revisar_ventas(ib):
             # colocar la orden) no debe abortar la revision de las demas
             # posiciones abiertas ni saltarse por completo el escaneo de compras
             # de este ciclo.
-            log(f"VENTAS: {contrato.symbol} - ERROR inesperado al procesar la posicion: {e}. Se omite.")
+            log(f"VENTAS: {contrato.symbol} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
 
 
 def obtener_valor_total_cartera_usd(ib):
@@ -643,7 +643,7 @@ def obtener_valor_total_cartera_usd(ib):
     try:
         resumen = ib.accountSummary()
     except Exception as e:
-        log(f"No se pudo obtener el resumen de la cuenta: {e}")
+        log(f"No se pudo obtener el resumen de la cuenta: {type(e).__name__}: {e}")
         return None
     for item in resumen:
         if item.tag == 'NetLiquidation' and item.currency == 'USD':
@@ -754,7 +754,7 @@ def revisar_compras(ib):
         try:
             contrato, decision = analizar_activo(ib, activo)
         except Exception as e:
-            log(f"COMPRAS: {ticker} ({activo['mercado']}) - ERROR al analizar: {e}")
+            log(f"COMPRAS: {ticker} ({activo['mercado']}) - ERROR al analizar: {type(e).__name__}: {e}")
             contadores["errores"] += 1
             continue
 
@@ -865,7 +865,7 @@ def revisar_compras(ib):
             # Un fallo al procesar UNA señal de compra (precio raro, error de
             # red al colocar la orden, etc.) no debe abortar el escaneo del
             # resto de valores de la lista.
-            log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {e}. Se omite.")
+            log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {type(e).__name__}: {e}. Se omite.")
             contadores["errores"] += 1
 
     imprimir_resumen_mercado()  # resumen del ultimo mercado procesado en el bucle
@@ -915,7 +915,7 @@ def generar_resumen_cierre_mercado(ib, mercado):
     try:
         ejecuciones = ib.reqExecutions(ExecutionFilter())
     except Exception as e:
-        log(f"RESUMEN {mercado}: no se pudieron obtener las ejecuciones ({e}), se omite el resumen.")
+        log(f"RESUMEN {mercado}: no se pudieron obtener las ejecuciones ({type(e).__name__}: {e}), se omite el resumen.")
         return
 
     # Agrupamos las ejecuciones por simbolo UNA SOLA VEZ (en vez de recorrer
@@ -1134,7 +1134,7 @@ def main():
                         reconectado = True
                         break
                     except Exception as e:
-                        log(f"Fallo el intento {intento}/{REINTENTOS_RECONEXION} de reconexion: {e}")
+                        log(f"Fallo el intento {intento}/{REINTENTOS_RECONEXION} de reconexion: {type(e).__name__}: {e}")
                         if intento < REINTENTOS_RECONEXION:
                             ib.sleep(ESPERA_ENTRE_REINTENTOS_RECONEXION_SEGUNDOS)
 
@@ -1151,7 +1151,7 @@ def main():
                     try:
                         generar_resumen_cierre_mercado(ib, mercado)
                     except Exception as e:
-                        log(f"RESUMEN {mercado}: error al generar el resumen: {e}")
+                        log(f"RESUMEN {mercado}: error al generar el resumen: {type(e).__name__}: {e}")
                     resumenes_enviados_hoy.add((mercado, hoy))
 
             hay_mercado_abierto = (es_horario_operativo("US")
@@ -1172,7 +1172,7 @@ def main():
             try:
                 ciclo_completo(ib)
             except Exception as e:
-                log(f"ERROR en el ciclo: {e}")
+                log(f"ERROR en el ciclo: {type(e).__name__}: {e}")
             duracion_ciclo = time.monotonic() - inicio_ciclo
 
             if duracion_ciclo > INTERVALO_SEGUNDOS:
@@ -1202,6 +1202,6 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             break  # parada manual justo al arrancar/conectar, antes de entrar en el bucle interno
         except Exception as e:
-            log(f"ERROR FATAL fuera del ciclo principal: {e}. "
+            log(f"ERROR FATAL fuera del ciclo principal: {type(e).__name__}: {e}. "
                 f"Reiniciando el bot en {SEGUNDOS_ESPERA_TRAS_FALLO} segundos...")
             time.sleep(SEGUNDOS_ESPERA_TRAS_FALLO)
