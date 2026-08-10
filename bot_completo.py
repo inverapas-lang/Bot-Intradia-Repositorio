@@ -393,6 +393,27 @@ def crear_orden_mercado(accion, cantidad):
     return _sin_flags_legacy(MarketOrder(accion, cantidad))
 
 
+ESPERA_MAXIMA_ESTADO_ORDEN_SEGUNDOS = 10
+INTERVALO_CHEQUEO_ESTADO_ORDEN_SEGUNDOS = 0.5
+
+
+def esperar_estado_final_orden(ib, trade, espera_maxima=ESPERA_MAXIMA_ESTADO_ORDEN_SEGUNDOS):
+    """Espera a que la orden llegue a un estado final (Filled, Cancelled,
+    Inactive...) en vez de comprobar el estado tras una espera fija de unos
+    segundos. IBKR a veces manda avisos intermedios (p.ej. error 10349,
+    "TIF ajustado a DAY") con un estado transitorio en el mismo instante que
+    NO es el resultado definitivo; comprobar demasiado pronto puede hacer
+    que el log registre "PreSubmitted" para una orden que en realidad se
+    completo (o cancelo) un par de segundos despues. Si se agota el tiempo
+    maximo sin llegar a un estado final, se devuelve el ultimo estado visto
+    (la orden sigue viva en IBKR, simplemente tarda mas de lo esperado)."""
+    transcurrido = 0.0
+    while not trade.isDone() and transcurrido < espera_maxima:
+        ib.sleep(INTERVALO_CHEQUEO_ESTADO_ORDEN_SEGUNDOS)
+        transcurrido += INTERVALO_CHEQUEO_ESTADO_ORDEN_SEGUNDOS
+    return trade.orderStatus.status
+
+
 def crear_orden_limitada(accion, cantidad, precio_limite):
     return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite))
 
@@ -583,9 +604,9 @@ def revisar_ventas(ib):
                 precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
                 orden = crear_orden_limitada('SELL', cantidad, precio_limite)
                 trade = ib.placeOrder(contrato, orden)
-                ib.sleep(3)
+                estado = esperar_estado_final_orden(ib, trade)
                 log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
-                    f"estado: {trade.orderStatus.status}")
+                    f"estado: {estado}")
                 continue
 
             if beneficio_pct < UMBRAL_BENEFICIO_PCT:
@@ -603,9 +624,9 @@ def revisar_ventas(ib):
                     f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden a mercado).")
                 orden = crear_orden_mercado('SELL', cantidad)
                 trade = ib.placeOrder(contrato, orden)
-                ib.sleep(3)
+                estado = esperar_estado_final_orden(ib, trade)
                 log(f"VENTAS: {contrato.symbol} - orden a mercado, "
-                    f"estado: {trade.orderStatus.status}")
+                    f"estado: {estado}")
             else:
                 log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
                     f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
@@ -838,8 +859,8 @@ def revisar_compras(ib):
                 f"limite: {limite_por_valor_usd:.2f} USD).")
             orden = crear_orden_mercado('BUY', cantidad)
             trade = ib.placeOrder(contrato, orden)
-            ib.sleep(3)
-            log(f"COMPRAS: {ticker} - estado de la orden: {trade.orderStatus.status}")
+            estado = esperar_estado_final_orden(ib, trade)
+            log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
         except Exception as e:
             # Un fallo al procesar UNA señal de compra (precio raro, error de
             # red al colocar la orden, etc.) no debe abortar el escaneo del
