@@ -515,10 +515,25 @@ def revisar_ventas(ib):
     posiciones_con_mercado.sort(key=lambda x: x[0])
 
     mercado_actual = None
+    mercados_cerrados_avisados = set()
     for mercado, pos in posiciones_con_mercado:
         if mercado != mercado_actual:
             log(f"\n########## VENTAS - MERCADO {mercado} ##########")
             mercado_actual = mercado
+
+        # Si el mercado de esta posicion no esta en horario operativo ahora
+        # mismo, NO se intenta vender: IBKR rechaza/cancela las ordenes
+        # fuera de la sesion de negociacion (visto en produccion con HK:
+        # "Error 10349... Cancelled", y el bot llegaba a registrar
+        # enganosamente "estado: PreSubmitted" como si la orden siguiera
+        # viva). Se sigue mostrando el beneficio/perdida como informacion,
+        # pero sin intentar operar.
+        if mercado in CIERRE_POR_MERCADO and not es_horario_operativo(mercado):
+            if mercado not in mercados_cerrados_avisados:
+                log(f"VENTAS: mercado {mercado} fuera de horario operativo, no se intenta vender "
+                    f"ninguna posicion de este mercado en este ciclo.")
+                mercados_cerrados_avisados.add(mercado)
+            continue
 
         contrato = pos.contract
         cantidad = pos.position
