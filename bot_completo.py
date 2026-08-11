@@ -37,6 +37,7 @@ actualizalos manualmente si quieres mas precision.
 Revisa bien la configuracion antes de dejarlo corriendo desatendido.
 """
 
+import json
 import time
 from datetime import datetime, time as dt_time, timedelta
 from collections import defaultdict
@@ -601,6 +602,93 @@ def estimar_comision(valor_operacion, currency):
     return max(valor_operacion * COMISION_PCT, minimo_comision_en_moneda(currency))
 
 
+# --- Historial persistente de fecha de compra inicial ---
+# reqExecutions() de IBKR solo devuelve las ejecuciones del dia actual, asi
+# que no sirve para saber cuando se compro por primera vez un valor que ya
+# se tenia de dias anteriores (se veia como "?" en el resumen de cierre).
+# Este archivo guarda, para cada valor, la fecha de la compra que abrio la
+# posicion desde cero. Si despues se hacen compras adicionales para
+# promediar a la baja, esa fecha NO se toca -sigue siendo la apertura
+# original-; solo se actualiza cuando el valor se vende del todo y se
+# vuelve a comprar de cero mas adelante.
+ARCHIVO_HISTORIAL_COMPRAS = "historial_compras.json"
+
+
+def clave_historial(mercado, ticker):
+    return f"{mercado}:{ticker}"
+
+
+def cargar_historial_compras():
+    try:
+        with open(ARCHIVO_HISTORIAL_COMPRAS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def guardar_historial_compras(historial):
+    try:
+        with open(ARCHIVO_HISTORIAL_COMPRAS, "w", encoding="utf-8") as f:
+            json.dump(historial, f, indent=2, sort_keys=True)
+    except OSError as e:
+        log(f"No se pudo guardar el historial de compras ({ARCHIVO_HISTORIAL_COMPRAS}): {type(e).__name__}: {e}")
+
+
+def registrar_apertura_de_posicion(mercado, ticker):
+    """Marca AHORA como la fecha de apertura de una posicion nueva desde
+    cero (solo debe llamarse cuando se confirma que la compra se ejecuto de
+    verdad y no se tenia ninguna cantidad de ese valor antes)."""
+    historial = cargar_historial_compras()
+    historial[clave_historial(mercado, ticker)] = datetime.now().isoformat(timespec="seconds")
+    guardar_historial_compras(historial)
+
+
+def obtener_apertura_registrada(mercado, ticker):
+    """Devuelve el datetime de apertura registrado para ese valor, o None
+    si no hay ningun registro (p.ej. una posicion abierta antes de que
+    existiera este historial)."""
+    historial = cargar_historial_compras()
+    valor = historial.get(clave_historial(mercado, ticker))
+    if valor is None:
+        return None
+    try:
+        return datetime.fromisoformat(valor)
+    except ValueError:
+        return None
+
+
+def obtener_cantidad_posicion_real(ib, ticker, currency):
+    """Consulta a IBKR (en vivo, sin cache) la cantidad actual de la
+    posicion de un valor concreto. 0.0 si no se tiene ninguna."""
+    ib.reqPositions()
+    ib.sleep(1)
+    for pos in ib.positions():
+        if pos.contract.symbol == ticker and pos.contract.currency == currency and pos.position > 0:
+            return pos.position
+    return 0.0
+
+
+def verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad_antes, prefijo_log):
+    """Cuando una orden no termina en estado 'Filled', el objeto Trade que
+    seguimos puede no reflejar lo que realmente paso: se ha visto en
+    produccion que IBKR a veces cancela la orden original y la reenvia
+    corregida por dentro (p.ej. tras el aviso "TIF ajustado segun preset"),
+    y esa orden de reemplazo se ejecuta sin que nuestro codigo la vea, pese
+    a que el objeto Trade original quedo marcado como 'Cancelled'. Para no
+    quedarnos con una conclusion equivocada, se vuelve a consultar la
+    posicion real en IBKR unos segundos despues y se compara con la
+    cantidad que habia antes de intentar la orden."""
+    ib.sleep(2)
+    cantidad_ahora = obtener_cantidad_posicion_real(ib, contrato.symbol, contrato.currency)
+    if abs(cantidad_ahora - cantidad_antes) > 1e-6:
+        log(f"{prefijo_log} - la posicion SI cambio de verdad ({cantidad_antes:g} -> {cantidad_ahora:g} "
+            f"acciones) pese al estado no confirmado como 'Filled' (probable reenvio automatico de IBKR).")
+    else:
+        log(f"{prefijo_log} - la posicion NO ha cambiado ({cantidad_ahora:g} acciones): "
+            f"confirmado que la orden no se ejecuto.")
+    return cantidad_ahora
+
+
 def revisar_ventas(ib):
     ib.reqPositions()
     ib.sleep(1)  # da tiempo a que la respuesta llegue antes de leer ib.positions()
@@ -695,6 +783,8 @@ def revisar_ventas(ib):
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
                     f"estado: {estado}")
+                if estado != 'Filled':
+                    verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
                 continue
 
             if beneficio_pct < UMBRAL_BENEFICIO_PCT:
@@ -718,6 +808,8 @@ def revisar_ventas(ib):
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"VENTAS: {contrato.symbol} - orden a mercado, "
                     f"estado: {estado}")
+                if estado != 'Filled':
+                    verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
             else:
                 log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
                     f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
@@ -952,6 +1044,9 @@ def revisar_compras(ib):
             log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad:g} acciones "
                 f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
                 f"limite: {limite_por_valor_usd:.2f} USD).")
+            cantidad_antes_compra = next(
+                (p.position for p in posiciones_actuales if p.contract.symbol == ticker and p.position > 0), 0.0)
+
             if fraccionable:
                 orden = crear_orden_mercado_cash('BUY', importe_a_usar)
             else:
@@ -959,6 +1054,19 @@ def revisar_compras(ib):
             trade = ib.placeOrder(contrato, orden)
             estado = esperar_estado_final_orden(ib, trade)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
+
+            compra_confirmada = estado == 'Filled'
+            if not compra_confirmada:
+                cantidad_tras_compra = verificar_posicion_tras_orden_no_confirmada(
+                    ib, contrato, cantidad_antes_compra, f"COMPRAS: {ticker}")
+                compra_confirmada = cantidad_tras_compra > cantidad_antes_compra + 1e-6
+
+            if compra_confirmada and cantidad_antes_compra <= 1e-6:
+                # Posicion nueva desde cero (no una ampliacion para promediar
+                # a la baja): se registra AHORA como fecha de apertura, para
+                # que el resumen de cierre de mercado la muestre aunque
+                # reqExecutions() ya no la tenga en dias posteriores.
+                registrar_apertura_de_posicion(activo["mercado"], ticker)
         except Exception as e:
             # Un fallo al procesar UNA señal de compra (precio raro, error de
             # red al colocar la orden, etc.) no debe abortar el escaneo del
@@ -1051,9 +1159,17 @@ def generar_resumen_cierre_mercado(ib, mercado):
 
     for pos in posiciones:
         symbol = pos.contract.symbol
-        compras = compras_por_simbolo.get(symbol, [])
-        abierta_desde = min((e.execution.time for e in compras), default=None)
-        abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
+        # Preferimos la fecha de apertura registrada en nuestro propio
+        # historial (persiste entre dias), ya que reqExecutions() de IBKR
+        # solo cubre el dia actual y no sirve para posiciones abiertas en
+        # dias anteriores.
+        abierta_desde_registrada = obtener_apertura_registrada(mercado, symbol)
+        if abierta_desde_registrada:
+            abierta_desde_str = abierta_desde_registrada.strftime("%Y-%m-%d %H:%M")
+        else:
+            compras = compras_por_simbolo.get(symbol, [])
+            abierta_desde = min((e.execution.time for e in compras), default=None)
+            abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
 
         comision_estimada = estimar_comision(pos.position * pos.avgCost, pos.contract.currency)
         coste_medio_con_comision = pos.avgCost + (comision_estimada / pos.position)
@@ -1118,7 +1234,14 @@ def generar_resumen_cierre_mercado(ib, mercado):
         total_comprado_acciones = sum(e.execution.shares for e in compras)
         total_comprado_valor = sum(e.execution.shares * e.execution.avgPrice for e in compras)
 
-        abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
+        # Igual que en la tabla de posiciones abiertas: preferimos la fecha
+        # registrada en nuestro historial (cubre compras de dias
+        # anteriores) sobre la de reqExecutions() (solo el dia actual).
+        abierta_desde_registrada = obtener_apertura_registrada(mercado, symbol)
+        if abierta_desde_registrada:
+            abierta_desde_str = abierta_desde_registrada.strftime("%Y-%m-%d %H:%M")
+        else:
+            abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
         cerrada_a_las_str = cerrada_a_las.strftime("%Y-%m-%d %H:%M")
 
         if total_comprado_acciones <= 0:

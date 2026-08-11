@@ -643,6 +643,122 @@ check("revisar_compras: la orden real colocada en US usa cashQty, no totalQuanti
 
 
 # ---------------------------------------------------------------------------
+# 11. Historial persistente de fecha de compra inicial, y verificacion de
+#     posicion real tras una orden que no confirma 'Filled'. Se usa un
+#     archivo temporal para no tocar (ni depender de) el historial real del
+#     usuario en su maquina.
+# ---------------------------------------------------------------------------
+import tempfile
+
+archivo_historial_original = bot.ARCHIVO_HISTORIAL_COMPRAS
+directorio_temp = tempfile.mkdtemp()
+bot.ARCHIVO_HISTORIAL_COMPRAS = os.path.join(directorio_temp, "historial_compras_test.json")
+
+try:
+    # cargar_historial_compras sobre un archivo que no existe -> diccionario vacio
+    check("cargar_historial_compras: archivo inexistente -> {}", bot.cargar_historial_compras() == {})
+
+    # registrar + recuperar
+    check("obtener_apertura_registrada: sin registro previo -> None",
+          bot.obtener_apertura_registrada("US", "ZZZ") is None)
+    bot.registrar_apertura_de_posicion("US", "ZZZ")
+    apertura = bot.obtener_apertura_registrada("US", "ZZZ")
+    check("registrar_apertura_de_posicion + obtener_apertura_registrada: recupera un datetime valido",
+          apertura is not None and (datetime.now() - apertura).total_seconds() < 60,
+          f"apertura={apertura}")
+
+    # una compra adicional (promediar a la baja) NO debe machacar la fecha original
+    fecha_original = apertura
+    import time as _time
+    _time.sleep(0.01)
+    # Simulamos que revisar_compras solo registra si cantidad_antes_compra <= 1e-6;
+    # aqui comprobamos directamente la funcion de bajo nivel: si NO se vuelve a
+    # llamar a registrar_apertura_de_posicion (porque ya habia posicion), la
+    # fecha debe seguir siendo la misma.
+    apertura_tras_no_tocar = bot.obtener_apertura_registrada("US", "ZZZ")
+    check("obtener_apertura_registrada: la fecha no cambia si no se vuelve a registrar",
+          apertura_tras_no_tocar == fecha_original)
+
+    # obtener_cantidad_posicion_real / verificar_posicion_tras_orden_no_confirmada
+    class _IBFalsoPosicionReal:
+        def __init__(self, cantidad_tras_consulta):
+            self.cantidad_tras_consulta = cantidad_tras_consulta
+
+        def reqPositions(self):
+            pass
+
+        def positions(self):
+            if self.cantidad_tras_consulta <= 0:
+                return []
+            return [_Posicion("ZZZ", self.cantidad_tras_consulta, 100, currency="USD")]
+
+        def sleep(self, segundos):
+            pass
+
+    contrato_zzz = _ContratoFalso("ZZZ")
+    contrato_zzz.currency = "USD"
+
+    # Caso: la posicion SI cambio de verdad (p.ej. compra que en realidad se
+    # ejecuto pese al estado no confirmado)
+    ib_pos_cambio = _IBFalsoPosicionReal(cantidad_tras_consulta=10)
+    cantidad_verificada = bot.verificar_posicion_tras_orden_no_confirmada(
+        ib_pos_cambio, contrato_zzz, cantidad_antes=0, prefijo_log="TEST")
+    check("verificar_posicion_tras_orden_no_confirmada: detecta que la posicion SI cambio",
+          cantidad_verificada == 10, f"cantidad_verificada={cantidad_verificada}")
+
+    # Caso: la posicion NO cambio (la orden de verdad no se ejecuto)
+    ib_pos_sin_cambio = _IBFalsoPosicionReal(cantidad_tras_consulta=0)
+    cantidad_verificada_2 = bot.verificar_posicion_tras_orden_no_confirmada(
+        ib_pos_sin_cambio, contrato_zzz, cantidad_antes=0, prefijo_log="TEST")
+    check("verificar_posicion_tras_orden_no_confirmada: detecta que la posicion NO cambio",
+          cantidad_verificada_2 == 0, f"cantidad_verificada_2={cantidad_verificada_2}")
+
+    # --- Extremo a extremo: revisar_compras registra la apertura cuando la
+    #     compra se confirma Filled y era una posicion nueva desde cero ---
+    class _IBFalsoCompraFilled:
+        def accountSummary(self):
+            return [types.SimpleNamespace(tag='NetLiquidation', currency='USD', value='10000')]
+
+        def reqPositions(self):
+            pass
+
+        def positions(self):
+            return []
+
+        def sleep(self, segundos):
+            pass
+
+        def qualifyContracts(self, contrato):
+            contrato.conId = 999
+
+        def reqHistoricalData(self, contrato, **kwargs):
+            return [_Vela(100 * (1.02 ** i)) for i in range(60)]
+
+        def reqContractDetails(self, contrato):
+            return [types.SimpleNamespace(minSize=1, sizeIncrement=1)]
+
+        def placeOrder(self, contrato, orden):
+            return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"), isDone=lambda: True)
+
+    bot.ACTIVOS = [{"ticker": "NUEVA", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+    bot.es_horario_operativo = lambda mercado: True
+    bot.en_ventana_sin_compra = lambda mercado: False
+    check("obtener_apertura_registrada: NUEVA sin registro previo -> None",
+          bot.obtener_apertura_registrada("US", "NUEVA") is None)
+    try:
+        bot.revisar_compras(_IBFalsoCompraFilled())
+    finally:
+        bot.ACTIVOS = activos_originales
+        bot.es_horario_operativo = es_horario_original
+        bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+    check("revisar_compras: una compra Filled de una posicion nueva SI registra la apertura",
+          bot.obtener_apertura_registrada("US", "NUEVA") is not None)
+finally:
+    bot.ARCHIVO_HISTORIAL_COMPRAS = archivo_historial_original
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()
