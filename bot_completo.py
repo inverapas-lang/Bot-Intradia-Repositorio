@@ -196,7 +196,8 @@ ACTIVOS_EU = [
 ]
 
 # --- Lista de valores: mercado HK (Hong Kong Stock Exchange, HKD) ---
-# Top 10 por capitalizacion, excluyendo dobles cotizaciones en Singapur/ADR en US.
+# Principales valores por capitalizacion/liquidez, excluyendo dobles
+# cotizaciones en Singapur/ADR en US.
 ACTIVOS_HK = [
     {"ticker": "1299", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # AIA
     {"ticker": "388",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # HKEX
@@ -208,6 +209,24 @@ ACTIVOS_HK = [
     {"ticker": "1",    "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # CK Hutchison Holdings
     {"ticker": "1109", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # China Resources Land
     {"ticker": "762",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # China Unicom
+    {"ticker": "700",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Tencent Holdings
+    {"ticker": "9988", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Alibaba Group-W
+    {"ticker": "5",    "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # HSBC Holdings
+    {"ticker": "3690", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Meituan-W
+    {"ticker": "939",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # China Construction Bank
+    {"ticker": "1398", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # ICBC
+    {"ticker": "1810", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Xiaomi Group-W
+    {"ticker": "3988", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Bank of China
+    {"ticker": "941",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # China Mobile
+    {"ticker": "2318", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Ping An Insurance
+    {"ticker": "1024", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # Kuaishou Technology
+    {"ticker": "9618", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # JD.com-SW
+    {"ticker": "1211", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # BYD Company
+    {"ticker": "883",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # CNOOC
+    {"ticker": "857",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # PetroChina
+    {"ticker": "2628", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # China Life Insurance
+    {"ticker": "981",  "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # SMIC
+    {"ticker": "3968", "exchange": "SEHK", "currency": "HKD", "mercado": "HK"},  # China Merchants Bank
 ]
 
 # --- Lista de valores: mercado KR (Korea Exchange / KRX, KRW) ---
