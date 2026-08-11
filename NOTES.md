@@ -129,6 +129,15 @@ días anteriores.
 - Si el archivo se borra o se mueve a otro ordenador, simplemente se pierde el historial
   acumulado (vuelve a mostrar "?" hasta la siguiente compra de cada valor) — no rompe nada.
 
+## Aviso de modo de cuenta (DEMO vs REAL)
+
+`obtener_modo_cuenta` / `avisar_modo_cuenta`: al conectar (y tras cada reconexión), el bot
+consulta `ib.managedAccounts()` y detecta si la cuenta es demo o real por el ID (convención
+de IBKR: las cuentas de paper trading siempre empiezan por `DU`). Se imprime un aviso bien
+visible con `#` de por medio, y además una marca corta `[DEMO/PAPER TRADING (cuenta ...)]` o
+`[REAL - DINERO REAL (cuenta ...)]` en la línea de "Iniciando nuevo ciclo" de cada ciclo, para
+que sea imposible perder de vista el modo con solo mirar el log reciente.
+
 ## Comisiones estimadas
 
 `0.07%` del valor de la operación, con mínimo de 1€ (convertido a la divisa local). Se
