@@ -1272,9 +1272,42 @@ def generar_resumen_cierre_mercado(ib, mercado):
         "no lote a lote, cuando ha habido varias compras/ventas parciales del mismo valor.)")
 
 
-def ciclo_completo(ib):
+def obtener_modo_cuenta(ib):
+    """Determina si la cuenta conectada es DEMO/paper o REAL, a partir del
+    ID de cuenta que devuelve IBKR. Convencion de IBKR: las cuentas de
+    paper trading siempre tienen un ID que empieza por 'DU'; las cuentas
+    reales no. Devuelve (es_demo, texto) donde es_demo es True/False/None
+    (None si no se pudo determinar con seguridad)."""
+    try:
+        cuentas = ib.managedAccounts()
+    except Exception:
+        cuentas = []
+    cuentas = [c for c in cuentas if c]  # descarta cadenas vacias
+    if not cuentas:
+        return None, "DESCONOCIDO (no se pudo obtener el ID de cuenta)"
+    if all(c.startswith('DU') for c in cuentas):
+        return True, f"DEMO / PAPER TRADING (cuenta {', '.join(cuentas)})"
+    if any(c.startswith('DU') for c in cuentas):
+        return None, f"MIXTO: hay cuentas demo y reales a la vez ({', '.join(cuentas)}), revisa manualmente"
+    return False, f"REAL - DINERO REAL (cuenta {', '.join(cuentas)})"
+
+
+def avisar_modo_cuenta(ib):
+    """Imprime un aviso bien visible del modo de cuenta (demo/real). Se
+    llama al conectar y tras cada reconexion, por si el usuario cambiara de
+    cuenta o de puerto entre una sesion y otra."""
+    es_demo, modo_texto = obtener_modo_cuenta(ib)
+    log("#" * 60)
+    log(f"MODO DE CUENTA: {modo_texto}")
+    if es_demo is False:
+        log("ATENCION: esta es una cuenta REAL. Las ordenes de este bot son DINERO REAL, no una simulacion.")
+    log("#" * 60)
+    return modo_texto
+
+
+def ciclo_completo(ib, modo_texto="?"):
     log("=" * 60)
-    log("Iniciando nuevo ciclo de revision.")
+    log(f"Iniciando nuevo ciclo de revision. [{modo_texto}]")
     revisar_ventas(ib)
     revisar_compras(ib)
     log("Ciclo completado.")
@@ -1341,6 +1374,7 @@ def main():
     ib = IB()
     ib.connect('127.0.0.1', 4002, clientId=1)
     ib.RequestTimeout = 30  # segundos: evita que cualquier peticion se quede colgada sin limite
+    modo_texto = avisar_modo_cuenta(ib)
 
     resumenes_enviados_hoy = set()  # claves (mercado, fecha) para no repetir el resumen
 
@@ -1358,6 +1392,7 @@ def main():
                         ib.connect('127.0.0.1', 4002, clientId=1)
                         ib.RequestTimeout = 30
                         log(f"Reconexion con IB Gateway completada (intento {intento}/{REINTENTOS_RECONEXION}).")
+                        modo_texto = avisar_modo_cuenta(ib)
                         reconectado = True
                         break
                     except Exception as e:
@@ -1397,7 +1432,7 @@ def main():
 
             inicio_ciclo = time.monotonic()
             try:
-                ciclo_completo(ib)
+                ciclo_completo(ib, modo_texto)
             except Exception as e:
                 log(f"ERROR en el ciclo: {type(e).__name__}: {e}")
             duracion_ciclo = time.monotonic() - inicio_ciclo

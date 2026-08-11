@@ -759,6 +759,31 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+# 12. obtener_modo_cuenta: detecta cuenta DEMO (prefijo 'DU', convencion de
+#     IBKR) vs REAL vs mixta vs desconocida.
+# ---------------------------------------------------------------------------
+class _IBFalsoCuentas:
+    def __init__(self, cuentas):
+        self.cuentas = cuentas
+
+    def managedAccounts(self):
+        return self.cuentas
+
+
+es_demo, texto = bot.obtener_modo_cuenta(_IBFalsoCuentas(["DU1234567"]))
+check("obtener_modo_cuenta: cuenta DU... -> demo (True)", es_demo is True, f"texto={texto}")
+
+es_demo, texto = bot.obtener_modo_cuenta(_IBFalsoCuentas(["U1234567"]))
+check("obtener_modo_cuenta: cuenta U... (sin DU) -> real (False)", es_demo is False, f"texto={texto}")
+
+es_demo, texto = bot.obtener_modo_cuenta(_IBFalsoCuentas(["DU1111111", "U2222222"]))
+check("obtener_modo_cuenta: mezcla de demo y real -> None (ambiguo)", es_demo is None, f"texto={texto}")
+
+es_demo, texto = bot.obtener_modo_cuenta(_IBFalsoCuentas([]))
+check("obtener_modo_cuenta: sin cuentas -> None (desconocido)", es_demo is None, f"texto={texto}")
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()
