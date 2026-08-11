@@ -949,6 +949,12 @@ def generar_resumen_cierre_mercado(ib, mercado):
         key=lambda p: clave_orden(p.contract.symbol)
     )
 
+    # Nota de diagnostico: reqExecutions() es una llamada de red bloqueante
+    # a IBKR. Se deja un log justo antes, para que si algun dia se queda
+    # colgada (visto en produccion un episodio de ~38 minutos sin ninguna
+    # linea de log, aqui es el sospechoso principal) quede claro en el log
+    # DONDE se quedo parado el bot, en vez de un silencio sin pistas.
+    log(f"RESUMEN {mercado}: pidiendo historial de ejecuciones a IBKR...")
     try:
         ejecuciones = ib.reqExecutions(ExecutionFilter())
     except Exception as e:
