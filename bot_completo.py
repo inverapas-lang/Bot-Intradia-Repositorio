@@ -449,6 +449,23 @@ def crear_orden_mercado(accion, cantidad):
     return _sin_flags_legacy(MarketOrder(accion, cantidad))
 
 
+def es_cantidad_fraccionaria(cantidad):
+    return abs(cantidad - round(cantidad)) > 1e-6
+
+
+def crear_orden_mercado_cash(accion, importe_efectivo):
+    """Orden a mercado especificada por IMPORTE EN EFECTIVO en vez de numero
+    de acciones. Es la unica forma que acepta la API de IBKR para comprar o
+    vender una cantidad fraccionaria de acciones: enviar una cantidad de
+    acciones fraccionaria directamente (p.ej. totalQuantity=3.1449) es
+    rechazado por IBKR con el error 10243 ("No se puede introducir la orden
+    de tamano fraccionario a traves de la API"), visto en produccion en
+    TODAS las compras fraccionarias de US -> ninguna llegaba a ejecutarse."""
+    orden = MarketOrder(accion, 0)
+    orden.cashQty = round(importe_efectivo, 2)
+    return _sin_flags_legacy(orden)
+
+
 ESPERA_MAXIMA_ESTADO_ORDEN_SEGUNDOS = 10
 INTERVALO_CHEQUEO_ESTADO_ORDEN_SEGUNDOS = 0.5
 
@@ -472,6 +489,14 @@ def esperar_estado_final_orden(ib, trade, espera_maxima=ESPERA_MAXIMA_ESTADO_ORD
 
 def crear_orden_limitada(accion, cantidad, precio_limite):
     return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite))
+
+
+def crear_orden_limitada_cash(accion, importe_efectivo, precio_limite):
+    """Version 'cash quantity' de crear_orden_limitada, para cantidades
+    fraccionarias (vease crear_orden_mercado_cash)."""
+    orden = LimitOrder(accion, 0, precio_limite)
+    orden.cashQty = round(importe_efectivo, 2)
+    return _sin_flags_legacy(orden)
 
 
 def analizar_activo(ib, activo):
@@ -658,7 +683,14 @@ def revisar_ventas(ib):
                     f"(bruto {beneficio_pct_bruto:.2f}%), dentro de los ultimos "
                     f"{MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del cierre de {mercado} -> VENTA FORZADA (orden limitada).")
                 precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
-                orden = crear_orden_limitada('SELL', cantidad, precio_limite)
+                if es_cantidad_fraccionaria(cantidad):
+                    # Igual que en las compras: IBKR rechaza (error 10243)
+                    # cualquier orden con cantidad de acciones fraccionaria
+                    # enviada por API, asi que se manda por importe en
+                    # efectivo aproximado en vez de numero de acciones.
+                    orden = crear_orden_limitada_cash('SELL', cantidad * precio_actual, precio_limite)
+                else:
+                    orden = crear_orden_limitada('SELL', cantidad, precio_limite)
                 trade = ib.placeOrder(contrato, orden)
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
@@ -678,7 +710,10 @@ def revisar_ventas(ib):
             if bajista:
                 log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
                     f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden a mercado).")
-                orden = crear_orden_mercado('SELL', cantidad)
+                if es_cantidad_fraccionaria(cantidad):
+                    orden = crear_orden_mercado_cash('SELL', cantidad * precio_actual)
+                else:
+                    orden = crear_orden_mercado('SELL', cantidad)
                 trade = ib.placeOrder(contrato, orden)
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"VENTAS: {contrato.symbol} - orden a mercado, "
@@ -882,13 +917,17 @@ def revisar_compras(ib):
                 margen_disponible_moneda = 0
 
             importe_a_usar = min(presupuesto_operacion, margen_disponible_moneda)
+            fraccionable = FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False)
 
-            if FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False):
+            if fraccionable:
                 # Mercado US: se permite comprar una fraccion de accion, para
                 # poder invertir el presupuesto disponible aunque sea menor que
                 # el precio de una accion entera (util con carteras pequeñas).
+                # La orden se manda por IMPORTE EN EFECTIVO (cash quantity),
+                # que es la unica forma que admite la API de IBKR para
+                # cantidades fraccionarias (vease crear_orden_mercado_cash).
                 cantidad = round(importe_a_usar / precio_actual, DECIMALES_FRACCION)
-                if cantidad <= 0 or cantidad * precio_actual < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
+                if cantidad <= 0 or importe_a_usar < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
                     log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
                         f"({importe_a_usar:.2f} {currency}) no llega al minimo de "
                         f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} {currency} por operacion, se omite.")
@@ -913,7 +952,10 @@ def revisar_compras(ib):
             log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad:g} acciones "
                 f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
                 f"limite: {limite_por_valor_usd:.2f} USD).")
-            orden = crear_orden_mercado('BUY', cantidad)
+            if fraccionable:
+                orden = crear_orden_mercado_cash('BUY', importe_a_usar)
+            else:
+                orden = crear_orden_mercado('BUY', cantidad)
             trade = ib.placeOrder(contrato, orden)
             estado = esperar_estado_final_orden(ib, trade)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
