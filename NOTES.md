@@ -86,9 +86,15 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
    tengas el valor y el precio actual sea menor que tu precio medio (promediar a la baja).
 4. **Límite de exposición**: no compra si esa posición ya es ≥15% de la cartera total (USD).
 5. **Importe**: `min(presupuesto fijo, margen restante hasta el 15%)`.
-   - **US**: se permite comprar **fracción de acción** (hasta 4 decimales).
+   - **US**: se permite comprar **fracción de acción** (hasta 4 decimales). La orden se manda
+     por **importe en efectivo** (`cashQty`), no por número de acciones — ver bug crítico #9.
    - **HK/KR**: acciones/lotes enteros, redondeo hacia abajo al lote mínimo de IBKR.
 6. Órdenes siempre **a mercado** (no límite).
+7. Si el estado de la orden no confirma `Filled`, se vuelve a consultar la posición real en
+   IBKR unos segundos después (`verificar_posicion_tras_orden_no_confirmada`) para dar un
+   veredicto fiable en el log en vez de fiarse solo del objeto `Trade` (ver bug #10).
+8. Si se confirma que la compra abrió una posición **nueva desde cero** (no una ampliación),
+   se registra la fecha en `historial_compras.json` (ver sección de historial más abajo).
 
 ## Reglas de venta (`revisar_ventas`)
 
@@ -99,6 +105,29 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
   **venta forzada** con orden límite (0.2% por debajo del precio actual).
 - Si no, y el MACD de 5 min está bajista → vende **a mercado**.
 - Si MACD de 5 min alcista → se deja correr, aunque tenga beneficio.
+- Si el estado de la orden no confirma `Filled`, igual que en compras: se reconsulta la
+  posición real para dar un veredicto fiable en el log.
+
+## Historial de fecha de apertura (`historial_compras.json`)
+
+Archivo JSON local (fuera de git, en `.gitignore`), en la misma carpeta que `bot_completo.py`.
+Guarda, por cada valor, la fecha en la que se abrió la posición **desde cero**. Existe porque
+`reqExecutions()` de IBKR solo devuelve las ejecuciones del **día actual** — sin este archivo,
+el resumen de cierre mostraba "?" como fecha de apertura para cualquier posición comprada en
+días anteriores.
+
+- Se registra/actualiza solo cuando se confirma una compra que abre una posición nueva (no
+  se tenía nada de ese valor antes).
+- **No se toca** en compras adicionales sobre una posición ya abierta (promediar a la baja):
+  la fecha sigue siendo la de la apertura original.
+- **No se borra explícitamente al vender** — simplemente queda ahí como fecha histórica hasta
+  que se vuelve a comprar ese valor desde cero (momento en el que se sobreescribe). Esto es
+  intencional: así el resumen de cierre de mercado, generado varias horas después del cierre,
+  todavía puede mostrar la fecha de apertura correcta de una posición que se cerró ese mismo día.
+- Funciones clave: `cargar_historial_compras`, `guardar_historial_compras`,
+  `registrar_apertura_de_posicion`, `obtener_apertura_registrada`.
+- Si el archivo se borra o se mueve a otro ordenador, simplemente se pierde el historial
+  acumulado (vuelve a mostrar "?" hasta la siguiente compra de cada valor) — no rompe nada.
 
 ## Comisiones estimadas
 
@@ -141,8 +170,20 @@ de cierre.
    API. Desde que se activaron las fracciones en US, **ninguna compra fraccionaria se había
    ejecutado nunca** (todas quedaban `Cancelled`). → se arregló usando el campo `cashQty`
    de IBKR (importe en efectivo, no nº de acciones) para toda orden fraccionaria, tanto en
-   compras como en ventas. **No verificado contra IBKR real** — pendiente de confirmar en
-   la próxima compra fraccionaria real que se dispare.
+   compras como en ventas. **Sigue sin verificarse contra una compra fraccionaria real** tras
+   el arreglo — pendiente de confirmar en la próxima que se dispare.
+10. **El estado de la orden puede mentir**: caso real confirmado con una venta de JPM que
+    el log marcó como `Cancelled` (0 acciones vendidas), pero que en realidad **sí se
+    ejecutó** — se vio en el resumen de cierre de mercado, que usa `reqExecutions()`
+    (fuente de verdad de IBKR), no el objeto `Trade` que sigue nuestro código. Pasa cuando
+    IBKR cancela la orden original por dentro (p.ej. tras ajustar el TIF) y la reenvía como
+    una orden de reemplazo que nuestro código nunca llega a rastrear. → cuando una orden no
+    confirma `Filled`, ahora se vuelve a consultar la posición real en IBKR unos segundos
+    después y se compara con la cantidad de antes, dando un veredicto fiable en el log.
+11. **Fecha de apertura "?" para posiciones de días anteriores**: `reqExecutions()` de IBKR
+    solo cubre el día actual, así que el resumen de cierre no podía saber cuándo se compró
+    por primera vez un valor comprado en un día anterior. → historial persistente local
+    (`historial_compras.json`), ver sección dedicada más arriba.
 
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 
