@@ -38,6 +38,8 @@ Revisa bien la configuracion antes de dejarlo corriendo desatendido.
 """
 
 import json
+import os
+import threading
 import time
 from datetime import datetime, time as dt_time, timedelta
 from collections import defaultdict
@@ -262,7 +264,55 @@ TEMPORALIDADES = [
 NOMBRES_4_CORTAS = ["1 minuto", "5 minutos", "15 minutos", "30 minutos"]
 
 
+# --- Vigilante de congelacion del proceso ---
+# Se ha visto en produccion que una llamada bloqueante a IBKR (p.ej.
+# reqContractDetails) puede quedarse colgada durante HORAS sin devolver
+# nunca ni lanzar una excepcion, tipicamente tras un corte de red brusco
+# (WinError 10054). Como eso pasa dentro del hilo principal, ningun
+# try/except de nuestro propio codigo puede detectarlo ni recuperarse: el
+# hilo esta literalmente parado, no lanzando errores. La unica forma
+# fiable de detectarlo es un hilo aparte que vigile que seguimos "vivos" y,
+# si no, fuerce el cierre del proceso entero.
+_ultimo_latido = time.monotonic()
+UMBRAL_CONGELACION_SEGUNDOS = 20 * 60  # 20 min sin actividad -> se asume congelado
+
+
+def actualizar_latido():
+    global _ultimo_latido
+    _ultimo_latido = time.monotonic()
+
+
+def vigilante_congelacion():
+    """Hilo en segundo plano (daemon) que comprueba cada minuto si ha
+    pasado demasiado tiempo desde la ultima señal de vida (cualquier log,
+    o cada tramo de una espera larga controlada). Si el hilo principal
+    lleva mas de UMBRAL_CONGELACION_SEGUNDOS en silencio, lo mas probable
+    es que este bloqueado sin remedio dentro de una llamada a IBKR que
+    nunca va a volver. En ese caso se fuerza el cierre INMEDIATO del
+    proceso (os._exit, sin dar opcion a limpiar nada, porque el hilo
+    principal esta parado y no puede ayudar).
+
+    IMPORTANTE: esto NO reinicia el bot por si solo. El bucle de reintento
+    que ya tiene el script vive en el MISMO proceso que se acaba de matar,
+    asi que no sirve de nada aqui. Para que el bot se recupere solo tras
+    esto, hace falta un supervisor EXTERNO (un .bat con un bucle que
+    vuelva a lanzar "python bot_completo.py" si el proceso termina, el
+    Programador de tareas de Windows con reintento, etc.)."""
+    while True:
+        time.sleep(60)
+        inactividad = time.monotonic() - _ultimo_latido
+        if inactividad > UMBRAL_CONGELACION_SEGUNDOS:
+            print(f"\n[VIGILANTE] El programa lleva {inactividad / 60:.0f} minutos sin dar "
+                  f"ninguna señal de vida: probablemente esta congelado dentro de una llamada "
+                  f"a IBKR que nunca ha respondido. Forzando el cierre del proceso. Si no tienes "
+                  f"un supervisor externo que lo reinicie automaticamente (script .bat en bucle, "
+                  f"Tarea Programada, etc.), el bot se quedara parado hasta que lo reinicies tu "
+                  f"a mano.", flush=True)
+            os._exit(1)
+
+
 def log(mensaje):
+    actualizar_latido()
     ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ahora}] {mensaje}")
 
@@ -498,6 +548,16 @@ def crear_orden_limitada_cash(accion, importe_efectivo, precio_limite):
     orden = LimitOrder(accion, 0, precio_limite)
     orden.cashQty = round(importe_efectivo, 2)
     return _sin_flags_legacy(orden)
+
+
+def orden_rechazada_por_codigo(trade, codigos_error):
+    """True si el registro de la orden (trade.log) contiene alguno de los
+    codigos de error de IBKR indicados. Se usa para detectar rechazos
+    concretos (p.ej. 10244: "cash quantity no admitida en esta orden" -no
+    todos los valores tienen habilitadas las fracciones via API en IBKR,
+    aunque el mercado en general si las soporte-) y reaccionar de forma
+    distinta a un fallo generico."""
+    return any(getattr(entry, 'errorCode', None) in codigos_error for entry in getattr(trade, 'log', []))
 
 
 def analizar_activo(ib, activo):
@@ -1055,6 +1115,27 @@ def revisar_compras(ib):
             estado = esperar_estado_final_orden(ib, trade)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
 
+            # Plan B: no todos los valores del mercado US tienen habilitadas
+            # las fracciones via API en IBKR aunque el mercado en general si
+            # las soporte (visto en produccion: error 10244 "La cantidad de
+            # efectivo no puede utilizarse en esta orden" para varios
+            # valores concretos). Si pasa eso, se reintenta con acciones
+            # ENTERAS en vez de rendirse, siempre que el presupuesto llegue
+            # para al menos 1.
+            if fraccionable and estado != 'Filled' and orden_rechazada_por_codigo(trade, {10244}):
+                cantidad_entera_fallback = int(importe_a_usar // precio_actual)
+                if cantidad_entera_fallback >= 1:
+                    log(f"COMPRAS: {ticker} - este valor no admite fracciones via API (error 10244); "
+                        f"reintentando con {cantidad_entera_fallback} acciones enteras.")
+                    orden = crear_orden_mercado('BUY', cantidad_entera_fallback)
+                    trade = ib.placeOrder(contrato, orden)
+                    estado = esperar_estado_final_orden(ib, trade)
+                    log(f"COMPRAS: {ticker} - estado de la orden (acciones enteras): {estado}")
+                else:
+                    log(f"COMPRAS: {ticker} - este valor no admite fracciones via API (error 10244) "
+                        f"y el presupuesto ({importe_a_usar:.2f} {currency}) no llega ni para 1 accion "
+                        f"entera a {precio_actual} {currency}, se omite.")
+
             compra_confirmada = estado == 'Filled'
             if not compra_confirmada:
                 cantidad_tras_compra = verificar_posicion_tras_orden_no_confirmada(
@@ -1362,6 +1443,7 @@ def esperar_pumpeando(ib, segundos_totales, intervalo_chequeo=30):
     while restante > 0:
         tramo = min(intervalo_chequeo, restante)
         ib.sleep(tramo)
+        actualizar_latido()  # espera larga legitima: no es una congelacion, se avisa al vigilante
         restante -= tramo
         if not ib.isConnected():
             log("Conexion perdida durante la espera, se corta la espera para reconectar antes.")
@@ -1370,6 +1452,8 @@ def esperar_pumpeando(ib, segundos_totales, intervalo_chequeo=30):
 
 def main():
     evitar_suspension_windows()
+    actualizar_latido()
+    threading.Thread(target=vigilante_congelacion, daemon=True).start()
 
     ib = IB()
     ib.connect('127.0.0.1', 4002, clientId=1)

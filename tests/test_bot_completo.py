@@ -784,6 +784,86 @@ check("obtener_modo_cuenta: sin cuentas -> None (desconocido)", es_demo is None,
 
 
 # ---------------------------------------------------------------------------
+# 13. orden_rechazada_por_codigo + vigilante de congelacion (solo las
+#     piezas que se pueden probar sin arrancar el hilo real, que llamaria a
+#     os._exit y mataria el propio proceso de tests).
+# ---------------------------------------------------------------------------
+class _TradeLogFalso:
+    def __init__(self, errorCode):
+        self.errorCode = errorCode
+
+
+class _TradeFalso:
+    def __init__(self, codigos_error):
+        self.log = [_TradeLogFalso(c) for c in codigos_error]
+
+
+check("orden_rechazada_por_codigo: detecta el codigo 10244 presente",
+      bot.orden_rechazada_por_codigo(_TradeFalso([10349, 10244]), {10244}) is True)
+check("orden_rechazada_por_codigo: False si el codigo no esta",
+      bot.orden_rechazada_por_codigo(_TradeFalso([10349]), {10244}) is False)
+check("orden_rechazada_por_codigo: False con trade.log vacio",
+      bot.orden_rechazada_por_codigo(_TradeFalso([]), {10244}) is False)
+
+# actualizar_latido / log() mantienen viva la señal que vigila el hilo de
+# congelacion (sin arrancar el hilo en si).
+bot._ultimo_latido = 0.0
+bot.actualizar_latido()
+check("actualizar_latido: refresca _ultimo_latido a un valor reciente",
+      bot._ultimo_latido > 0.0)
+
+bot._ultimo_latido = 0.0
+bot.log("mensaje de prueba, no deberia aparecer como fallo")
+check("log(): tambien refresca _ultimo_latido (cada log es una señal de vida)",
+      bot._ultimo_latido > 0.0)
+
+
+# ---------------------------------------------------------------------------
+# 14. Plan B ante el error 10244 (valor sin fracciones habilitadas via API):
+#     debe reintentar con acciones ENTERAS en vez de rendirse.
+# ---------------------------------------------------------------------------
+class _IBFalsoRechazoFraccion(_IBFalsoCompras):
+    def __init__(self):
+        super().__init__()
+        self.ordenes_objeto = []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_objeto.append(orden)
+        if orden.totalQuantity == 0:
+            # La orden por cashQty siempre es rechazada con el error 10244
+            trade = types.SimpleNamespace(
+                orderStatus=types.SimpleNamespace(status="Cancelled"),
+                isDone=lambda: True,
+                log=[_TradeLogFalso(10244)],
+            )
+            return trade
+        # La orden de acciones enteras (el fallback) SI se ejecuta
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
+                                      isDone=lambda: True, log=[])
+
+
+bot.ACTIVOS = [{"ticker": "SINFRACCION", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+ib_falso_rechazo = _IBFalsoRechazoFraccion()
+try:
+    bot.revisar_compras(ib_falso_rechazo)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("Plan B error 10244: se intentaron 2 ordenes (cashQty rechazada + fallback en acciones enteras)",
+      len(ib_falso_rechazo.ordenes_objeto) == 2,
+      f"ordenes={[(o.totalQuantity, getattr(o, 'cashQty', None)) for o in ib_falso_rechazo.ordenes_objeto]}")
+check("Plan B error 10244: la primera orden fue por cashQty (totalQuantity=0)",
+      len(ib_falso_rechazo.ordenes_objeto) == 2 and ib_falso_rechazo.ordenes_objeto[0].totalQuantity == 0)
+check("Plan B error 10244: la segunda orden (fallback) fue por acciones ENTERAS (totalQuantity>0)",
+      len(ib_falso_rechazo.ordenes_objeto) == 2 and ib_falso_rechazo.ordenes_objeto[1].totalQuantity >= 1,
+      f"totalQuantity={ib_falso_rechazo.ordenes_objeto[1].totalQuantity if len(ib_falso_rechazo.ordenes_objeto) == 2 else 'N/A'}")
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()
