@@ -138,6 +138,44 @@ visible con `#` de por medio, y además una marca corta `[DEMO/PAPER TRADING (cu
 `[REAL - DINERO REAL (cuenta ...)]` en la línea de "Iniciando nuevo ciclo" de cada ciclo, para
 que sea imposible perder de vista el modo con solo mirar el log reciente.
 
+## Vigilante de congelación del proceso — IMPORTANTE: requiere supervisor externo
+
+Se vio en producción un episodio real de **~10,7 horas colgado sin ningún log**, tras un
+`WinError 10054` (corte de red). El hilo principal se quedó bloqueado dentro de una llamada
+bloqueante a IBKR (probablemente `reqContractDetails`) que nunca devolvió ni lanzó excepción
+— ningún `try/except` de nuestro código puede detectar eso, porque el hilo está literalmente
+parado, no lanzando errores.
+
+Se añadió un **hilo vigilante en segundo plano** (`vigilante_congelacion`, arrancado al inicio
+de `main()`) que comprueba cada minuto cuánto tiempo ha pasado desde la última "señal de vida"
+(`_ultimo_latido`, que se refresca en cada `log()` y en cada tramo de `esperar_pumpeando`). Si
+pasan más de `UMBRAL_CONGELACION_SEGUNDOS` (20 min) en silencio, fuerza el cierre del proceso
+con `os._exit(1)`.
+
+**Esto NO reinicia el bot por sí solo** — el bucle de reintento que ya tiene el script
+(`if __name__ == "__main__": while True: ...`) vive en el **mismo proceso** que se acaba de
+matar, así que no sirve de nada aquí. Para que el bot se recupere solo tras esto, **hace falta
+un supervisor externo**. Se añadió `ejecutar_bot.bat` (relanza `python bot_completo.py`
+automáticamente si el proceso termina por cualquier motivo) — el usuario debería lanzar el bot
+con este `.bat` en vez de `python bot_completo.py` directamente, para que el vigilante sea
+realmente útil. **Sin este `.bat` (o un supervisor equivalente), el vigilante solo sirve para
+que el bot se quede parado del todo más rápido en vez de colgado silenciosamente** — sigue
+siendo mejor (se nota el problema al momento en vez de 10 horas después), pero no es
+autorrecuperación completa.
+
+## Plan B ante valores sin fracciones habilitadas en la API (error 10244)
+
+No todos los valores de US tienen habilitadas las fracciones vía API en IBKR, aunque el
+mercado en general sí las soporte — es una restricción por instrumento del lado de IBKR, no
+un fallo nuestro. Visto en producción con `ORCL`, `PLTR`, `CAT`, `NFLX`, `INTC`: la orden por
+`cashQty` se cancela con `Error 10244: La cantidad de efectivo no puede utilizarse en esta
+orden`. Antes, esa señal de compra simplemente se perdía.
+
+Ahora `orden_rechazada_por_codigo(trade, {10244})` detecta este código concreto en el registro
+de la orden (`trade.log`), y si pasa, se reintenta automáticamente con **acciones enteras**
+(redondeando hacia abajo el presupuesto disponible), en vez de rendirse. Si el presupuesto no
+llega ni para 1 acción entera, ahí sí se omite con un aviso claro en el log.
+
 ## Comisiones estimadas
 
 `0.07%` del valor de la operación, con mínimo de 1€ (convertido a la divisa local). Se
