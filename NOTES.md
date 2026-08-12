@@ -155,7 +155,7 @@ con `os._exit(1)`.
 **Esto NO reinicia el bot por sí solo** — el bucle de reintento que ya tiene el script
 (`if __name__ == "__main__": while True: ...`) vive en el **mismo proceso** que se acaba de
 matar, así que no sirve de nada aquí. Para que el bot se recupere solo tras esto, **hace falta
-un supervisor externo**. Se añadió `ejecutar_bot.bat` (relanza `python bot_completo.py`
+un supervisor externo**. Se añadió `run.bot.bat` (relanza `python bot_completo.py`
 automáticamente si el proceso termina por cualquier motivo) — el usuario debería lanzar el bot
 con este `.bat` en vez de `python bot_completo.py` directamente, para que el vigilante sea
 realmente útil. **Sin este `.bat` (o un supervisor equivalente), el vigilante solo sirve para
