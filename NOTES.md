@@ -158,10 +158,45 @@ matar, así que no sirve de nada aquí. Para que el bot se recupere solo tras es
 un supervisor externo**. Se añadió `run.bot.bat` (relanza `python bot_completo.py`
 automáticamente si el proceso termina por cualquier motivo) — el usuario debería lanzar el bot
 con este `.bat` en vez de `python bot_completo.py` directamente, para que el vigilante sea
-realmente útil. **Sin este `.bat` (o un supervisor equivalente), el vigilante solo sirve para
-que el bot se quede parado del todo más rápido en vez de colgado silenciosamente** — sigue
-siendo mejor (se nota el problema al momento en vez de 10 horas después), pero no es
-autorrecuperación completa.
+realmente útil.
+
+### El hilo interno NO es del todo fiable — caso real en producción
+
+Se vio en producción que el hilo `vigilante_congelacion` **no saltó solo**: el bot se congeló
+a las 20:01, y el aviso `[VIGILANTE]` no apareció hasta que el usuario pulsó **Ctrl+C** a mano
+mucho después. Motivo: si el hilo principal se queda atascado dentro de una llamada de bajo
+nivel que nunca cede el turno (el **GIL** de Python — el intérprete solo puede ejecutar un hilo
+Python a la vez), **ningún otro hilo del mismo proceso puede ejecutarse tampoco**, ni siquiera
+el propio vigilante. Un hilo dentro del mismo `python.exe` no es inmune a que ese mismo
+`python.exe` esté paralizado.
+
+### La solución real: vigilante EXTERNO (`vigilante_externo.ps1`)
+
+Para tener un vigilante de verdad inmune a esto, tiene que ser un **proceso de Windows aparte**,
+no un hilo dentro de Python. Se añadió:
+
+- `bot_completo.py` ahora escribe, además de refrescar `_ultimo_latido` en memoria:
+  - **`latido_bot.txt`**: la hora actual, cada vez que hay actividad (máximo cada 10s, para no
+    escribir en disco en cada log).
+  - **`bot.pid`**: el PID del proceso, escrito una vez al arrancar (`escribir_pid()` en `main()`).
+- **`vigilante_externo.ps1`**: script de PowerShell independiente que corre cada minuto, revisa
+  cuándo se modificó `latido_bot.txt` por última vez y, si pasan más de 25 minutos (deliberadamente
+  algo más que el umbral del vigilante interno, 20 min, para darle a este la primera oportunidad),
+  mata el proceso por su PID (`Stop-Process -Id <pid> -Force`). Al morir el proceso, `run.bot.bat`
+  lo relanza solo.
+
+**Cómo usarlo**: dejar corriendo `run.bot.bat` en una ventana y, en otra ventana aparte,
+`powershell -ExecutionPolicy Bypass -File vigilante_externo.ps1`. Ambos deben estar corriendo a
+la vez para tener protección completa. Ideal: configurar `vigilante_externo.ps1` como Tarea
+Programada de Windows que arranque solo al iniciar sesión, para no depender de acordarse de
+abrirlo a mano cada vez.
+
+`latido_bot.txt` y `bot.pid` están en `.gitignore` (son estado de ejecución, no código).
+
+**Sin `run.bot.bat` + `vigilante_externo.ps1` corriendo los dos a la vez, sigue existiendo el
+riesgo de que una congelación por GIL se quede sin detectar** — el hilo interno solo cubre
+congelaciones "normales" (bucles que sí ceden el turno de vez en cuando); el externo cubre el
+resto.
 
 ## Plan B ante valores sin fracciones habilitadas en la API (error 10244)
 

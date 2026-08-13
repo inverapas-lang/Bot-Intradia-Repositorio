@@ -5,6 +5,7 @@ prueban calculos matematicos y de horarios con datos simulados.
 """
 import os
 import sys
+import tempfile
 import types
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -12,6 +13,14 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bot_completo as bot
 import pandas as pd
+
+# Cada llamada a bot.log()/bot.actualizar_latido() escribe en disco (senal de
+# vida para el vigilante externo). Se redirige a una carpeta temporal desde
+# el principio para que correr los tests no deje "latido_bot.txt" ni
+# "bot.pid" tirados en la carpeta del repo.
+_DIR_TEMP_ESTADO_RUNTIME = tempfile.mkdtemp()
+bot.ARCHIVO_LATIDO = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "latido_bot.txt")
+bot.ARCHIVO_PID = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "bot.pid")
 
 fallos = []
 
@@ -806,16 +815,27 @@ check("orden_rechazada_por_codigo: False con trade.log vacio",
       bot.orden_rechazada_por_codigo(_TradeFalso([]), {10244}) is False)
 
 # actualizar_latido / log() mantienen viva la señal que vigila el hilo de
-# congelacion (sin arrancar el hilo en si).
+# congelacion (sin arrancar el hilo en si). ARCHIVO_LATIDO/ARCHIVO_PID ya
+# estan redirigidos a una carpeta temporal desde el principio del archivo,
+# para no dejar "latido_bot.txt" ni "bot.pid" tirados en el repo.
 bot._ultimo_latido = 0.0
+bot._ultimo_latido_archivo = 0.0
 bot.actualizar_latido()
 check("actualizar_latido: refresca _ultimo_latido a un valor reciente",
       bot._ultimo_latido > 0.0)
+check("actualizar_latido: escribe el archivo de latido en disco",
+      os.path.isfile(bot.ARCHIVO_LATIDO))
 
 bot._ultimo_latido = 0.0
 bot.log("mensaje de prueba, no deberia aparecer como fallo")
 check("log(): tambien refresca _ultimo_latido (cada log es una señal de vida)",
       bot._ultimo_latido > 0.0)
+
+# escribir_pid: guarda el PID del proceso, para que el vigilante externo
+# (vigilante_externo.ps1) sepa que proceso matar si detecta congelacion.
+bot.escribir_pid()
+check("escribir_pid: escribe el PID del proceso actual en el archivo",
+      os.path.isfile(bot.ARCHIVO_PID) and open(bot.ARCHIVO_PID).read().strip() == str(os.getpid()))
 
 
 # ---------------------------------------------------------------------------

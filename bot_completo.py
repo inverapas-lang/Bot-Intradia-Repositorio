@@ -270,34 +270,58 @@ NOMBRES_4_CORTAS = ["1 minuto", "5 minutos", "15 minutos", "30 minutos"]
 # nunca ni lanzar una excepcion, tipicamente tras un corte de red brusco
 # (WinError 10054). Como eso pasa dentro del hilo principal, ningun
 # try/except de nuestro propio codigo puede detectarlo ni recuperarse: el
-# hilo esta literalmente parado, no lanzando errores. La unica forma
-# fiable de detectarlo es un hilo aparte que vigile que seguimos "vivos" y,
-# si no, fuerce el cierre del proceso entero.
+# hilo esta literalmente parado, no lanzando errores.
+#
+# IMPORTANTE (aprendido en produccion): un hilo Python DENTRO del mismo
+# proceso (vigilante_congelacion, mas abajo) NO es del todo fiable para
+# esto. Si el hilo principal se queda atascado en una llamada de bajo nivel
+# que no cede el turno (el "GIL" de Python), NINGUN otro hilo del mismo
+# proceso puede ejecutarse tampoco -ni siquiera el vigilante-. Se vio
+# exactamente esto: el aviso del vigilante no salio solo, hizo falta
+# pulsar Ctrl+C para que "despertara". Por eso, ADEMAS del hilo interno
+# (que sirve de primera linea de defensa por si acaso), se escribe un
+# archivo de "latido" en disco que un proceso EXTERNO (fuera de Python del
+# todo, ver vigilante_externo.ps1) puede vigilar de forma fiable, inmune a
+# que el interprete de Python este bloqueado.
 _ultimo_latido = time.monotonic()
+_ultimo_latido_archivo = 0.0
 UMBRAL_CONGELACION_SEGUNDOS = 20 * 60  # 20 min sin actividad -> se asume congelado
+ARCHIVO_LATIDO = "latido_bot.txt"
+ARCHIVO_PID = "bot.pid"
+INTERVALO_MIN_ESCRITURA_LATIDO_SEGUNDOS = 10  # no reescribir el archivo en CADA log, basta cada 10s
 
 
 def actualizar_latido():
-    global _ultimo_latido
-    _ultimo_latido = time.monotonic()
+    global _ultimo_latido, _ultimo_latido_archivo
+    ahora = time.monotonic()
+    _ultimo_latido = ahora
+    if ahora - _ultimo_latido_archivo >= INTERVALO_MIN_ESCRITURA_LATIDO_SEGUNDOS:
+        _ultimo_latido_archivo = ahora
+        try:
+            with open(ARCHIVO_LATIDO, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except OSError:
+            pass  # si falla escribir el archivo no es motivo para romper nada mas
+
+
+def escribir_pid():
+    """Guarda el PID (identificador de proceso) actual en un archivo, para
+    que vigilante_externo.ps1 sepa exactamente que proceso matar si detecta
+    una congelacion, sin arriesgarse a matar otro python.exe distinto que
+    pueda estar corriendo en el mismo ordenador."""
+    try:
+        with open(ARCHIVO_PID, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        log(f"No se pudo escribir el archivo de PID ({ARCHIVO_PID}): {type(e).__name__}: {e}")
 
 
 def vigilante_congelacion():
     """Hilo en segundo plano (daemon) que comprueba cada minuto si ha
-    pasado demasiado tiempo desde la ultima señal de vida (cualquier log,
-    o cada tramo de una espera larga controlada). Si el hilo principal
-    lleva mas de UMBRAL_CONGELACION_SEGUNDOS en silencio, lo mas probable
-    es que este bloqueado sin remedio dentro de una llamada a IBKR que
-    nunca va a volver. En ese caso se fuerza el cierre INMEDIATO del
-    proceso (os._exit, sin dar opcion a limpiar nada, porque el hilo
-    principal esta parado y no puede ayudar).
-
-    IMPORTANTE: esto NO reinicia el bot por si solo. El bucle de reintento
-    que ya tiene el script vive en el MISMO proceso que se acaba de matar,
-    asi que no sirve de nada aqui. Para que el bot se recupere solo tras
-    esto, hace falta un supervisor EXTERNO (un .bat con un bucle que
-    vuelva a lanzar "python bot_completo.py" si el proceso termina, el
-    Programador de tareas de Windows con reintento, etc.)."""
+    pasado demasiado tiempo desde la ultima señal de vida. Sirve como
+    primera linea de defensa, pero NO es del todo fiable por si solo (ver
+    nota mas arriba) -para una proteccion de verdad, usar tambien
+    vigilante_externo.ps1 como proceso separado."""
     while True:
         time.sleep(60)
         inactividad = time.monotonic() - _ultimo_latido
@@ -1452,6 +1476,7 @@ def esperar_pumpeando(ib, segundos_totales, intervalo_chequeo=30):
 
 def main():
     evitar_suspension_windows()
+    escribir_pid()
     actualizar_latido()
     threading.Thread(target=vigilante_congelacion, daemon=True).start()
 

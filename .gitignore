@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 historial_compras.json
+latido_bot.txt
+bot.pid
