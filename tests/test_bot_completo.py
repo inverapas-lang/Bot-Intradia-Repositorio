@@ -884,6 +884,77 @@ check("Plan B error 10244: la segunda orden (fallback) fue por acciones ENTERAS 
 
 
 # ---------------------------------------------------------------------------
+# 15. generar_resumen_cierre_mercado: caso real de produccion visto con QCOM
+#     -> el historial persistente guardaba la apertura de una compra
+#     POSTERIOR a la venta que se estaba resumiendo (el valor se volvio a
+#     comprar el mismo dia despues de cerrar esta ronda), asi que la tabla
+#     mostraba "Abierta desde" con una hora DESPUES de "Cerrada a las". Debe
+#     preferir la compra calculada de reqExecutions() (anterior a la venta)
+#     en vez de la fecha registrada. Tambien se comprueba que aparecen los
+#     totales en USD/EUR pedidos.
+# ---------------------------------------------------------------------------
+import contextlib
+import io
+
+
+class _EjecucionFalsa:
+    def __init__(self, side, time, shares, avgPrice, symbol, currency="USD"):
+        self.contract = _Contrato(symbol, currency)
+        self.execution = types.SimpleNamespace(side=side, time=time, shares=shares, avgPrice=avgPrice)
+
+
+class _IBFalsoResumen:
+    def __init__(self, ejecuciones):
+        self._ejecuciones = ejecuciones
+
+    def positions(self):
+        return []
+
+    def reqExecutions(self, filtro):
+        return self._ejecuciones
+
+
+_hoy_resumen = datetime.now()
+_compra_1 = _hoy_resumen.replace(hour=13, minute=0, second=0, microsecond=0)
+_venta = _hoy_resumen.replace(hour=15, minute=0, second=0, microsecond=0)
+_compra_2_posterior = _hoy_resumen.replace(hour=17, minute=0, second=0, microsecond=0)
+
+ejecuciones_qcom = [
+    _EjecucionFalsa("BOT", _compra_1, 10, 100.0, "QCOM"),
+    _EjecucionFalsa("SLD", _venta, 10, 110.0, "QCOM"),
+    _EjecucionFalsa("BOT", _compra_2_posterior, 5, 120.0, "QCOM"),  # ronda NUEVA, tras la venta
+]
+
+archivo_historial_original_resumen = bot.ARCHIVO_HISTORIAL_COMPRAS
+directorio_temp_resumen = tempfile.mkdtemp()
+bot.ARCHIVO_HISTORIAL_COMPRAS = os.path.join(directorio_temp_resumen, "historial_resumen_test.json")
+# El historial registra la apertura de la ronda ACTUAL (la compra de las
+# 17:00), que es posterior a la venta de las 15:00 que se esta resumiendo.
+bot.guardar_historial_compras({bot.clave_historial("US", "QCOM"): _compra_2_posterior.isoformat(timespec="seconds")})
+
+salida_resumen = io.StringIO()
+try:
+    with contextlib.redirect_stdout(salida_resumen):
+        bot.generar_resumen_cierre_mercado(_IBFalsoResumen(ejecuciones_qcom), "US")
+finally:
+    bot.ARCHIVO_HISTORIAL_COMPRAS = archivo_historial_original_resumen
+
+texto_resumen = salida_resumen.getvalue()
+linea_qcom = next((l for l in texto_resumen.splitlines() if l.strip().startswith("QCOM") or "QCOM" in l), "")
+
+check("resumen cierre: la fila de QCOM usa la compra de las 13:00 (previa a la venta), no la de las 17:00",
+      "13:00" in linea_qcom and "17:00" not in linea_qcom,
+      f"linea={linea_qcom!r}")
+check("resumen cierre: la fila de QCOM muestra la venta de las 15:00",
+      "15:00" in linea_qcom, f"linea={linea_qcom!r}")
+check("resumen cierre: aparece el total de ganancia del dia en USD y EUR",
+      "TOTAL ganancia hoy (US)" in texto_resumen and "USD" in texto_resumen and "EUR" in texto_resumen,
+      f"salida={texto_resumen!r}")
+check("resumen cierre: el total invertido de posiciones abiertas sigue mostrando USD y EUR (sin posiciones abiertas aqui, no debe fallar)",
+      "ERROR" not in texto_resumen and "Traceback" not in texto_resumen)
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()

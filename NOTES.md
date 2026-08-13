@@ -128,6 +128,17 @@ días anteriores.
   `registrar_apertura_de_posicion`, `obtener_apertura_registrada`.
 - Si el archivo se borra o se mueve a otro ordenador, simplemente se pierde el historial
   acumulado (vuelve a mostrar "?" hasta la siguiente compra de cada valor) — no rompe nada.
+- En la tabla de "Operaciones cerradas hoy" del resumen, este historial es solo el **fallback**:
+  se prioriza la fecha calculada de `reqExecutions()` (ver bug #13 en la lista de abajo), para
+  no mostrar la apertura de una ronda de compra posterior a la venta que se está resumiendo.
+
+## Totales en el resumen de cierre de mercado
+
+Además de las tablas de detalle por símbolo (que se mantienen igual), el resumen ahora muestra:
+- **Posiciones abiertas**: fila `TOTAL` con el invertido y beneficio/pérdida no realizado ya
+  existían; se añadió el total invertido también en **USD** (antes solo en EUR).
+- **Operaciones cerradas hoy**: fila nueva `TOTAL ganancia hoy (<mercado>)` con la suma de la
+  ganancia neta del día en **USD y EUR** (no incluye filas `N/D` sin datos suficientes, como VZ).
 
 ## Aviso de modo de cuenta (DEMO vs REAL)
 
@@ -266,6 +277,27 @@ de cierre.
     solo cubre el día actual, así que el resumen de cierre no podía saber cuándo se compró
     por primera vez un valor comprado en un día anterior. → historial persistente local
     (`historial_compras.json`), ver sección dedicada más arriba.
+12. **Vigilante interno no despertaba solo (GIL)**: ver sección dedicada más arriba
+    ("La solución real: vigilante EXTERNO"). → `vigilante_externo.ps1`.
+13. **Fila de operación cerrada con "Abierta desde" DESPUÉS de "Cerrada a las" (caso real:
+    QCOM)**: en la tabla de "Operaciones cerradas hoy", la fecha de apertura mostrada
+    siempre venía del historial persistente (`historial_compras.json`), que guarda la
+    apertura de la posición **actual/más reciente** de ese símbolo. Si el bot volvía a
+    comprar el mismo valor el mismo día, DESPUÉS de haber cerrado una ronda anterior, el
+    historial ya tenía la fecha de esa compra nueva y posterior — así que la fila de la
+    venta antigua mostraba una "Abierta desde" con hora **posterior** a "Cerrada a las"
+    (visto en producción: QCOM "Abierta desde 17:18" / "Cerrada a las 15:13"). → en esa
+    tabla concreta ahora se prioriza la compra calculada a partir de `reqExecutions()`
+    (ya filtrada a compras anteriores a esa venta) sobre la fecha del historial; solo se
+    usa el historial si no hay ninguna compra de hoy que explique la venta (posición
+    arrastrada de un día anterior). La tabla de posiciones **abiertas** no tenía este
+    problema (solo hay una ronda en curso por definición) y sigue igual.
+14. **`VZ` sin fecha de apertura (`N/D`)**: cuando ni `reqExecutions()` (solo cubre hoy) ni
+    el historial persistente tienen ningún registro de compra para ese símbolo, no hay
+    forma de saber cuándo se abrió — típicamente porque la posición ya existía en la
+    cuenta antes de que existiera el historial, o se abrió fuera del bot. **No es un bug
+    recuperable**: no hay dato que mostrar. Se mostrará bien la próxima vez que ese valor
+    se compre de cero (quedará registrado en el historial en ese momento).
 
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 

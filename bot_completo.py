@@ -1261,6 +1261,8 @@ def generar_resumen_cierre_mercado(ib, mercado):
 
     total_invertido_eur_acumulado = 0.0
     total_valor_actual_eur_acumulado = 0.0
+    total_invertido_usd_acumulado = 0.0
+    total_valor_actual_usd_acumulado = 0.0
 
     for pos in posiciones:
         symbol = pos.contract.symbol
@@ -1280,7 +1282,9 @@ def generar_resumen_cierre_mercado(ib, mercado):
         coste_medio_con_comision = pos.avgCost + (comision_estimada / pos.position)
         total_invertido = pos.position * coste_medio_con_comision
         total_invertido_eur = valor_en_eur(total_invertido, pos.contract.currency)
+        total_invertido_usd = valor_en_usd(total_invertido, pos.contract.currency)
         total_invertido_eur_acumulado += total_invertido_eur
+        total_invertido_usd_acumulado += total_invertido_usd
 
         # Precio actual, para calcular el beneficio/perdida no realizado de
         # cada posicion abierta.
@@ -1289,11 +1293,14 @@ def generar_resumen_cierre_mercado(ib, mercado):
             precio_actual = velas_precio[-1].close
             valor_actual = pos.position * precio_actual
             valor_actual_eur = valor_en_eur(valor_actual, pos.contract.currency)
+            valor_actual_usd = valor_en_usd(valor_actual, pos.contract.currency)
             total_valor_actual_eur_acumulado += valor_actual_eur
+            total_valor_actual_usd_acumulado += valor_actual_usd
             beneficio_pct_pos = (valor_actual - total_invertido) / total_invertido * 100
             beneficio_str = f"{beneficio_pct_pos:.2f}%"
         else:
             total_valor_actual_eur_acumulado += total_invertido_eur  # fallback: asumimos sin cambio
+            total_valor_actual_usd_acumulado += total_invertido_usd
             beneficio_str = "N/D"
 
         log(f"{symbol:<10}{abierta_desde_str:<20}{pos.position:>10.4f}{coste_medio_con_comision:>20.4f}"
@@ -1304,7 +1311,8 @@ def generar_resumen_cierre_mercado(ib, mercado):
                                 / total_invertido_eur_acumulado * 100) if total_invertido_eur_acumulado else 0.0
         log("-" * 90)
         log(f"{'TOTAL':<10}{'':<20}{'':<10}{'':<20}{'':<20}{total_invertido_eur_acumulado:>18.2f}{beneficio_pct_total:>12.2f}%")
-        log("(Total invertido en EUR y beneficio/perdida no realizado global de todas las posiciones abiertas.)")
+        log(f"(Total invertido: {total_invertido_usd_acumulado:.2f} USD / {total_invertido_eur_acumulado:.2f} EUR. "
+            f"Beneficio/perdida no realizado global de todas las posiciones abiertas.)")
 
     # --- Operaciones cerradas hoy ---
     log("--- Operaciones cerradas hoy ---")
@@ -1319,6 +1327,9 @@ def generar_resumen_cierre_mercado(ib, mercado):
 
     if not simbolos_con_venta_hoy:
         log("(ninguna)")
+
+    total_ganancia_usd_acumulada = 0.0
+    total_ganancia_eur_acumulada = 0.0
 
     for symbol in simbolos_con_venta_hoy:
         ventas_hoy = [e for e in ventas_por_simbolo.get(symbol, [])
@@ -1339,14 +1350,21 @@ def generar_resumen_cierre_mercado(ib, mercado):
         total_comprado_acciones = sum(e.execution.shares for e in compras)
         total_comprado_valor = sum(e.execution.shares * e.execution.avgPrice for e in compras)
 
-        # Igual que en la tabla de posiciones abiertas: preferimos la fecha
-        # registrada en nuestro historial (cubre compras de dias
-        # anteriores) sobre la de reqExecutions() (solo el dia actual).
-        abierta_desde_registrada = obtener_apertura_registrada(mercado, symbol)
-        if abierta_desde_registrada:
-            abierta_desde_str = abierta_desde_registrada.strftime("%Y-%m-%d %H:%M")
+        # A diferencia de la tabla de posiciones abiertas, aqui preferimos la
+        # fecha calculada a partir de reqExecutions() (ya filtrada a compras
+        # ANTERIORES a esta venta) sobre la registrada en el historial: el
+        # historial guarda la apertura de la posicion ACTUAL/mas reciente de
+        # ese simbolo, que si el valor se volvio a comprar el mismo dia
+        # DESPUES de cerrar esta ronda, es una fecha posterior a esta venta
+        # (se vio en produccion: "Abierta desde" con hora posterior a
+        # "Cerrada a las" para QCOM). Solo caemos al historial cuando no hay
+        # compras de hoy que expliquen esta venta (posicion arrastrada de un
+        # dia anterior).
+        if abierta_desde:
+            abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M")
         else:
-            abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
+            abierta_desde_registrada = obtener_apertura_registrada(mercado, symbol)
+            abierta_desde_str = abierta_desde_registrada.strftime("%Y-%m-%d %H:%M") if abierta_desde_registrada else "?"
         cerrada_a_las_str = cerrada_a_las.strftime("%Y-%m-%d %H:%M")
 
         if total_comprado_acciones <= 0:
@@ -1368,9 +1386,16 @@ def generar_resumen_cierre_mercado(ib, mercado):
         comision_estimada = estimar_comision(total_invertido, ventas_hoy[0].contract.currency)
         ganancia = ganancia_bruta - comision_estimada
         beneficio_pct = (ganancia / total_invertido * 100) if total_invertido else 0.0
+        total_ganancia_usd_acumulada += valor_en_usd(ganancia, ventas_hoy[0].contract.currency)
+        total_ganancia_eur_acumulada += valor_en_eur(ganancia, ventas_hoy[0].contract.currency)
 
         log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.4f}"
             f"{coste_medio_compra:>14.4f}{total_invertido:>14.2f}{beneficio_pct:>12.2f}%{ganancia:>12.2f}")
+
+    if simbolos_con_venta_hoy:
+        log("-" * 91)
+        log(f"TOTAL ganancia hoy ({mercado}): {total_ganancia_usd_acumulada:.2f} USD / "
+            f"{total_ganancia_eur_acumulada:.2f} EUR")
 
     log("=" * 60)
     log("(Beneficio % es aproximado: se calcula sobre el valor de la venta, "
