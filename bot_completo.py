@@ -856,10 +856,13 @@ def revisar_ventas(ib):
                     f"{MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del cierre de {mercado} -> VENTA FORZADA (orden limitada).")
                 precio_limite = calcular_precio_limite_venta(precio_actual, contrato.currency)
                 if es_cantidad_fraccionaria(cantidad):
-                    # Igual que en las compras: IBKR rechaza (error 10243)
-                    # cualquier orden con cantidad de acciones fraccionaria
-                    # enviada por API, asi que se manda por importe en
-                    # efectivo aproximado en vez de numero de acciones.
+                    # Igual que en las compras: algunas cuentas/valores
+                    # rechazan el importe en efectivo (cashQty) con el error
+                    # 10244, asi que se manda por importe en efectivo primero
+                    # y, si lo rechaza, se reintenta con la cantidad
+                    # fraccionaria puesta DIRECTAMENTE (confirmado a mano en
+                    # cuenta real que esto SI funciona, vease Plan B de
+                    # revisar_compras para el detalle completo).
                     orden = crear_orden_limitada_cash('SELL', cantidad * precio_actual, precio_limite)
                 else:
                     orden = crear_orden_limitada('SELL', cantidad, precio_limite)
@@ -867,6 +870,15 @@ def revisar_ventas(ib):
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite} {contrato.currency}, "
                     f"estado: {estado}")
+                if (es_cantidad_fraccionaria(cantidad) and estado != 'Filled'
+                        and orden_rechazada_por_codigo(trade, {10244})):
+                    log(f"VENTAS: {contrato.symbol} - no admite el importe en efectivo (cashQty) via API "
+                        f"(error 10244); reintentando con la cantidad fraccionaria puesta directamente.")
+                    orden = crear_orden_limitada('SELL', cantidad, precio_limite)
+                    trade = ib.placeOrder(contrato, orden)
+                    estado = esperar_estado_final_orden(ib, trade)
+                    log(f"VENTAS: {contrato.symbol} - orden limitada (cantidad fraccionaria directa), "
+                        f"estado: {estado}")
                 if estado != 'Filled':
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
                 continue
@@ -892,6 +904,18 @@ def revisar_ventas(ib):
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"VENTAS: {contrato.symbol} - orden a mercado, "
                     f"estado: {estado}")
+                if (es_cantidad_fraccionaria(cantidad) and estado != 'Filled'
+                        and orden_rechazada_por_codigo(trade, {10244})):
+                    # Ver Plan B en revisar_compras: la cuenta puede rechazar
+                    # cashQty (10244) pero SI admitir la cantidad fraccionaria
+                    # puesta directamente (confirmado a mano en cuenta real).
+                    log(f"VENTAS: {contrato.symbol} - no admite el importe en efectivo (cashQty) via API "
+                        f"(error 10244); reintentando con la cantidad fraccionaria puesta directamente.")
+                    orden = crear_orden_mercado('SELL', cantidad)
+                    trade = ib.placeOrder(contrato, orden)
+                    estado = esperar_estado_final_orden(ib, trade)
+                    log(f"VENTAS: {contrato.symbol} - orden a mercado (cantidad fraccionaria directa), "
+                        f"estado: {estado}")
                 if estado != 'Filled':
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
             else:
@@ -1139,26 +1163,44 @@ def revisar_compras(ib):
             estado = esperar_estado_final_orden(ib, trade)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
 
-            # Plan B: no todos los valores del mercado US tienen habilitadas
-            # las fracciones via API en IBKR aunque el mercado en general si
-            # las soporte (visto en produccion: error 10244 "La cantidad de
-            # efectivo no puede utilizarse en esta orden" para varios
-            # valores concretos). Si pasa eso, se reintenta con acciones
-            # ENTERAS en vez de rendirse, siempre que el presupuesto llegue
-            # para al menos 1.
+            # Plan B: algunas cuentas/valores rechazan el importe en efectivo
+            # (cashQty) con el error 10244 "La cantidad de efectivo no puede
+            # utilizarse en esta orden" -visto en produccion tanto para
+            # valores concretos en cuenta demo, como para TODOS los valores
+            # en cuenta real-. Comprobado a mano en la cuenta real (compra de
+            # PFE desde la app de IBKR) que la cuenta SI admite fracciones
+            # de verdad, simplemente rechaza el mecanismo cashQty: una orden
+            # a mercado con la cantidad fraccionaria puesta DIRECTAMENTE
+            # (en vez de como importe en efectivo) se ejecuta sin problema.
+            # Por eso, antes de rendirse a acciones enteras, se reintenta con
+            # la cantidad fraccionaria original puesta directamente.
             if fraccionable and estado != 'Filled' and orden_rechazada_por_codigo(trade, {10244}):
+                log(f"COMPRAS: {ticker} - este valor no admite el importe en efectivo (cashQty) via API "
+                    f"(error 10244); reintentando con la cantidad fraccionaria puesta directamente "
+                    f"({cantidad:g} acciones).")
+                orden = crear_orden_mercado('BUY', cantidad)
+                trade = ib.placeOrder(contrato, orden)
+                estado = esperar_estado_final_orden(ib, trade)
+                log(f"COMPRAS: {ticker} - estado de la orden (cantidad fraccionaria directa): {estado}")
+
+            # Plan C: si tampoco admite la cantidad fraccionaria directa
+            # (error 10243, "no se puede introducir la orden de tamano
+            # fraccionario a traves de la API"), se reintenta con acciones
+            # ENTERAS en vez de rendirse del todo, siempre que el presupuesto
+            # llegue para al menos 1.
+            if fraccionable and estado != 'Filled' and orden_rechazada_por_codigo(trade, {10243, 10244}):
                 cantidad_entera_fallback = int(importe_a_usar // precio_actual)
                 if cantidad_entera_fallback >= 1:
-                    log(f"COMPRAS: {ticker} - este valor no admite fracciones via API (error 10244); "
-                        f"reintentando con {cantidad_entera_fallback} acciones enteras.")
+                    log(f"COMPRAS: {ticker} - este valor no admite fracciones via API (ni cashQty ni "
+                        f"cantidad directa); reintentando con {cantidad_entera_fallback} acciones enteras.")
                     orden = crear_orden_mercado('BUY', cantidad_entera_fallback)
                     trade = ib.placeOrder(contrato, orden)
                     estado = esperar_estado_final_orden(ib, trade)
                     log(f"COMPRAS: {ticker} - estado de la orden (acciones enteras): {estado}")
                 else:
-                    log(f"COMPRAS: {ticker} - este valor no admite fracciones via API (error 10244) "
-                        f"y el presupuesto ({importe_a_usar:.2f} {currency}) no llega ni para 1 accion "
-                        f"entera a {precio_actual} {currency}, se omite.")
+                    log(f"COMPRAS: {ticker} - este valor no admite fracciones via API (ni cashQty ni "
+                        f"cantidad directa) y el presupuesto ({importe_a_usar:.2f} {currency}) no llega "
+                        f"ni para 1 accion entera a {precio_actual} {currency}, se omite.")
 
             compra_confirmada = estado == 'Filled'
             if not compra_confirmada:

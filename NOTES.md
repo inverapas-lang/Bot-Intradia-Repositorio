@@ -209,18 +209,36 @@ riesgo de que una congelación por GIL se quede sin detectar** — el hilo inter
 congelaciones "normales" (bucles que sí ceden el turno de vez en cuando); el externo cubre el
 resto.
 
-## Plan B ante valores sin fracciones habilitadas en la API (error 10244)
+## Plan A/B/C ante rechazo de fracciones en la API (error 10244 / 10243)
 
-No todos los valores de US tienen habilitadas las fracciones vía API en IBKR, aunque el
-mercado en general sí las soporte — es una restricción por instrumento del lado de IBKR, no
-un fallo nuestro. Visto en producción con `ORCL`, `PLTR`, `CAT`, `NFLX`, `INTC`: la orden por
-`cashQty` se cancela con `Error 10244: La cantidad de efectivo no puede utilizarse en esta
-orden`. Antes, esa señal de compra simplemente se perdía.
+No todos los valores/cuentas admiten el mecanismo `cashQty` (importe en efectivo) que usa el
+bot para fracciones vía API — a veces por instrumento (visto en demo con `ORCL`, `PLTR`, `CAT`,
+`NFLX`, `INTC`), a veces por CUENTA COMPLETA (visto en la cuenta REAL: rechazado en TODOS los
+valores probados, `GS` y `PFE`). El rechazo es `Error 10244: La cantidad de efectivo no puede
+utilizarse en esta orden`.
 
-Ahora `orden_rechazada_por_codigo(trade, {10244})` detecta este código concreto en el registro
-de la orden (`trade.log`), y si pasa, se reintenta automáticamente con **acciones enteras**
-(redondeando hacia abajo el presupuesto disponible), en vez de rendirse. Si el presupuesto no
-llega ni para 1 acción entera, ahí sí se omite con un aviso claro en el log.
+**Hallazgo importante (comprobado a mano en cuenta real, agosto 2026)**: cuando `cashQty` falla,
+NO significa que la cuenta no admita fracciones de verdad. Se comprobó comprando manualmente
+0.5 acciones de PFE desde la app de IBKR, tanto con orden límite como a **mercado**, indicando
+la cantidad fraccionaria **directamente** (no como importe en efectivo) — y funcionó sin
+problema. El fallo es específico del mecanismo `cashQty`, no de las fracciones en sí.
+
+Por eso ahora hay una cadena de reintentos de 3 pasos, tanto en compras como en ventas:
+
+- **Plan A** — `cashQty` (importe en efectivo): el método preferido, funciona en la mayoría de
+  casos (p.ej. toda la cuenta demo salvo excepciones puntuales).
+- **Plan B** — si Plan A falla con `Error 10244`: se reintenta con la **cantidad fraccionaria
+  original puesta directamente** como `totalQuantity` (p.ej. `3.544` acciones), sin redondear.
+  Esto es lo que ahora funciona en la cuenta real.
+- **Plan C** — si Plan B también falla (`Error 10243`, "no se puede introducir la orden de
+  tamaño fraccionario a través de la API"): último recurso, se reintenta con **acciones
+  ENTERAS** (redondeando hacia abajo el presupuesto disponible). Si el presupuesto no llega ni
+  para 1 acción entera, se omite con un aviso claro en el log.
+
+`orden_rechazada_por_codigo(trade, {codigos...})` detecta estos códigos en el registro de la
+orden (`trade.log`) para decidir si pasar al siguiente plan. En ventas solo se implementaron
+los Planes A y B (no hay Plan C de "vender solo la parte entera y dejar un resto fraccionario
+sin vender" — si algún día hace falta, avisar).
 
 ## Comisiones estimadas
 

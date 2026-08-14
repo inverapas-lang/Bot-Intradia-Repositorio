@@ -842,7 +842,12 @@ check("escribir_pid: escribe el PID del proceso actual en el archivo",
 # 14. Plan B ante el error 10244 (valor sin fracciones habilitadas via API):
 #     debe reintentar con acciones ENTERAS en vez de rendirse.
 # ---------------------------------------------------------------------------
-class _IBFalsoRechazoFraccion(_IBFalsoCompras):
+class _IBFalsoRechazoCashQty(_IBFalsoCompras):
+    """cashQty (Plan A) se rechaza con 10244, pero la cantidad fraccionaria
+    puesta DIRECTAMENTE (Plan B) SI se ejecuta -caso confirmado a mano en
+    cuenta real (compra de PFE): la cuenta admite fracciones de verdad, solo
+    rechaza el mecanismo cashQty."""
+
     def __init__(self):
         super().__init__()
         self.ordenes_objeto = []
@@ -850,14 +855,12 @@ class _IBFalsoRechazoFraccion(_IBFalsoCompras):
     def placeOrder(self, contrato, orden):
         self.ordenes_objeto.append(orden)
         if orden.totalQuantity == 0:
-            # La orden por cashQty siempre es rechazada con el error 10244
             trade = types.SimpleNamespace(
                 orderStatus=types.SimpleNamespace(status="Cancelled"),
                 isDone=lambda: True,
                 log=[_TradeLogFalso(10244)],
             )
             return trade
-        # La orden de acciones enteras (el fallback) SI se ejecuta
         return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
                                       isDone=lambda: True, log=[])
 
@@ -865,22 +868,73 @@ class _IBFalsoRechazoFraccion(_IBFalsoCompras):
 bot.ACTIVOS = [{"ticker": "SINFRACCION", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
 bot.es_horario_operativo = lambda mercado: True
 bot.en_ventana_sin_compra = lambda mercado: False
-ib_falso_rechazo = _IBFalsoRechazoFraccion()
+ib_falso_cashqty = _IBFalsoRechazoCashQty()
 try:
-    bot.revisar_compras(ib_falso_rechazo)
+    bot.revisar_compras(ib_falso_cashqty)
 finally:
     bot.ACTIVOS = activos_originales
     bot.es_horario_operativo = es_horario_original
     bot.en_ventana_sin_compra = en_ventana_sin_compra_original
 
-check("Plan B error 10244: se intentaron 2 ordenes (cashQty rechazada + fallback en acciones enteras)",
-      len(ib_falso_rechazo.ordenes_objeto) == 2,
-      f"ordenes={[(o.totalQuantity, getattr(o, 'cashQty', None)) for o in ib_falso_rechazo.ordenes_objeto]}")
+check("Plan B error 10244: se intentaron 2 ordenes (cashQty rechazada + cantidad fraccionaria directa)",
+      len(ib_falso_cashqty.ordenes_objeto) == 2,
+      f"ordenes={[(o.totalQuantity, getattr(o, 'cashQty', None)) for o in ib_falso_cashqty.ordenes_objeto]}")
 check("Plan B error 10244: la primera orden fue por cashQty (totalQuantity=0)",
-      len(ib_falso_rechazo.ordenes_objeto) == 2 and ib_falso_rechazo.ordenes_objeto[0].totalQuantity == 0)
-check("Plan B error 10244: la segunda orden (fallback) fue por acciones ENTERAS (totalQuantity>0)",
-      len(ib_falso_rechazo.ordenes_objeto) == 2 and ib_falso_rechazo.ordenes_objeto[1].totalQuantity >= 1,
-      f"totalQuantity={ib_falso_rechazo.ordenes_objeto[1].totalQuantity if len(ib_falso_rechazo.ordenes_objeto) == 2 else 'N/A'}")
+      len(ib_falso_cashqty.ordenes_objeto) == 2 and ib_falso_cashqty.ordenes_objeto[0].totalQuantity == 0)
+check("Plan B error 10244: la segunda orden fue la cantidad fraccionaria ORIGINAL puesta directamente "
+      "(no redondeada a entero)",
+      len(ib_falso_cashqty.ordenes_objeto) == 2
+      and bot.es_cantidad_fraccionaria(ib_falso_cashqty.ordenes_objeto[1].totalQuantity),
+      f"totalQuantity={ib_falso_cashqty.ordenes_objeto[1].totalQuantity if len(ib_falso_cashqty.ordenes_objeto) == 2 else 'N/A'}")
+
+
+class _IBFalsoRechazoTotal(_IBFalsoCompras):
+    """Ni cashQty (Plan A) ni la cantidad fraccionaria directa (Plan B)
+    funcionan (10244 y 10243 respectivamente); solo el fallback final a
+    acciones ENTERAS (Plan C) se ejecuta."""
+
+    def __init__(self):
+        super().__init__()
+        self.ordenes_objeto = []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_objeto.append(orden)
+        if orden.totalQuantity == 0:
+            return types.SimpleNamespace(
+                orderStatus=types.SimpleNamespace(status="Cancelled"),
+                isDone=lambda: True,
+                log=[_TradeLogFalso(10244)],
+            )
+        if bot.es_cantidad_fraccionaria(orden.totalQuantity):
+            return types.SimpleNamespace(
+                orderStatus=types.SimpleNamespace(status="Cancelled"),
+                isDone=lambda: True,
+                log=[_TradeLogFalso(10243)],
+            )
+        # La orden de acciones ENTERAS (Plan C, el ultimo recurso) SI se ejecuta
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
+                                      isDone=lambda: True, log=[])
+
+
+bot.ACTIVOS = [{"ticker": "SINFRACCION", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+ib_falso_total = _IBFalsoRechazoTotal()
+try:
+    bot.revisar_compras(ib_falso_total)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("Plan C error 10243+10244: se intentaron las 3 ordenes (cashQty, fraccion directa, acciones enteras)",
+      len(ib_falso_total.ordenes_objeto) == 3,
+      f"ordenes={[(o.totalQuantity, getattr(o, 'cashQty', None)) for o in ib_falso_total.ordenes_objeto]}")
+check("Plan C error 10243+10244: la ultima orden (fallback final) fue por acciones ENTERAS",
+      len(ib_falso_total.ordenes_objeto) == 3
+      and ib_falso_total.ordenes_objeto[2].totalQuantity >= 1
+      and not bot.es_cantidad_fraccionaria(ib_falso_total.ordenes_objeto[2].totalQuantity),
+      f"totalQuantity={ib_falso_total.ordenes_objeto[2].totalQuantity if len(ib_falso_total.ordenes_objeto) == 3 else 'N/A'}")
 
 
 # ---------------------------------------------------------------------------
