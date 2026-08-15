@@ -41,12 +41,15 @@ desactivar HK/KR para la cuenta real — **no decidido todavía**.
 
 ## Listas de valores actuales
 
-- `ACTIVOS_US`: 40 tickers (large caps NYSE + Nasdaq: LLY, UBER, ORCL, PLTR, SNOW, CRM, JPM,
-  BAC, C, GS, MS, XOM, CVX, GE, CAT, WMT, V, MA, UNH, PFE, AAPL, MSFT, NVDA, GOOGL, AMZN,
-  META, AVGO, TSLA, COST, AMD, NFLX, ASML, QCOM, INTC, HON, CSCO, CMCSA, AMGN, ISRG, AMAT).
+- `ACTIVOS_US`: 30 tickers, lista curada a petición del usuario (ago. 2026), por sector:
+  - Tecnología (Nasdaq): AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AVGO, AMD, NFLX, INTC,
+    QCOM, CSCO, SMCI.
+  - Financiero (NYSE): JPM, BAC, WFC, C, V, MA.
+  - Energía (NYSE): XOM, CVX.
+  - Consumo/Salud/Industrial (NYSE): WMT, DIS, KO, JNJ, PFE, F, T, GE.
 - `ACTIVOS_HK`: 28 tickers (blue chips de Hong Kong).
 - `ACTIVOS_KR`: 10 tickers (blue chips de Corea).
-- Total activo en `ACTIVOS` (US+HK+KR): **78 valores**. EU excluido.
+- Total activo en `ACTIVOS` (US+HK+KR): **68 valores**. EU excluido.
 
 ## Configuración clave actual
 

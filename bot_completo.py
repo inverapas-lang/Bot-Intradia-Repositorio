@@ -131,46 +131,36 @@ VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0  # por debajo de esto, IBKR rechaz
 # --- Lista de valores: mercado US (NYSE, SMART, USD) ---
 ACTIVOS_US = [
     {"ticker": t, "exchange": "SMART", "currency": "USD", "mercado": "US"}
-    for t in ["LLY",    # Eli Lilly and Company
-              "UBER",   # Uber Technologies
-              "ORCL",   # Oracle Corporation
-              "PLTR",   # Palantir Technologies
-              "SNOW",   # Snowflake
-              "CRM",    # Salesforce
-              "JPM",    # JPMorgan Chase & Co.
-              "BAC",    # Bank of America
-              "C",      # Citigroup
-              "GS",     # Goldman Sachs
-              "MS",     # Morgan Stanley
-              "XOM",    # Exxon Mobil
-              "CVX",    # Chevron
-              "GE",     # General Electric Aerospace (ticker GE)
-              "CAT",    # Caterpillar
-              "WMT",    # Walmart
-              "V",      # Visa
-              "MA",     # Mastercard
-              "UNH",    # UnitedHealth Group
-              "PFE",    # Pfizer
-              "AAPL",   # Apple Inc.
+    for t in ["AAPL",   # Apple Inc.
               "MSFT",   # Microsoft Corporation
               "NVDA",   # NVIDIA Corporation
-              "GOOGL",  # Alphabet Inc.
               "AMZN",   # Amazon.com, Inc.
+              "GOOGL",  # Alphabet Inc.
               "META",   # Meta Platforms, Inc.
-              "AVGO",   # Broadcom Inc.
               "TSLA",   # Tesla, Inc.
-              "COST",   # Costco Wholesale Corporation
+              "AVGO",   # Broadcom Inc.
               "AMD",    # Advanced Micro Devices, Inc.
               "NFLX",   # Netflix, Inc.
-              "ASML",   # ASML Holding N.V.
-              "QCOM",   # Qualcomm Incorporated
               "INTC",   # Intel Corporation
-              "HON",    # Honeywell International Inc.
+              "QCOM",   # Qualcomm Incorporated
               "CSCO",   # Cisco Systems, Inc.
-              "CMCSA",  # Comcast Corporation
-              "AMGN",   # Amgen Inc.
-              "ISRG",   # Intuitive Surgical, Inc.
-              "AMAT"]   # Applied Materials, Inc.
+              "SMCI",   # Super Micro Computer, Inc.
+              "JPM",    # JPMorgan Chase & Co.
+              "BAC",    # Bank of America
+              "WFC",    # Wells Fargo & Company
+              "C",      # Citigroup
+              "V",      # Visa
+              "MA",     # Mastercard
+              "XOM",    # Exxon Mobil
+              "CVX",    # Chevron
+              "WMT",    # Walmart
+              "DIS",    # The Walt Disney Company
+              "KO",     # The Coca-Cola Company
+              "JNJ",    # Johnson & Johnson
+              "PFE",    # Pfizer
+              "F",      # Ford Motor Company
+              "T",      # AT&T Inc.
+              "GE"]     # GE Aerospace
 ]
 
 # --- Lista de valores: mercado EU (Euronext / Borsa Italiana, EUR) ---
