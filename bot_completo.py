@@ -653,6 +653,29 @@ def valor_en_usd(valor, currency):
     return valor  # fallback, no deberia ocurrir con esta lista de activos
 
 
+# Tarifas reales de IBKR, plan de comisiones "por niveles" (tiered), Nivel I
+# -el que aplica con el volumen mensual de esta cuenta-, consultadas en
+# interactivebrokers.ie en agosto de 2026. IMPORTANTE: estas cifras son SOLO
+# la comision de IBKR; no incluyen "comisiones de terceros" (tasas de
+# bolsa/compensacion/normativas, p.ej. el impuesto de timbre de HK) que IBKR
+# repercute aparte y que no estan cuantificadas aqui -el beneficio neto
+# calculado por el bot sigue siendo una aproximacion, algo optimista, no una
+# cifra exacta al centimo-.
+COMISION_US_POR_ACCION = 0.0035    # USD/accion, ordenes de acciones ENTERAS
+COMISION_US_MINIMA = 0.35          # USD minimo por orden, acciones enteras
+COMISION_US_FRACCION_PCT = 0.01    # 1% del valor, ordenes FRACCIONARIAS
+COMISION_US_FRACCION_MINIMA = 0.01  # USD minimo por orden fraccionaria
+COMISION_MAX_PCT = 0.01            # tope maximo: 1% del valor negociado (US)
+
+COMISION_HK_PCT = 0.0005           # 0.05% del valor negociado
+COMISION_HK_MINIMA_USD = 2.25      # minimo por orden, en USD equivalente
+
+COMISION_KR_PCT = 0.0006           # 0.06% del valor negociado
+COMISION_KR_MINIMA_KRW = 4000      # minimo por orden, en KRW (KR no tiene
+                                    # plan de comisiones fijas, solo tiered)
+
+# Fallback generico para divisas sin tarifa especifica arriba (p.ej. EUR,
+# mercado actualmente desactivado): estimacion previa, conservadora.
 COMISION_PCT = 0.0007        # 0.07% por operacion (compra o venta)
 MINIMO_COMISION_EUR = 1.0    # minimo 1 EUR por operacion, convertido a la divisa local
 
@@ -670,9 +693,28 @@ def minimo_comision_en_moneda(currency):
     return MINIMO_COMISION_EUR
 
 
-def estimar_comision(valor_operacion, currency):
-    """Comision estimada de una operacion: 0.07% del valor, con minimo de
-    1 EUR (convertido a la divisa local)."""
+def estimar_comision(valor_operacion, currency, cantidad=None):
+    """Comision estimada de UNA sola operacion (compra O venta -para el
+    coste de ida y vuelta hay que sumar dos llamadas, una por cada lado-),
+    con las tarifas reales de IBKR (tiered, Nivel I) por mercado:
+      - US, acciones ENTERAS: 0.0035 USD/accion, minimo 0.35 USD/orden,
+        tope maximo 1% del valor negociado.
+      - US, acciones FRACCIONARIAS: 1% del valor negociado, minimo 0.01 USD.
+      - HK: 0.05% del valor negociado, minimo ~2.25 USD equivalente/orden.
+      - KR: 0.06% del valor negociado, minimo 4000 KRW/orden.
+    `cantidad` (numero de acciones) hace falta en US para distinguir acciones
+    enteras de fraccionarias; si no se indica, se asume fraccionaria (el
+    caso mas habitual de este bot en US)."""
+    if currency == "USD":
+        if cantidad is not None and not es_cantidad_fraccionaria(cantidad):
+            comision = max(cantidad * COMISION_US_POR_ACCION, COMISION_US_MINIMA)
+            return min(comision, valor_operacion * COMISION_MAX_PCT)
+        return max(valor_operacion * COMISION_US_FRACCION_PCT, COMISION_US_FRACCION_MINIMA)
+    if currency == "HKD":
+        minimo_hkd = COMISION_HK_MINIMA_USD * TIPO_CAMBIO_USD_HKD
+        return max(valor_operacion * COMISION_HK_PCT, minimo_hkd)
+    if currency == "KRW":
+        return max(valor_operacion * COMISION_KR_PCT, COMISION_KR_MINIMA_KRW)
     return max(valor_operacion * COMISION_PCT, minimo_comision_en_moneda(currency))
 
 
@@ -826,11 +868,15 @@ def revisar_ventas(ib):
             precio_actual = velas_precio[-1].close
             beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
 
-            # Comision total estimada para la operacion de ida y vuelta (compra +
-            # venta juntas), no dos comisiones separadas: 0.07% del valor de la
-            # posicion, con minimo de 1 EUR (convertido a la divisa local).
+            # Comision total estimada para la operacion de ida y vuelta: la
+            # compra y la venta se calculan por SEPARADO (cada orden real
+            # paga su propio minimo en IBKR, no un unico minimo compartido)
+            # y se suman.
             valor_compra = cantidad * coste_medio
-            comision_total = estimar_comision(valor_compra, contrato.currency)
+            valor_venta = cantidad * precio_actual
+            comision_compra = estimar_comision(valor_compra, contrato.currency, cantidad)
+            comision_venta = estimar_comision(valor_venta, contrato.currency, cantidad)
+            comision_total = comision_compra + comision_venta
             comision_total_pct = comision_total / valor_compra * 100
             beneficio_pct = beneficio_pct_bruto - comision_total_pct
 
@@ -1310,7 +1356,7 @@ def generar_resumen_cierre_mercado(ib, mercado):
             abierta_desde = min((e.execution.time for e in compras), default=None)
             abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
 
-        comision_estimada = estimar_comision(pos.position * pos.avgCost, pos.contract.currency)
+        comision_estimada = estimar_comision(pos.position * pos.avgCost, pos.contract.currency, pos.position)
         coste_medio_con_comision = pos.avgCost + (comision_estimada / pos.position)
         total_invertido = pos.position * coste_medio_con_comision
         total_invertido_eur = valor_en_eur(total_invertido, pos.contract.currency)
@@ -1413,9 +1459,14 @@ def generar_resumen_cierre_mercado(ib, mercado):
 
         # Ganancia calculada directamente a partir de precios y cantidades
         # (no depende de commissionReport.realizedPNL, que puede venir vacio
-        # tras una reconexion): venta - coste de compra - comision estimada.
+        # tras una reconexion): venta - coste de compra - comision estimada
+        # de AMBOS lados (compra y venta por separado, cada uno con su
+        # propio minimo real de IBKR).
         ganancia_bruta = valor_base - total_invertido
-        comision_estimada = estimar_comision(total_invertido, ventas_hoy[0].contract.currency)
+        currency_op = ventas_hoy[0].contract.currency
+        comision_compra = estimar_comision(total_invertido, currency_op, cantidad_vendida)
+        comision_venta = estimar_comision(valor_base, currency_op, cantidad_vendida)
+        comision_estimada = comision_compra + comision_venta
         ganancia = ganancia_bruta - comision_estimada
         beneficio_pct = (ganancia / total_invertido * 100) if total_invertido else 0.0
         total_ganancia_usd_acumulada += valor_en_usd(ganancia, ventas_hoy[0].contract.currency)

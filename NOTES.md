@@ -243,11 +243,40 @@ orden (`trade.log`) para decidir si pasar al siguiente plan. En ventas solo se i
 los Planes A y B (no hay Plan C de "vender solo la parte entera y dejar un resto fraccionario
 sin vender" — si algún día hace falta, avisar).
 
-## Comisiones estimadas
+## Comisiones estimadas (tarifas reales de IBKR, plan "tiered", Nivel I)
 
-`0.07%` del valor de la operación, con mínimo de 1€ (convertido a la divisa local). Se
-usa para descontar del beneficio bruto y decidir si vender, y para las tablas del resumen
-de cierre.
+Ajustado en agosto 2026 con las tarifas reales consultadas en interactivebrokers.ie (el
+usuario confirmó que su cuenta usa el plan **"tiered" (por niveles)**, no "fixed"). Antes se
+usaba una estimación genérica de 0.07% + mínimo 1€ que **infravaloraba mucho** el coste real,
+sobre todo en fracciones de US y en HK/KR.
+
+| Mercado | Tarifa | Mínimo por orden |
+|---|---|---|
+| US, acciones **enteras** | 0.0035 USD/acción | 0.35 USD (tope máx.: 1% del valor negociado) |
+| US, **fraccionarias** | 1% del valor negociado | 0.01 USD |
+| HK | 0.05% del valor negociado | ~2.25 USD equivalente |
+| KR | 0.06% del valor negociado | 4000 KRW (KR no tiene plan "fixed", solo tiered) |
+
+`estimar_comision(valor_operacion, currency, cantidad=None)` calcula la comisión de **una
+sola** operación (compra O venta) — para el coste de ida y vuelta hay que sumar dos llamadas,
+una por cada lado (ya no se usa un único mínimo compartido para toda la operación, como se
+hacía antes: cada orden real paga su propio mínimo en IBKR). El parámetro `cantidad` es
+necesario en US para distinguir acciones enteras de fraccionarias vía
+`es_cantidad_fraccionaria()`; si no se indica, se asume fraccionaria (el caso más habitual del
+bot en US).
+
+**Importante — sigue siendo una aproximación, no la cifra exacta al céntimo**: estas tarifas
+son solo la comisión propia de IBKR. No incluyen las "comisiones de terceros" que IBKR
+repercute aparte (tasas de bolsa, de compensación, cargos normativos — p.ej. el impuesto de
+timbre de Hong Kong), que no están cuantificadas aquí. El beneficio neto que calcula el bot es
+algo optimista frente al real, especialmente en HK y KR.
+
+**Hallazgo importante sobre el capital pequeño (~300€, límite de exposición 15% ≈ 45 $ por
+posición)**: con los mínimos por orden de HK (~2.25 $) y KR (~2.85 $, 4000 KRW), una sola
+operación de ida y vuelta se puede comer **~10-13% del valor de la posición solo en
+comisiones mínimas**, antes de contar ganancias/pérdidas de mercado — operar en HK/KR es
+poco viable con un capital tan pequeño, más allá del problema de los lotes fijos de HK ya
+documentado. Ver conversación de agosto 2026 para el detalle completo del cálculo.
 
 ## Bugs importantes encontrados y corregidos (orden cronológico)
 

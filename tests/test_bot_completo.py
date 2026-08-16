@@ -94,15 +94,57 @@ check("valor_en_usd: EUR->USD multiplica por el tipo de cambio",
 check("valor_en_usd: HKD->USD divide por el tipo de cambio",
       abs(bot.valor_en_usd(780, "HKD") - 100) < 1e-6)
 
-comision_pequena = bot.estimar_comision(100, "USD")  # 0.07% de 100 = 0.07, por debajo del minimo
-check("estimar_comision: aplica el minimo cuando el 0.07% es menor",
-      abs(comision_pequena - bot.minimo_comision_en_moneda("USD")) < 1e-9,
-      f"obtenido={comision_pequena}")
+# estimar_comision: tarifas reales de IBKR (tiered, Nivel I) por mercado.
 
-comision_grande = bot.estimar_comision(1_000_000, "USD")  # 0.07% de 1M = 700, por encima del minimo
-check("estimar_comision: aplica el 0.07% cuando supera el minimo",
-      abs(comision_grande - 1_000_000 * bot.COMISION_PCT) < 1e-9,
-      f"obtenido={comision_grande}")
+# US, fraccionaria (cantidad no entera): 1% del valor, minimo 0.01 USD.
+comision_us_frac_pequena = bot.estimar_comision(0.75, "USD", 0.05)  # 1% de 0.75 = 0.0075 < minimo
+check("estimar_comision US fraccionaria: aplica el minimo (0.01 USD) cuando el 1% es menor",
+      abs(comision_us_frac_pequena - bot.COMISION_US_FRACCION_MINIMA) < 1e-9,
+      f"obtenido={comision_us_frac_pequena}")
+
+comision_us_frac_grande = bot.estimar_comision(1000, "USD", 3.544)  # 1% de 1000 = 10 > minimo
+check("estimar_comision US fraccionaria: aplica el 1% cuando supera el minimo",
+      abs(comision_us_frac_grande - 1000 * bot.COMISION_US_FRACCION_PCT) < 1e-9,
+      f"obtenido={comision_us_frac_grande}")
+
+# US, acciones ENTERAS: 0.0035 USD/accion, minimo 0.35 USD/orden.
+comision_us_entera_pequena = bot.estimar_comision(300, "USD", 3)  # 3*0.0035=0.0105 < minimo
+check("estimar_comision US acciones enteras: aplica el minimo (0.35 USD) en ordenes pequeñas",
+      abs(comision_us_entera_pequena - bot.COMISION_US_MINIMA) < 1e-9,
+      f"obtenido={comision_us_entera_pequena}")
+
+comision_us_entera_grande = bot.estimar_comision(50_000, "USD", 500)  # 500*0.0035=1.75 > minimo
+check("estimar_comision US acciones enteras: aplica 0.0035 USD/accion cuando supera el minimo",
+      abs(comision_us_entera_grande - 500 * bot.COMISION_US_POR_ACCION) < 1e-9,
+      f"obtenido={comision_us_entera_grande}")
+
+comision_us_tope = bot.estimar_comision(10, "USD", 1000)  # 1000*0.0035=3.5, pero tope 1% de 10 = 0.10
+check("estimar_comision US acciones enteras: nunca supera el tope del 1% del valor negociado",
+      abs(comision_us_tope - 10 * bot.COMISION_MAX_PCT) < 1e-9,
+      f"obtenido={comision_us_tope}")
+
+# HK: 0.05% del valor, minimo ~2.25 USD equivalente en HKD.
+comision_hk_minima = bot.estimar_comision(1000, "HKD")  # 0.05% de 1000 HKD = 0.5, por debajo del minimo
+minimo_hk_esperado = bot.COMISION_HK_MINIMA_USD * bot.TIPO_CAMBIO_USD_HKD
+check("estimar_comision HK: aplica el minimo (~2.25 USD equivalente) en ordenes pequeñas",
+      abs(comision_hk_minima - minimo_hk_esperado) < 1e-6,
+      f"obtenido={comision_hk_minima}, esperado={minimo_hk_esperado}")
+
+comision_hk_grande = bot.estimar_comision(1_000_000, "HKD")
+check("estimar_comision HK: aplica el 0.05% cuando supera el minimo",
+      abs(comision_hk_grande - 1_000_000 * bot.COMISION_HK_PCT) < 1e-6,
+      f"obtenido={comision_hk_grande}")
+
+# KR: 0.06% del valor, minimo 4000 KRW.
+comision_kr_minima = bot.estimar_comision(100_000, "KRW")  # 0.06% de 100000 = 60, por debajo del minimo
+check("estimar_comision KR: aplica el minimo (4000 KRW) en ordenes pequeñas",
+      abs(comision_kr_minima - bot.COMISION_KR_MINIMA_KRW) < 1e-6,
+      f"obtenido={comision_kr_minima}")
+
+comision_kr_grande = bot.estimar_comision(100_000_000, "KRW")
+check("estimar_comision KR: aplica el 0.06% cuando supera el minimo",
+      abs(comision_kr_grande - 100_000_000 * bot.COMISION_KR_PCT) < 1e-6,
+      f"obtenido={comision_kr_grande}")
 
 
 # ---------------------------------------------------------------------------
