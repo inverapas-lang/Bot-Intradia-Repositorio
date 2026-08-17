@@ -47,9 +47,14 @@ desactivar HK/KR para la cuenta real — **no decidido todavía**.
   - Financiero (NYSE): JPM, BAC, WFC, C, V, MA.
   - Energía (NYSE): XOM, CVX.
   - Consumo/Salud/Industrial (NYSE): WMT, DIS, KO, JNJ, PFE, F, T, GE.
-- `ACTIVOS_HK`: 28 tickers (blue chips de Hong Kong).
+- `ACTIVOS_HK`: 28 tickers (blue chips de Hong Kong). **Excluido de `ACTIVOS`** desde agosto 2026
+  (ver sección "Comisiones estimadas" — con el capital actual, ni los lotes fijos de HK ni la
+  comisión mínima por orden son viables). La lista sigue definida en el código por si se
+  reactiva más adelante con más capital; solo hay que añadir `+ ACTIVOS_HK` de nuevo a `ACTIVOS`.
+  Las posiciones de HK que ya se tuvieran abiertas se siguen vendiendo con normalidad
+  (`revisar_ventas` no depende de esta lista, solo de las posiciones reales en IBKR).
 - `ACTIVOS_KR`: 10 tickers (blue chips de Corea).
-- Total activo en `ACTIVOS` (US+HK+KR): **68 valores**. EU excluido.
+- Total activo en `ACTIVOS` (US+KR): **40 valores**. EU y HK excluidos.
 
 ## Configuración clave actual
 

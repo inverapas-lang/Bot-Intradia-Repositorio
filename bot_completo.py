@@ -237,7 +237,14 @@ ACTIVOS_KR = [
     {"ticker": "000270", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Kia
 ]
 
-ACTIVOS = ACTIVOS_US + ACTIVOS_HK + ACTIVOS_KR  # EU excluido: pendiente de suscripcion de datos de mercado
+# HK excluido (agosto 2026): con el capital actual (~300 EUR, limite de exposicion 15% => ~45
+# USD por posicion), ningun valor de ACTIVOS_HK cabe en 1 lote minimo (lotes fijos de 100-2000
+# acciones) y ademas la comision minima de IBKR por orden en HK (~2.25 USD) se comeria ~10% del
+# valor de la posicion en cada operacion. Ver NOTES.md ("Comisiones estimadas") para el detalle.
+# Las posiciones de HK que ya se tengan abiertas se siguen vendiendo con normalidad (revisar_ventas
+# no depende de esta lista); solo se deja de ESCANEAR HK en busca de nuevas señales de compra.
+# EU sigue excluido: pendiente de suscripcion de datos de mercado.
+ACTIVOS = ACTIVOS_US + ACTIVOS_KR
 
 TEMPORALIDADES = [
     {"nombre": "1 minuto",   "barSize": "1 min",   "duration": "1 D",  "tipo": "corta"},
