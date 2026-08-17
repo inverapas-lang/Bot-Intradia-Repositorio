@@ -1,6 +1,12 @@
 """
 BOT COMPLETO - bucle automatico cada 4 minutos. Soporta estos mercados:
-  - US (NYSE/Nasdaq, en USD): premercado 4:00-9:30 ET + mercado regular 9:30-16:00 ET.
+  - US (NYSE/Nasdaq, en USD): premercado 4:00-9:30 ET + mercado regular 9:30-16:00 ET +
+    postmercado 16:00-20:00 ET. En premercado se compra Y se vende con normalidad (orden
+    limitada al precio exacto, no a mercado: la liquidez es mucho menor). En postmercado
+    SOLO se compra (tambien con orden limitada al precio exacto), no se vende -decision
+    explicita del usuario para no arriesgarse a salir de una posicion con la liquidez tan
+    baja de esa franja-. Las ventanas de "no comprar antes del cierre" y "venta forzada
+    antes del cierre" siguen ancladas al cierre REGULAR (16:00 ET), sin cambios.
   - HK (Hong Kong Stock Exchange, en HKD): sesion 9:30-16:00 hora de Hong Kong
     (simplificado, ignora la pausa de mediodia real del mercado).
   - KR (Korea Exchange / KRX, en KRW): sesion 9:00-15:30 hora de Corea.
@@ -50,8 +56,12 @@ from ib_async import IB, Stock, MarketOrder, LimitOrder, ExecutionFilter
 
 # --- Horarios por mercado ---
 ZONA_NY = ZoneInfo("America/New_York")
-HORA_INICIO_US = dt_time(4, 0)     # 4:00 ET (premercado)
-HORA_CIERRE_US = dt_time(16, 0)    # 16:00 ET (cierre regular)
+HORA_INICIO_US = dt_time(4, 0)             # 4:00 ET (inicio del premercado)
+HORA_APERTURA_REGULAR_US = dt_time(9, 30)  # 9:30 ET (apertura de la sesion regular)
+HORA_CIERRE_US = dt_time(16, 0)            # 16:00 ET (cierre regular; sigue siendo la
+                                            # referencia de "no comprar antes del cierre" y
+                                            # "venta forzada antes del cierre", sin cambios)
+HORA_CIERRE_EXTENDIDO_US = dt_time(20, 0)  # 20:00 ET (fin del postmercado)
 
 ZONA_EU = ZoneInfo("Europe/Paris")
 HORA_INICIO_EU = dt_time(9, 0)     # 9:00 hora de Paris/Amsterdam/Bruselas/Milan
@@ -345,7 +355,7 @@ def es_horario_operativo(mercado):
         ahora = datetime.now(ZONA_NY)
         if ahora.weekday() >= 5:
             return False
-        return HORA_INICIO_US <= ahora.time() < HORA_CIERRE_US
+        return HORA_INICIO_US <= ahora.time() < HORA_CIERRE_EXTENDIDO_US
     elif mercado == "EU":
         ahora = datetime.now(ZONA_EU)
         if ahora.weekday() >= 5:
@@ -362,6 +372,33 @@ def es_horario_operativo(mercado):
             return False
         return HORA_INICIO_KR <= ahora.time() < HORA_CIERRE_KR
     return False
+
+
+def en_postmercado_us():
+    """True si estamos en el postmercado de US (16:00-20:00 ET). En este
+    tramo el bot solo compra, nunca vende (decision explicita del usuario:
+    la liquidez es mucho menor que en sesion regular, y no se quiere
+    arriesgar a salir de una posicion en esas condiciones)."""
+    ahora = datetime.now(ZONA_NY)
+    if ahora.weekday() >= 5:
+        return False
+    return HORA_CIERRE_US <= ahora.time() < HORA_CIERRE_EXTENDIDO_US
+
+
+def fuera_de_sesion_regular_us():
+    """True si el mercado US esta operativo (horario extendido 4:00-20:00
+    ET) pero fuera de la sesion regular (9:30-16:00 ET) -es decir, en pre o
+    postmercado-. En ese caso la liquidez es mucho menor, asi que las
+    ordenes deben ser LIMITADAS al precio exacto (con outsideRth activado)
+    en vez de a mercado, para no arriesgarse a una ejecucion a un precio muy
+    distinto del que se vio al analizar la señal."""
+    ahora = datetime.now(ZONA_NY)
+    if ahora.weekday() >= 5:
+        return False
+    hora = ahora.time()
+    en_premercado = HORA_INICIO_US <= hora < HORA_APERTURA_REGULAR_US
+    en_postmercado = HORA_CIERRE_US <= hora < HORA_CIERRE_EXTENDIDO_US
+    return en_premercado or en_postmercado
 
 
 def minutos_hasta_cierre(mercado):
@@ -565,16 +602,24 @@ def esperar_estado_final_orden(ib, trade, espera_maxima=ESPERA_MAXIMA_ESTADO_ORD
     return trade.orderStatus.status
 
 
-def crear_orden_limitada(accion, cantidad, precio_limite):
-    return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite))
+def crear_orden_limitada(accion, cantidad, precio_limite, fuera_horario_regular=False):
+    orden = _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite))
+    if fuera_horario_regular:
+        # Sin este flag, IBKR rechaza o deja pendiente (sin ejecutar) una
+        # orden colocada fuera de la sesion regular (9:30-16:00 ET).
+        orden.outsideRth = True
+    return orden
 
 
-def crear_orden_limitada_cash(accion, importe_efectivo, precio_limite):
+def crear_orden_limitada_cash(accion, importe_efectivo, precio_limite, fuera_horario_regular=False):
     """Version 'cash quantity' de crear_orden_limitada, para cantidades
     fraccionarias (vease crear_orden_mercado_cash)."""
     orden = LimitOrder(accion, 0, precio_limite)
     orden.cashQty = round(importe_efectivo, 2)
-    return _sin_flags_legacy(orden)
+    orden = _sin_flags_legacy(orden)
+    if fuera_horario_regular:
+        orden.outsideRth = True
+    return orden
 
 
 def orden_rechazada_por_codigo(trade, codigos_error):
@@ -854,6 +899,17 @@ def revisar_ventas(ib):
                 mercados_cerrados_avisados.add(mercado)
             continue
 
+        # Postmercado de US (16:00-20:00 ET): decision explicita del usuario
+        # de solo comprar en este tramo, no vender (liquidez mucho menor que
+        # en sesion regular). Las ventas de US se reanudan al dia siguiente
+        # en premercado/sesion regular.
+        if mercado == "US" and en_postmercado_us():
+            if mercado not in mercados_cerrados_avisados:
+                log(f"VENTAS: mercado {mercado} en postmercado (16:00-20:00 ET), no se intenta vender "
+                    f"ninguna posicion de este mercado en este ciclo (solo se compra en este tramo).")
+                mercados_cerrados_avisados.add(mercado)
+            continue
+
         contrato = pos.contract
         cantidad = pos.position
         coste_medio = pos.avgCost
@@ -943,15 +999,32 @@ def revisar_ventas(ib):
                 continue
 
             if bajista:
+                # Si llegamos aqui con mercado=="US" fuera de sesion regular,
+                # solo puede ser premercado (el postmercado ya se filtro mas
+                # arriba): liquidez mucho menor, se usa orden LIMITADA al
+                # precio exacto (con outsideRth) en vez de orden a mercado.
+                usar_limite_fuera_horario = mercado == "US" and fuera_de_sesion_regular_us()
+                tipo_orden_texto = "limitada al precio exacto (premercado)" if usar_limite_fuera_horario else "a mercado"
                 log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden a mercado).")
+                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden {tipo_orden_texto}).")
+
+                def _orden_venta_cash(importe):
+                    if usar_limite_fuera_horario:
+                        return crear_orden_limitada_cash('SELL', importe, precio_actual, fuera_horario_regular=True)
+                    return crear_orden_mercado_cash('SELL', importe)
+
+                def _orden_venta(cant):
+                    if usar_limite_fuera_horario:
+                        return crear_orden_limitada('SELL', cant, precio_actual, fuera_horario_regular=True)
+                    return crear_orden_mercado('SELL', cant)
+
                 if es_cantidad_fraccionaria(cantidad):
-                    orden = crear_orden_mercado_cash('SELL', cantidad * precio_actual)
+                    orden = _orden_venta_cash(cantidad * precio_actual)
                 else:
-                    orden = crear_orden_mercado('SELL', cantidad)
+                    orden = _orden_venta(cantidad)
                 trade = ib.placeOrder(contrato, orden)
                 estado = esperar_estado_final_orden(ib, trade)
-                log(f"VENTAS: {contrato.symbol} - orden a mercado, "
+                log(f"VENTAS: {contrato.symbol} - orden {tipo_orden_texto}, "
                     f"estado: {estado}")
                 if (es_cantidad_fraccionaria(cantidad) and estado != 'Filled'
                         and orden_rechazada_por_codigo(trade, {10244})):
@@ -960,10 +1033,10 @@ def revisar_ventas(ib):
                     # puesta directamente (confirmado a mano en cuenta real).
                     log(f"VENTAS: {contrato.symbol} - no admite el importe en efectivo (cashQty) via API "
                         f"(error 10244); reintentando con la cantidad fraccionaria puesta directamente.")
-                    orden = crear_orden_mercado('SELL', cantidad)
+                    orden = _orden_venta(cantidad)
                     trade = ib.placeOrder(contrato, orden)
                     estado = esperar_estado_final_orden(ib, trade)
-                    log(f"VENTAS: {contrato.symbol} - orden a mercado (cantidad fraccionaria directa), "
+                    log(f"VENTAS: {contrato.symbol} - orden {tipo_orden_texto} (cantidad fraccionaria directa), "
                         f"estado: {estado}")
                 if estado != 'Filled':
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
@@ -1118,6 +1191,21 @@ def revisar_compras(ib):
             precio_actual = velas_precio[-1].close
             currency = activo["currency"]
 
+            # Pre/postmercado de US: liquidez mucho menor que en sesion
+            # regular, asi que la compra se manda como orden LIMITADA al
+            # precio exacto (con outsideRth) en vez de orden a mercado.
+            usar_limite_fuera_horario = activo["mercado"] == "US" and fuera_de_sesion_regular_us()
+
+            def _orden_compra_cash(importe):
+                if usar_limite_fuera_horario:
+                    return crear_orden_limitada_cash('BUY', importe, precio_actual, fuera_horario_regular=True)
+                return crear_orden_mercado_cash('BUY', importe)
+
+            def _orden_compra(cant):
+                if usar_limite_fuera_horario:
+                    return crear_orden_limitada('BUY', cant, precio_actual, fuera_horario_regular=True)
+                return crear_orden_mercado('BUY', cant)
+
             if en_ventana_sin_compra(activo["mercado"]):
                 # Dentro de los ultimos MINUTOS_SIN_COMPRAR_ANTES_CIERRE minutos:
                 # solo se compra si ya se tiene el valor Y el precio actual es
@@ -1200,14 +1288,15 @@ def revisar_compras(ib):
 
             log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad:g} acciones "
                 f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
-                f"limite: {limite_por_valor_usd:.2f} USD).")
+                f"limite: {limite_por_valor_usd:.2f} USD)."
+                + (" [pre/postmercado: orden limitada al precio exacto]" if usar_limite_fuera_horario else ""))
             cantidad_antes_compra = next(
                 (p.position for p in posiciones_actuales if p.contract.symbol == ticker and p.position > 0), 0.0)
 
             if fraccionable:
-                orden = crear_orden_mercado_cash('BUY', importe_a_usar)
+                orden = _orden_compra_cash(importe_a_usar)
             else:
-                orden = crear_orden_mercado('BUY', cantidad)
+                orden = _orden_compra(cantidad)
             trade = ib.placeOrder(contrato, orden)
             estado = esperar_estado_final_orden(ib, trade)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
@@ -1227,7 +1316,7 @@ def revisar_compras(ib):
                 log(f"COMPRAS: {ticker} - este valor no admite el importe en efectivo (cashQty) via API "
                     f"(error 10244); reintentando con la cantidad fraccionaria puesta directamente "
                     f"({cantidad:g} acciones).")
-                orden = crear_orden_mercado('BUY', cantidad)
+                orden = _orden_compra(cantidad)
                 trade = ib.placeOrder(contrato, orden)
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"COMPRAS: {ticker} - estado de la orden (cantidad fraccionaria directa): {estado}")
@@ -1242,7 +1331,7 @@ def revisar_compras(ib):
                 if cantidad_entera_fallback >= 1:
                     log(f"COMPRAS: {ticker} - este valor no admite fracciones via API (ni cashQty ni "
                         f"cantidad directa); reintentando con {cantidad_entera_fallback} acciones enteras.")
-                    orden = crear_orden_mercado('BUY', cantidad_entera_fallback)
+                    orden = _orden_compra(cantidad_entera_fallback)
                     trade = ib.placeOrder(contrato, orden)
                     estado = esperar_estado_final_orden(ib, trade)
                     log(f"COMPRAS: {ticker} - estado de la orden (acciones enteras): {estado}")

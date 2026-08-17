@@ -176,7 +176,8 @@ miercoles_us_abierto = datetime(2026, 8, 12, 10, 0, tzinfo=bot.ZONA_NY)
 check("es_horario_operativo US: miercoles 10:00 ET -> abierto",
       con_reloj_fijo(miercoles_us_abierto, bot.es_horario_operativo, "US") is True)
 
-# Miercoles 20:00 ET -> mercado US cerrado (fuera de premercado y regular)
+# Miercoles 20:00 ET -> mercado US cerrado (justo en el limite exclusivo del
+# postmercado extendido: fuera de premercado, regular Y postmercado)
 miercoles_us_cerrado = datetime(2026, 8, 12, 20, 0, tzinfo=bot.ZONA_NY)
 check("es_horario_operativo US: miercoles 20:00 ET -> cerrado",
       con_reloj_fijo(miercoles_us_cerrado, bot.es_horario_operativo, "US") is False)
@@ -186,10 +187,33 @@ sabado_us = datetime(2026, 8, 15, 10, 0, tzinfo=bot.ZONA_NY)
 check("es_horario_operativo US: sabado -> cerrado (fin de semana)",
       con_reloj_fijo(sabado_us, bot.es_horario_operativo, "US") is False)
 
-# Justo en el limite de cierre (16:00 ET, exclusivo) -> cerrado
-limite_cierre_us = datetime(2026, 8, 12, 16, 0, tzinfo=bot.ZONA_NY)
-check("es_horario_operativo US: exactamente a las 16:00 ET -> cerrado (limite exclusivo)",
-      con_reloj_fijo(limite_cierre_us, bot.es_horario_operativo, "US") is False)
+# Justo en el limite del cierre REGULAR (16:00 ET): ahora sigue ABIERTO,
+# porque entra el postmercado extendido (16:00-20:00 ET) - decision del
+# usuario de poder comprar (no vender) en esa franja.
+limite_cierre_regular_us = datetime(2026, 8, 12, 16, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: exactamente a las 16:00 ET -> ABIERTO (empieza el postmercado)",
+      con_reloj_fijo(limite_cierre_regular_us, bot.es_horario_operativo, "US") is True)
+
+# 19:59 ET -> dentro del postmercado extendido (abierto)
+diecinueve_59 = datetime(2026, 8, 12, 19, 59, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: 19:59 ET -> abierto (postmercado)",
+      con_reloj_fijo(diecinueve_59, bot.es_horario_operativo, "US") is True)
+
+# fuera_de_sesion_regular_us / en_postmercado_us: premercado, regular y postmercado
+premercado_us = datetime(2026, 8, 12, 6, 0, tzinfo=bot.ZONA_NY)
+check("fuera_de_sesion_regular_us: 6:00 ET (premercado) -> True",
+      con_reloj_fijo(premercado_us, bot.fuera_de_sesion_regular_us) is True)
+check("en_postmercado_us: 6:00 ET (premercado) -> False",
+      con_reloj_fijo(premercado_us, bot.en_postmercado_us) is False)
+
+check("fuera_de_sesion_regular_us: 10:00 ET (sesion regular) -> False",
+      con_reloj_fijo(miercoles_us_abierto, bot.fuera_de_sesion_regular_us) is False)
+
+postmercado_us = datetime(2026, 8, 12, 18, 0, tzinfo=bot.ZONA_NY)
+check("fuera_de_sesion_regular_us: 18:00 ET (postmercado) -> True",
+      con_reloj_fijo(postmercado_us, bot.fuera_de_sesion_regular_us) is True)
+check("en_postmercado_us: 18:00 ET (postmercado) -> True",
+      con_reloj_fijo(postmercado_us, bot.en_postmercado_us) is True)
 
 # minutos_hasta_cierre: 15:50 ET -> 10 minutos para el cierre
 quince_cincuenta = datetime(2026, 8, 12, 15, 50, tzinfo=bot.ZONA_NY)
@@ -1048,6 +1072,118 @@ check("resumen cierre: aparece el total de ganancia del dia en USD y EUR",
       f"salida={texto_resumen!r}")
 check("resumen cierre: el total invertido de posiciones abiertas sigue mostrando USD y EUR (sin posiciones abiertas aqui, no debe fallar)",
       "ERROR" not in texto_resumen and "Traceback" not in texto_resumen)
+
+
+# ---------------------------------------------------------------------------
+# 16. Pre/postmercado de US: las compras en premercado deben usar ordenes
+#     LIMITADAS al precio exacto (con outsideRth), no ordenes a mercado; y
+#     en postmercado no se debe intentar vender nada aunque el MACD diga
+#     que toca vender (decision explicita del usuario).
+# ---------------------------------------------------------------------------
+class _IBFalsoComprasHorario(_IBFalsoCompras):
+    def __init__(self):
+        super().__init__()
+        self.ordenes_objeto = []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_objeto.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
+                                      isDone=lambda: True, log=[])
+
+
+bot.ACTIVOS = [{"ticker": "PREMKT", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+ib_falso_premercado = _IBFalsoComprasHorario()
+premercado_instante = datetime(2026, 8, 12, 6, 0, tzinfo=bot.ZONA_NY)  # miercoles 6:00 ET
+try:
+    con_reloj_fijo(premercado_instante, bot.revisar_compras, ib_falso_premercado)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("revisar_compras en premercado US: coloca exactamente una orden",
+      len(ib_falso_premercado.ordenes_objeto) == 1,
+      f"ordenes={len(ib_falso_premercado.ordenes_objeto)}")
+if ib_falso_premercado.ordenes_objeto:
+    orden_premercado = ib_falso_premercado.ordenes_objeto[0]
+    check("revisar_compras en premercado US: la orden es LIMITADA (no a mercado)",
+          orden_premercado.orderType == "LMT", f"orderType={orden_premercado.orderType}")
+    check("revisar_compras en premercado US: la orden tiene outsideRth activado",
+          orden_premercado.outsideRth is True)
+
+# Postmercado: no debe intentar vender aunque el MACD diga BAJISTA y haya
+# beneficio de sobra.
+class _Contrato2:
+    def __init__(self, symbol, currency="USD"):
+        self.symbol = symbol
+        self.currency = currency
+
+
+class _Posicion2:
+    def __init__(self, symbol, position, avgCost, currency="USD"):
+        self.contract = _Contrato2(symbol, currency)
+        self.position = position
+        self.avgCost = avgCost
+
+
+class _IBFalsoVentasHorario:
+    def __init__(self):
+        self.ordenes_colocadas = []
+        self._posiciones = [_Posicion2("POSTMKT", 10, 100)]
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(120)]  # +20% de beneficio, de sobra para vender
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
+                                      isDone=lambda: True, log=[])
+
+
+macd_bajista_original = bot.macd_5min_bajista
+bot.macd_5min_bajista = lambda ib, contrato: True  # forzar señal de venta
+
+ib_falso_postmercado = _IBFalsoVentasHorario()
+postmercado_instante = datetime(2026, 8, 12, 18, 0, tzinfo=bot.ZONA_NY)  # miercoles 18:00 ET
+try:
+    con_reloj_fijo(postmercado_instante, bot.revisar_ventas, ib_falso_postmercado)
+finally:
+    bot.macd_5min_bajista = macd_bajista_original
+
+check("revisar_ventas en postmercado US: NO coloca ninguna orden aunque tocaria vender",
+      ib_falso_postmercado.ordenes_colocadas == [],
+      f"ordenes={ib_falso_postmercado.ordenes_colocadas}")
+
+# Premercado: SI debe vender, pero con orden LIMITADA al precio exacto (con
+# outsideRth), no a mercado.
+ib_falso_venta_premercado = _IBFalsoVentasHorario()
+ib_falso_venta_premercado._posiciones = [_Posicion2("PREVENTA", 10, 100)]
+bot.macd_5min_bajista = lambda ib, contrato: True
+try:
+    con_reloj_fijo(premercado_instante, bot.revisar_ventas, ib_falso_venta_premercado)
+finally:
+    bot.macd_5min_bajista = macd_bajista_original
+
+check("revisar_ventas en premercado US: coloca exactamente una orden",
+      len(ib_falso_venta_premercado.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_venta_premercado.ordenes_colocadas}")
+if ib_falso_venta_premercado.ordenes_colocadas:
+    orden_venta_premercado = ib_falso_venta_premercado.ordenes_colocadas[0]
+    check("revisar_ventas en premercado US: la orden es LIMITADA (no a mercado)",
+          orden_venta_premercado.orderType == "LMT", f"orderType={orden_venta_premercado.orderType}")
+    check("revisar_ventas en premercado US: la orden tiene outsideRth activado",
+          orden_venta_premercado.outsideRth is True)
 
 
 # ---------------------------------------------------------------------------

@@ -97,7 +97,8 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
    - **US**: se permite comprar **fracción de acción** (hasta 4 decimales). La orden se manda
      por **importe en efectivo** (`cashQty`), no por número de acciones — ver bug crítico #9.
    - **HK/KR**: acciones/lotes enteros, redondeo hacia abajo al lote mínimo de IBKR.
-6. Órdenes siempre **a mercado** (no límite).
+6. Órdenes **a mercado** en sesión regular. En **pre/postmercado de US** (ver sección
+   dedicada más abajo), órdenes **limitadas al precio exacto** en vez de a mercado.
 7. Si el estado de la orden no confirma `Filled`, se vuelve a consultar la posición real en
    IBKR unos segundos después (`verificar_posicion_tras_orden_no_confirmada`) para dar un
    veredicto fiable en el log en vez de fiarse solo del objeto `Trade` (ver bug #10).
@@ -115,6 +116,42 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
 - Si MACD de 5 min alcista → se deja correr, aunque tenga beneficio.
 - Si el estado de la orden no confirma `Filled`, igual que en compras: se reconsulta la
   posición real para dar un veredicto fiable en el log.
+- En **postmercado de US** no se intenta vender nada (ver sección dedicada más abajo).
+
+## Pre/postmercado de US (agosto 2026)
+
+Antes, el bot "miraba" precios en premercado (`HORA_INICIO_US = 4:00 ET`) pero en realidad
+**no ejecutaba nada de verdad** ahí: las órdenes no llevaban el flag `outsideRth`, obligatorio
+en IBKR para operar fuera de la sesión regular (9:30-16:00 ET). Sin él, una orden a esas horas
+se queda pendiente sin ejecutar hasta la apertura oficial. Y el bot tampoco tenía ningún tramo
+de postmercado (16:00-20:00 ET) — se consideraba cerrado justo al cierre regular.
+
+**Decisión del usuario**: activar tanto pre como postmercado, pero con dos matices:
+1. En **ambos** tramos, las órdenes deben ser **limitadas al precio exacto** (con
+   `outsideRth=True`), nunca a mercado — la liquidez es mucho menor y una orden a mercado
+   podría ejecutarse a un precio muy distinto del analizado.
+2. En **postmercado, solo se compra, nunca se vende** (decisión explícita: no arriesgarse a
+   salir de una posición con tan poca liquidez). En premercado sí se compra y se vende con
+   normalidad (con orden límite).
+
+**Importante — las ventanas de seguridad NO se movieron**: `en_ventana_sin_compra` (últimos
+90 min antes del cierre) y `en_ventana_venta_forzada` (últimos 15 min antes del cierre) siguen
+ancladas al **cierre regular** (16:00 ET), sin cambios — decisión explícita del usuario para no
+alterar la gestión de riesgo ya probada. El postmercado (16:00-20:00 ET) es una franja
+*adicional* donde se puede comprar, sin las protecciones pensadas para el final de la sesión
+regular.
+
+Piezas clave:
+- `HORA_CIERRE_EXTENDIDO_US = 20:00 ET`: nuevo límite de `es_horario_operativo("US")`
+  (antes era `HORA_CIERRE_US = 16:00 ET`, que ahora solo se usa para las ventanas de
+  seguridad, no para saber si el mercado está "abierto").
+- `en_postmercado_us()`: True entre 16:00-20:00 ET. Usado en `revisar_ventas` para saltarse
+  por completo cualquier intento de venta en US en ese tramo.
+- `fuera_de_sesion_regular_us()`: True en pre **o** postmercado (falso en sesión regular).
+  Usado tanto en `revisar_compras` como en `revisar_ventas` (aquí solo puede darse en
+  premercado, porque el postmercado ya se filtra antes) para decidir orden límite vs mercado.
+- `crear_orden_limitada`/`crear_orden_limitada_cash` aceptan ahora `fuera_horario_regular=True`
+  para activar `outsideRth` en la orden.
 
 ## Historial de fecha de apertura (`historial_compras.json`)
 
