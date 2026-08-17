@@ -1075,10 +1075,10 @@ check("resumen cierre: el total invertido de posiciones abiertas sigue mostrando
 
 
 # ---------------------------------------------------------------------------
-# 16. Pre/postmercado de US: las compras en premercado deben usar ordenes
-#     LIMITADAS al precio exacto (con outsideRth), no ordenes a mercado; y
-#     en postmercado no se debe intentar vender nada aunque el MACD diga
-#     que toca vender (decision explicita del usuario).
+# 16. Pre/postmercado de US: en AMBOS tramos las ordenes ejecutadas deben
+#     ser LIMITADAS al precio exacto (con outsideRth), no a mercado. En
+#     premercado se compra Y se vende con normalidad; en postmercado SOLO
+#     se vende (no se compra) -decision explicita del usuario-.
 # ---------------------------------------------------------------------------
 class _IBFalsoComprasHorario(_IBFalsoCompras):
     def __init__(self):
@@ -1113,8 +1113,25 @@ if ib_falso_premercado.ordenes_objeto:
     check("revisar_compras en premercado US: la orden tiene outsideRth activado",
           orden_premercado.outsideRth is True)
 
-# Postmercado: no debe intentar vender aunque el MACD diga BAJISTA y haya
-# beneficio de sobra.
+# Postmercado: NO debe intentar comprar aunque haya señal de compra.
+ib_falso_postmercado_compras = _IBFalsoComprasHorario()
+postmercado_instante = datetime(2026, 8, 12, 18, 0, tzinfo=bot.ZONA_NY)  # miercoles 18:00 ET
+bot.ACTIVOS = [{"ticker": "POSTMKT_COMPRA", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+try:
+    con_reloj_fijo(postmercado_instante, bot.revisar_compras, ib_falso_postmercado_compras)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("revisar_compras en postmercado US: NO coloca ninguna orden aunque hay señal de compra",
+      ib_falso_postmercado_compras.ordenes_objeto == [],
+      f"ordenes={ib_falso_postmercado_compras.ordenes_objeto}")
+
+# Ventas: en pre Y postmercado debe vender igual, ambas con orden LIMITADA
+# al precio exacto (con outsideRth), no a mercado.
 class _Contrato2:
     def __init__(self, symbol, currency="USD"):
         self.symbol = symbol
@@ -1154,19 +1171,24 @@ class _IBFalsoVentasHorario:
 macd_bajista_original = bot.macd_5min_bajista
 bot.macd_5min_bajista = lambda ib, contrato: True  # forzar señal de venta
 
-ib_falso_postmercado = _IBFalsoVentasHorario()
-postmercado_instante = datetime(2026, 8, 12, 18, 0, tzinfo=bot.ZONA_NY)  # miercoles 18:00 ET
+ib_falso_venta_postmercado = _IBFalsoVentasHorario()
 try:
-    con_reloj_fijo(postmercado_instante, bot.revisar_ventas, ib_falso_postmercado)
+    con_reloj_fijo(postmercado_instante, bot.revisar_ventas, ib_falso_venta_postmercado)
 finally:
     bot.macd_5min_bajista = macd_bajista_original
 
-check("revisar_ventas en postmercado US: NO coloca ninguna orden aunque tocaria vender",
-      ib_falso_postmercado.ordenes_colocadas == [],
-      f"ordenes={ib_falso_postmercado.ordenes_colocadas}")
+check("revisar_ventas en postmercado US: coloca exactamente una orden (SI se puede vender)",
+      len(ib_falso_venta_postmercado.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_venta_postmercado.ordenes_colocadas}")
+if ib_falso_venta_postmercado.ordenes_colocadas:
+    orden_venta_postmercado = ib_falso_venta_postmercado.ordenes_colocadas[0]
+    check("revisar_ventas en postmercado US: la orden es LIMITADA (no a mercado)",
+          orden_venta_postmercado.orderType == "LMT", f"orderType={orden_venta_postmercado.orderType}")
+    check("revisar_ventas en postmercado US: la orden tiene outsideRth activado",
+          orden_venta_postmercado.outsideRth is True)
 
-# Premercado: SI debe vender, pero con orden LIMITADA al precio exacto (con
-# outsideRth), no a mercado.
+# Premercado: SI debe vender tambien, con orden LIMITADA al precio exacto
+# (con outsideRth), no a mercado.
 ib_falso_venta_premercado = _IBFalsoVentasHorario()
 ib_falso_venta_premercado._posiciones = [_Posicion2("PREVENTA", 10, 100)]
 bot.macd_5min_bajista = lambda ib, contrato: True

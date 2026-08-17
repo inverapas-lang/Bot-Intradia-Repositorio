@@ -116,7 +116,8 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
 - Si MACD de 5 min alcista → se deja correr, aunque tenga beneficio.
 - Si el estado de la orden no confirma `Filled`, igual que en compras: se reconsulta la
   posición real para dar un veredicto fiable en el log.
-- En **postmercado de US** no se intenta vender nada (ver sección dedicada más abajo).
+- En **postmercado de US** SÍ se vende con normalidad (con orden límite, ver sección dedicada
+  más abajo); lo que no se hace en ese tramo es comprar.
 
 ## Pre/postmercado de US (agosto 2026)
 
@@ -130,26 +131,28 @@ de postmercado (16:00-20:00 ET) — se consideraba cerrado justo al cierre regul
 1. En **ambos** tramos, las órdenes deben ser **limitadas al precio exacto** (con
    `outsideRth=True`), nunca a mercado — la liquidez es mucho menor y una orden a mercado
    podría ejecutarse a un precio muy distinto del analizado.
-2. En **postmercado, solo se compra, nunca se vende** (decisión explícita: no arriesgarse a
-   salir de una posición con tan poca liquidez). En premercado sí se compra y se vende con
-   normalidad (con orden límite).
+2. En **postmercado, solo se vende, nunca se compra** (decisión explícita, y al revés de lo
+   que se implementó en un primer momento: no abrir posiciones nuevas con la liquidez tan baja
+   de esa franja, pero sin bloquear la salida de una posición que ya toque cerrar). En
+   premercado sí se compra y se vende con normalidad (ambas con orden límite).
 
 **Importante — las ventanas de seguridad NO se movieron**: `en_ventana_sin_compra` (últimos
 90 min antes del cierre) y `en_ventana_venta_forzada` (últimos 15 min antes del cierre) siguen
 ancladas al **cierre regular** (16:00 ET), sin cambios — decisión explícita del usuario para no
 alterar la gestión de riesgo ya probada. El postmercado (16:00-20:00 ET) es una franja
-*adicional* donde se puede comprar, sin las protecciones pensadas para el final de la sesión
+*adicional* donde se puede vender, sin las protecciones pensadas para el final de la sesión
 regular.
 
 Piezas clave:
 - `HORA_CIERRE_EXTENDIDO_US = 20:00 ET`: nuevo límite de `es_horario_operativo("US")`
   (antes era `HORA_CIERRE_US = 16:00 ET`, que ahora solo se usa para las ventanas de
   seguridad, no para saber si el mercado está "abierto").
-- `en_postmercado_us()`: True entre 16:00-20:00 ET. Usado en `revisar_ventas` para saltarse
-  por completo cualquier intento de venta en US en ese tramo.
+- `en_postmercado_us()`: True entre 16:00-20:00 ET. Usado en `revisar_compras` para saltarse
+  por completo cualquier intento de compra en US en ese tramo (se sigue analizando/vendiendo
+  con normalidad).
 - `fuera_de_sesion_regular_us()`: True en pre **o** postmercado (falso en sesión regular).
-  Usado tanto en `revisar_compras` como en `revisar_ventas` (aquí solo puede darse en
-  premercado, porque el postmercado ya se filtra antes) para decidir orden límite vs mercado.
+  Usado tanto en `revisar_compras` como en `revisar_ventas` para decidir orden límite vs
+  mercado (en ventas puede darse en cualquiera de los dos tramos, ya no solo en premercado).
 - `crear_orden_limitada`/`crear_orden_limitada_cash` aceptan ahora `fuera_horario_regular=True`
   para activar `outsideRth` en la orden.
 

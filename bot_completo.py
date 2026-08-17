@@ -3,10 +3,11 @@ BOT COMPLETO - bucle automatico cada 4 minutos. Soporta estos mercados:
   - US (NYSE/Nasdaq, en USD): premercado 4:00-9:30 ET + mercado regular 9:30-16:00 ET +
     postmercado 16:00-20:00 ET. En premercado se compra Y se vende con normalidad (orden
     limitada al precio exacto, no a mercado: la liquidez es mucho menor). En postmercado
-    SOLO se compra (tambien con orden limitada al precio exacto), no se vende -decision
-    explicita del usuario para no arriesgarse a salir de una posicion con la liquidez tan
-    baja de esa franja-. Las ventanas de "no comprar antes del cierre" y "venta forzada
-    antes del cierre" siguen ancladas al cierre REGULAR (16:00 ET), sin cambios.
+    SOLO se vende (tambien con orden limitada al precio exacto), no se compra -decision
+    explicita del usuario, para no abrir posiciones nuevas con la liquidez tan baja de esa
+    franja, pero sin bloquear la salida de posiciones que ya tocaria cerrar-. Las ventanas
+    de "no comprar antes del cierre" y "venta forzada antes del cierre" siguen ancladas al
+    cierre REGULAR (16:00 ET), sin cambios.
   - HK (Hong Kong Stock Exchange, en HKD): sesion 9:30-16:00 hora de Hong Kong
     (simplificado, ignora la pausa de mediodia real del mercado).
   - KR (Korea Exchange / KRX, en KRW): sesion 9:00-15:30 hora de Corea.
@@ -899,17 +900,6 @@ def revisar_ventas(ib):
                 mercados_cerrados_avisados.add(mercado)
             continue
 
-        # Postmercado de US (16:00-20:00 ET): decision explicita del usuario
-        # de solo comprar en este tramo, no vender (liquidez mucho menor que
-        # en sesion regular). Las ventas de US se reanudan al dia siguiente
-        # en premercado/sesion regular.
-        if mercado == "US" and en_postmercado_us():
-            if mercado not in mercados_cerrados_avisados:
-                log(f"VENTAS: mercado {mercado} en postmercado (16:00-20:00 ET), no se intenta vender "
-                    f"ninguna posicion de este mercado en este ciclo (solo se compra en este tramo).")
-                mercados_cerrados_avisados.add(mercado)
-            continue
-
         contrato = pos.contract
         cantidad = pos.position
         coste_medio = pos.avgCost
@@ -999,12 +989,11 @@ def revisar_ventas(ib):
                 continue
 
             if bajista:
-                # Si llegamos aqui con mercado=="US" fuera de sesion regular,
-                # solo puede ser premercado (el postmercado ya se filtro mas
-                # arriba): liquidez mucho menor, se usa orden LIMITADA al
-                # precio exacto (con outsideRth) en vez de orden a mercado.
+                # Pre o postmercado de US: liquidez mucho menor que en sesion
+                # regular, se usa orden LIMITADA al precio exacto (con
+                # outsideRth) en vez de orden a mercado.
                 usar_limite_fuera_horario = mercado == "US" and fuera_de_sesion_regular_us()
-                tipo_orden_texto = "limitada al precio exacto (premercado)" if usar_limite_fuera_horario else "a mercado"
+                tipo_orden_texto = "limitada al precio exacto (fuera de sesion regular)" if usar_limite_fuera_horario else "a mercado"
                 log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
                     f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden {tipo_orden_texto}).")
 
@@ -1161,6 +1150,18 @@ def revisar_compras(ib):
 
         if not es_horario_operativo(activo["mercado"]):
             continue  # este valor esta fuera de horario en su mercado, se omite en este ciclo
+
+        # Postmercado de US (16:00-20:00 ET): decision explicita del usuario
+        # de solo VENDER en este tramo, no comprar (liquidez mucho menor que
+        # en sesion regular). Las compras de US se reanudan al dia siguiente
+        # en premercado/sesion regular.
+        if activo["mercado"] == "US" and en_postmercado_us():
+            if activo["mercado"] not in mercados_ya_avisados:
+                log(f"COMPRAS: mercado {activo['mercado']} en postmercado (16:00-20:00 ET), no se "
+                    f"analiza ningun valor en busca de señales de compra en este ciclo "
+                    f"(solo se vende en este tramo).")
+                mercados_ya_avisados.add(activo["mercado"])
+            continue
 
         contadores["analizados"] += 1
         ticker = activo["ticker"]
