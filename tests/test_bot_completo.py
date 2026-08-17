@@ -704,7 +704,10 @@ bot.es_horario_operativo = lambda mercado: True
 bot.en_ventana_sin_compra = lambda mercado: False
 ib_falso_frac = _IBFalsoComprasFraccionarias()
 try:
-    bot.revisar_compras(ib_falso_frac)
+    # Anclado a sesion regular (10:00 ET): fuera de sesion regular las
+    # fracciones se saltan por completo (fracciones_no_disponibles), lo que
+    # rompe este test si se ejecuta con el reloj real en pre/postmercado.
+    con_reloj_fijo(miercoles_us_abierto, bot.revisar_compras, ib_falso_frac)
 finally:
     bot.ACTIVOS = activos_originales
     bot.es_horario_operativo = es_horario_original
@@ -936,7 +939,7 @@ bot.es_horario_operativo = lambda mercado: True
 bot.en_ventana_sin_compra = lambda mercado: False
 ib_falso_cashqty = _IBFalsoRechazoCashQty()
 try:
-    bot.revisar_compras(ib_falso_cashqty)
+    con_reloj_fijo(miercoles_us_abierto, bot.revisar_compras, ib_falso_cashqty)
 finally:
     bot.ACTIVOS = activos_originales
     bot.es_horario_operativo = es_horario_original
@@ -987,7 +990,7 @@ bot.es_horario_operativo = lambda mercado: True
 bot.en_ventana_sin_compra = lambda mercado: False
 ib_falso_total = _IBFalsoRechazoTotal()
 try:
-    bot.revisar_compras(ib_falso_total)
+    con_reloj_fijo(miercoles_us_abierto, bot.revisar_compras, ib_falso_total)
 finally:
     bot.ACTIVOS = activos_originales
     bot.es_horario_operativo = es_horario_original
@@ -1103,7 +1106,8 @@ finally:
     bot.es_horario_operativo = es_horario_original
     bot.en_ventana_sin_compra = en_ventana_sin_compra_original
 
-check("revisar_compras en premercado US: coloca exactamente una orden",
+check("revisar_compras en premercado US: coloca exactamente UNA orden (Plan A/B saltados, "
+      "va directo a acciones enteras: las fracciones no funcionan fuera de sesion regular)",
       len(ib_falso_premercado.ordenes_objeto) == 1,
       f"ordenes={len(ib_falso_premercado.ordenes_objeto)}")
 if ib_falso_premercado.ordenes_objeto:
@@ -1112,6 +1116,11 @@ if ib_falso_premercado.ordenes_objeto:
           orden_premercado.orderType == "LMT", f"orderType={orden_premercado.orderType}")
     check("revisar_compras en premercado US: la orden tiene outsideRth activado",
           orden_premercado.outsideRth is True)
+    check("revisar_compras en premercado US: la orden es de acciones ENTERAS, no cashQty "
+          "(fracciones_no_disponibles: se salta directo a Plan C)",
+          not bot.es_cantidad_fraccionaria(orden_premercado.totalQuantity)
+          and orden_premercado.totalQuantity >= 1,
+          f"totalQuantity={orden_premercado.totalQuantity}")
 
 # Postmercado: NO debe intentar comprar aunque haya señal de compra.
 ib_falso_postmercado_compras = _IBFalsoComprasHorario()

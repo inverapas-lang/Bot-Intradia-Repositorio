@@ -153,6 +153,17 @@ Piezas clave:
 - `fuera_de_sesion_regular_us()`: True en pre **o** postmercado (falso en sesión regular).
   Usado tanto en `revisar_compras` como en `revisar_ventas` para decidir orden límite vs
   mercado (en ventas puede darse en cualquiera de los dos tramos, ya no solo en premercado).
+
+**Hallazgo adicional (visto en producción, agosto 2026)**: las fracciones de acción NO
+funcionan vía API fuera de la sesión regular, **ni por `cashQty` ni por cantidad directa**
+(error 10243 "Please use desktop version to place this order" con los dos métodos, para
+varios valores distintos en pre/postmercado). Por eso, en `revisar_compras`, cuando
+`fraccionable and fuera_de_sesion_regular_us()` (`fracciones_no_disponibles`), se salta
+directamente el Plan A (`cashQty`) y el Plan B (cantidad fraccionaria directa) y se va
+derecho al Plan C (acciones enteras) — evita 2 órdenes rechazadas por señal, y con
+presupuestos pequeños puede significar que la señal se omita si no llega ni para 1 acción
+entera (no hay nada que hacer ahí, es una limitación real de la plataforma fuera de horario
+regular).
 - `crear_orden_limitada`/`crear_orden_limitada_cash` aceptan ahora `fuera_horario_regular=True`
   para activar `outsideRth` en la orden.
 

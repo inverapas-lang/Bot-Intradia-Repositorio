@@ -1257,7 +1257,16 @@ def revisar_compras(ib):
             importe_a_usar = min(presupuesto_operacion, margen_disponible_moneda)
             fraccionable = FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False)
 
-            if fraccionable:
+            # Visto en produccion (agosto 2026): las fracciones de accion NO
+            # funcionan via API fuera de la sesion regular, ni por cashQty ni
+            # por cantidad directa (error 10243 "Please use desktop version
+            # to place this order" con AMBOS metodos, para varios valores
+            # distintos en pre/postmercado). Para no desperdiciar 2 ordenes
+            # rechazadas por señal, en ese caso se va directo a acciones
+            # ENTERAS (igual que el Plan C de mas abajo).
+            fracciones_no_disponibles = fraccionable and usar_limite_fuera_horario
+
+            if fraccionable and not fracciones_no_disponibles:
                 # Mercado US: se permite comprar una fraccion de accion, para
                 # poder invertir el presupuesto disponible aunque sea menor que
                 # el precio de una accion entera (util con carteras pequeñas).
@@ -1269,6 +1278,14 @@ def revisar_compras(ib):
                     log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
                         f"({importe_a_usar:.2f} {currency}) no llega al minimo de "
                         f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} {currency} por operacion, se omite.")
+                    continue
+            elif fracciones_no_disponibles:
+                cantidad = int(importe_a_usar // precio_actual)
+                if cantidad < 1:
+                    log(f"COMPRAS: {ticker} - senal de COMPRA en pre/postmercado, pero las fracciones "
+                        f"no funcionan fuera de sesion regular y el presupuesto ({importe_a_usar:.2f} "
+                        f"{currency}) no llega ni para 1 accion entera a {precio_actual} {currency}, "
+                        f"se omite.")
                     continue
             else:
                 cantidad_bruta = int(importe_a_usar // precio_actual)
@@ -1290,11 +1307,13 @@ def revisar_compras(ib):
             log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA, comprando {cantidad:g} acciones "
                 f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
                 f"limite: {limite_por_valor_usd:.2f} USD)."
-                + (" [pre/postmercado: orden limitada al precio exacto]" if usar_limite_fuera_horario else ""))
+                + (" [pre/postmercado: orden limitada al precio exacto]" if usar_limite_fuera_horario else "")
+                + (" [fracciones no disponibles fuera de sesion regular: acciones enteras directamente]"
+                   if fracciones_no_disponibles else ""))
             cantidad_antes_compra = next(
                 (p.position for p in posiciones_actuales if p.contract.symbol == ticker and p.position > 0), 0.0)
 
-            if fraccionable:
+            if fraccionable and not fracciones_no_disponibles:
                 orden = _orden_compra_cash(importe_a_usar)
             else:
                 orden = _orden_compra(cantidad)
@@ -1312,8 +1331,10 @@ def revisar_compras(ib):
             # a mercado con la cantidad fraccionaria puesta DIRECTAMENTE
             # (en vez de como importe en efectivo) se ejecuta sin problema.
             # Por eso, antes de rendirse a acciones enteras, se reintenta con
-            # la cantidad fraccionaria original puesta directamente.
-            if fraccionable and estado != 'Filled' and orden_rechazada_por_codigo(trade, {10244}):
+            # la cantidad fraccionaria original puesta directamente. NOTA:
+            # este plan se salta por completo si fracciones_no_disponibles
+            # (pre/postmercado) -ya se fue directo a acciones enteras arriba-.
+            if fraccionable and not fracciones_no_disponibles and estado != 'Filled' and orden_rechazada_por_codigo(trade, {10244}):
                 log(f"COMPRAS: {ticker} - este valor no admite el importe en efectivo (cashQty) via API "
                     f"(error 10244); reintentando con la cantidad fraccionaria puesta directamente "
                     f"({cantidad:g} acciones).")
@@ -1326,8 +1347,10 @@ def revisar_compras(ib):
             # (error 10243, "no se puede introducir la orden de tamano
             # fraccionario a traves de la API"), se reintenta con acciones
             # ENTERAS en vez de rendirse del todo, siempre que el presupuesto
-            # llegue para al menos 1.
-            if fraccionable and estado != 'Filled' and orden_rechazada_por_codigo(trade, {10243, 10244}):
+            # llegue para al menos 1. NOTA: no aplica si fracciones_no_disponibles,
+            # porque en ese caso ya se compro directamente en acciones enteras.
+            if (fraccionable and not fracciones_no_disponibles and estado != 'Filled'
+                    and orden_rechazada_por_codigo(trade, {10243, 10244})):
                 cantidad_entera_fallback = int(importe_a_usar // precio_actual)
                 if cantidad_entera_fallback >= 1:
                     log(f"COMPRAS: {ticker} - este valor no admite fracciones via API (ni cashQty ni "
