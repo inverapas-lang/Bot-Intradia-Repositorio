@@ -17,6 +17,10 @@ Bot de trading intradía sobre Interactive Brokers (vía `ib_async`), con señal
 MACD multi-temporalidad. Corre en bucle continuo, revisando ventas y compras cada ciclo.
 **Envía órdenes reales** a IBKR (aunque sea sobre cuenta paper) — no es una simulación.
 
+**Desde agosto 2026 hay un bot hermano, `bot_alpaca.py`** (sobre Alpaca, solo mercado US,
+comisión 0€, pensado para correr EN PARALELO a este). Ver `ALPACA_NOTES.md` para su estado —
+estas notas (`NOTES.md`) siguen siendo solo sobre el bot de IBKR.
+
 Se ejecuta localmente en el ordenador del usuario (Windows, `C:\Users\javie\Broker`), con
 IB Gateway/TWS corriendo en la misma máquina. Yo (Claude) no tengo acceso directo a esa
 ejecución; el usuario pega los logs del CMD y yo los reviso y edito el código en este repo.

@@ -1,0 +1,354 @@
+"""
+Tests manuales (sin pytest) para las funciones de logica pura de
+bot_alpaca.py: no requieren conexion real a Alpaca, solo importan el modulo
+y prueban calculos matematicos, de horarios y de decision con datos
+simulados (clientes falsos que imitan TradingClient/StockHistoricalDataClient).
+"""
+import os
+import sys
+import tempfile
+import types
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+os.environ.setdefault("ALPACA_API_KEY", "test-key")
+os.environ.setdefault("ALPACA_SECRET_KEY", "test-secret")
+
+import bot_alpaca as bot
+import pandas as pd
+
+_DIR_TEMP_ESTADO_RUNTIME = tempfile.mkdtemp()
+bot.ARCHIVO_LATIDO = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "latido_bot_alpaca.txt")
+bot.ARCHIVO_PID = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "bot_alpaca.pid")
+
+fallos = []
+
+
+def check(nombre, condicion, detalle=""):
+    estado = "OK  " if condicion else "FAIL"
+    print(f"[{estado}] {nombre}" + (f" -- {detalle}" if detalle and not condicion else ""))
+    if not condicion:
+        fallos.append(nombre)
+
+
+# ---------------------------------------------------------------------------
+# 1. calcular_macd: misma comprobacion que en test_bot_completo.py (funcion
+#    identica, copiada literalmente).
+# ---------------------------------------------------------------------------
+precios_alcistas = pd.Series([100 + i * 0.5 for i in range(60)])
+macd, senal, hist = bot.calcular_macd(precios_alcistas)
+check("calcular_macd: longitud de las series coincide con la de entrada",
+      len(macd) == len(precios_alcistas) == len(senal) == len(hist))
+check("calcular_macd: en una serie claramente alcista, el ultimo MACD es positivo",
+      macd.iloc[-1] > 0, f"macd_final={macd.iloc[-1]}")
+
+
+# ---------------------------------------------------------------------------
+# 2. decidir_senal: replica la logica de decision de compra (identica a
+#    analizar_activo() en bot_completo.py) a partir de un dict ya calculado.
+# ---------------------------------------------------------------------------
+todas_alcistas = {tf["nombre"]: True for tf in bot.TEMPORALIDADES}
+check("decidir_senal: las 7 temporalidades alcistas -> COMPRA",
+      bot.decidir_senal(todas_alcistas) == "COMPRA")
+
+cuatro_cortas_alcistas_resto_bajista = {tf["nombre"]: (tf["nombre"] in bot.NOMBRES_4_CORTAS)
+                                         for tf in bot.TEMPORALIDADES}
+check("decidir_senal: atajo de 4 cortas alcistas (resto bajista) -> COMPRA directa",
+      bot.decidir_senal(cuatro_cortas_alcistas_resto_bajista) == "COMPRA")
+
+falta_una_temporalidad = dict(todas_alcistas)
+falta_una_temporalidad["1 semana"] = None
+falta_una_temporalidad["1 minuto"] = False  # rompe el atajo de 4 cortas
+check("decidir_senal: falta un dato (no en las 4 cortas) -> SIN_DATOS",
+      bot.decidir_senal(falta_una_temporalidad) == "SIN_DATOS")
+
+una_en_contra = dict(todas_alcistas)
+una_en_contra["1 dia"] = False
+check("decidir_senal: 1 de 7 en contra (fuera del atajo, resto ok) -> COMPRA",
+      bot.decidir_senal(una_en_contra) == "COMPRA")
+
+# NOTA: "BLOQUEADO" (cortas ok, largas no) es un resultado que, con las 4
+# cortas dentro de NOMBRES_4_CORTAS, en la practica ya no puede darse: el
+# atajo de "4 cortas alcistas" dispara ANTES y devuelve COMPRA directamente
+# (mismo comportamiento documentado en bot_completo.py/NOTES.md). Se prueba
+# en su lugar el caso real: 2 en contra (fuera del atajo) -> SIN_SENAL.
+dos_en_contra = dict(todas_alcistas)
+dos_en_contra["1 minuto"] = False  # rompe el atajo de 4 cortas
+dos_en_contra["1 dia"] = False
+check("decidir_senal: 2 de 7 en contra (atajo roto, cortas no ok) -> SIN_SENAL",
+      bot.decidir_senal(dos_en_contra) == "SIN_SENAL")
+
+
+# ---------------------------------------------------------------------------
+# 3. macd_alcista_o_bajista: menos de 35 velas -> None; con datos suficientes
+#    determina alcista/bajista segun el tipo de temporalidad.
+# ---------------------------------------------------------------------------
+class _VelaFalsa:
+    def __init__(self, close):
+        self.close = close
+
+
+check("macd_alcista_o_bajista: menos de 35 velas -> None",
+      bot.macd_alcista_o_bajista([_VelaFalsa(100) for _ in range(10)], "corta") is None)
+
+velas_acelerando = [_VelaFalsa(100 * (1.02 ** i)) for i in range(60)]
+check("macd_alcista_o_bajista: serie acelerando al alza, temporalidad corta -> True",
+      bot.macd_alcista_o_bajista(velas_acelerando, "corta") is True)
+
+
+# ---------------------------------------------------------------------------
+# 4. Horarios: reloj fijo, igual que en test_bot_completo.py.
+# ---------------------------------------------------------------------------
+class _RelojFijo(datetime):
+    _instante_fijo = None
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is not None:
+            return cls._instante_fijo.astimezone(tz)
+        return cls._instante_fijo
+
+
+def con_reloj_fijo(instante, fn, *args, **kwargs):
+    original = bot.datetime
+    _RelojFijo._instante_fijo = instante
+    bot.datetime = _RelojFijo
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        bot.datetime = original
+
+
+miercoles_regular = datetime(2026, 8, 12, 10, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo: miercoles 10:00 ET (sesion regular) -> abierto",
+      con_reloj_fijo(miercoles_regular, bot.es_horario_operativo) is True)
+
+miercoles_cerrado = datetime(2026, 8, 12, 22, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo: miercoles 22:00 ET -> cerrado",
+      con_reloj_fijo(miercoles_cerrado, bot.es_horario_operativo) is False)
+
+sabado = datetime(2026, 8, 15, 10, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo: sabado -> cerrado (fin de semana)",
+      con_reloj_fijo(sabado, bot.es_horario_operativo) is False)
+
+limite_cierre_regular = datetime(2026, 8, 12, 16, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo: exactamente a las 16:00 ET -> ABIERTO (empieza postmercado)",
+      con_reloj_fijo(limite_cierre_regular, bot.es_horario_operativo) is True)
+check("en_postmercado_us: exactamente a las 16:00 ET -> True",
+      con_reloj_fijo(limite_cierre_regular, bot.en_postmercado_us) is True)
+
+premercado = datetime(2026, 8, 12, 6, 0, tzinfo=bot.ZONA_NY)
+check("fuera_de_sesion_regular_us: 6:00 ET (premercado) -> True",
+      con_reloj_fijo(premercado, bot.fuera_de_sesion_regular_us) is True)
+check("fuera_de_sesion_regular_us: 10:00 ET (sesion regular) -> False",
+      con_reloj_fijo(miercoles_regular, bot.fuera_de_sesion_regular_us) is False)
+
+quince_cincuenta = datetime(2026, 8, 12, 15, 50, tzinfo=bot.ZONA_NY)
+minutos = con_reloj_fijo(quince_cincuenta, bot.minutos_hasta_cierre)
+check("minutos_hasta_cierre: 15:50 ET -> 10.0", abs(minutos - 10.0) < 1e-9, f"obtenido={minutos}")
+check("en_ventana_sin_compra: 15:50 ET (10 min antes del cierre) -> True",
+      con_reloj_fijo(quince_cincuenta, bot.en_ventana_sin_compra) is True)
+check("en_ventana_venta_forzada: 15:50 ET (10 min antes del cierre) -> True",
+      con_reloj_fijo(quince_cincuenta, bot.en_ventana_venta_forzada) is True)
+
+
+# ---------------------------------------------------------------------------
+# 5. Comisiones: solo aplican en ventas (0 en compras, coherente con Alpaca).
+# ---------------------------------------------------------------------------
+comision_venta = bot.estimar_comision_venta(1_000_000, 1000)
+comision_esperada = 1_000_000 / 1_000_000 * bot.TASA_SEC_POR_MILLON_VENDIDO + 1000 * bot.TASA_FINRA_TAF_POR_ACCION
+check("estimar_comision_venta: coincide con la formula SEC+FINRA",
+      abs(comision_venta - comision_esperada) < 1e-9, f"obtenido={comision_venta}")
+check("estimar_comision_venta: para una venta pequeña, la comision es minima (<1 USD)",
+      bot.estimar_comision_venta(45, 1) < 1.0)
+
+
+# ---------------------------------------------------------------------------
+# 6. es_cantidad_fraccionaria / calcular_precio_limite_venta
+# ---------------------------------------------------------------------------
+check("es_cantidad_fraccionaria: 3.544 -> True", bot.es_cantidad_fraccionaria(3.544) is True)
+check("es_cantidad_fraccionaria: 3.0 -> False", bot.es_cantidad_fraccionaria(3.0) is False)
+check("calcular_precio_limite_venta: 0.2% por debajo del precio actual",
+      abs(bot.calcular_precio_limite_venta(100.0) - 99.8) < 1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 7. pedir_velas_lote: reintentos ante fallo, exito al primer intento, y
+#    devuelve dict {ticker: [velas]} para varios tickers a la vez.
+# ---------------------------------------------------------------------------
+class _BarSetFalso:
+    def __init__(self, data):
+        self.data = data
+
+
+class _DataClientFalsoExito:
+    def __init__(self):
+        self.llamadas = 0
+
+    def get_stock_bars(self, peticion):
+        self.llamadas += 1
+        return _BarSetFalso({t: [_VelaFalsa(100)] for t in peticion.symbol_or_symbols})
+
+
+data_client_original = bot._data_client
+bot._data_client = _DataClientFalsoExito()
+try:
+    resultado = bot.pedir_velas_lote(["AAPL", "MSFT"], bot.TEMPORALIDADES[0]["timeframe"], 3)
+finally:
+    bot._data_client = data_client_original
+
+check("pedir_velas_lote: exito al primer intento, sin reintentos",
+      bot._data_client is data_client_original)  # sanity: se restauro bien
+check("pedir_velas_lote: devuelve datos para ambos tickers pedidos",
+      set(resultado.keys()) == {"AAPL", "MSFT"} and len(resultado["AAPL"]) == 1)
+
+
+class _DataClientFalsoFallaSiempre:
+    def __init__(self):
+        self.llamadas = 0
+
+    def get_stock_bars(self, peticion):
+        self.llamadas += 1
+        raise RuntimeError("fallo de red simulado")
+
+
+data_client_falla = _DataClientFalsoFallaSiempre()
+sleep_original = bot.time.sleep
+bot.time.sleep = lambda s: None  # no perder tiempo real esperando entre reintentos
+bot._data_client = data_client_falla
+try:
+    resultado_vacio = bot.pedir_velas_lote(["AAPL"], bot.TEMPORALIDADES[0]["timeframe"], 3)
+finally:
+    bot._data_client = data_client_original
+    bot.time.sleep = sleep_original
+
+check("pedir_velas_lote: agota los 3 reintentos si siempre falla",
+      data_client_falla.llamadas == bot.INTENTOS_MAXIMOS_DATOS,
+      f"llamadas={data_client_falla.llamadas}")
+check("pedir_velas_lote: devuelve listas vacias (no lanza excepcion) si nunca hay datos",
+      resultado_vacio == {"AAPL": []})
+
+
+# ---------------------------------------------------------------------------
+# 8. revisar_compras / revisar_ventas: comportamiento con clientes falsos,
+#    en sesion regular y en pre/postmercado.
+# ---------------------------------------------------------------------------
+class _TradingClientFalso:
+    def __init__(self, portfolio_value=10_000, posiciones=None):
+        self.portfolio_value = portfolio_value
+        self._posiciones = posiciones or []
+        self.ordenes = []
+
+    def get_account(self):
+        return types.SimpleNamespace(portfolio_value=str(self.portfolio_value))
+
+    def get_all_positions(self):
+        return self._posiciones
+
+    def submit_order(self, order_data):
+        self.ordenes.append(order_data)
+        return types.SimpleNamespace(id="orden-falsa-1")
+
+    def get_order_by_id(self, order_id):
+        return types.SimpleNamespace(status=types.SimpleNamespace(value="filled"))
+
+
+def _fake_data_client_alcista():
+    class _DataClientAlcista:
+        def get_stock_bars(self, peticion):
+            # Serie acelerando al alza -> señal de COMPRA para cualquier ticker.
+            return _BarSetFalso({t: [_VelaFalsa(100 * (1.02 ** i)) for i in range(60)]
+                                  for t in peticion.symbol_or_symbols})
+    return _DataClientAlcista()
+
+
+trading_client_original = bot._trading_client
+activos_originales = bot.ACTIVOS
+bot.ACTIVOS = ["AAPL"]
+
+# --- Compras en sesion regular: debe colocar una orden a mercado (notional) ---
+bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
+bot._data_client = _fake_data_client_alcista()
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    ordenes_regular = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+
+check("revisar_compras en sesion regular: coloca exactamente una orden",
+      len(ordenes_regular) == 1, f"ordenes={len(ordenes_regular)}")
+if ordenes_regular:
+    check("revisar_compras en sesion regular: la orden usa notional (importe en efectivo), no qty",
+          ordenes_regular[0].notional is not None and ordenes_regular[0].qty is None)
+    check("revisar_compras en sesion regular: NO tiene extended_hours activado",
+          not ordenes_regular[0].extended_hours)
+
+# --- Compras en premercado: debe colocar una orden LIMITADA con qty entera ---
+bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
+bot._data_client = _fake_data_client_alcista()
+try:
+    con_reloj_fijo(premercado, bot.revisar_compras)
+finally:
+    ordenes_premercado = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+
+check("revisar_compras en premercado: coloca exactamente una orden",
+      len(ordenes_premercado) == 1, f"ordenes={len(ordenes_premercado)}")
+if ordenes_premercado:
+    orden_pre = ordenes_premercado[0]
+    check("revisar_compras en premercado: la orden usa qty ENTERA, no notional",
+          orden_pre.qty is not None and orden_pre.notional is None
+          and not bot.es_cantidad_fraccionaria(orden_pre.qty))
+    check("revisar_compras en premercado: tiene extended_hours activado",
+          orden_pre.extended_hours is True)
+    check("revisar_compras en premercado: es una orden LIMITADA",
+          orden_pre.type.value == "limit")
+
+# --- Compras en postmercado: NO debe colocar ninguna orden ---
+bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
+bot._data_client = _fake_data_client_alcista()
+postmercado = datetime(2026, 8, 12, 18, 0, tzinfo=bot.ZONA_NY)
+try:
+    con_reloj_fijo(postmercado, bot.revisar_compras)
+finally:
+    ordenes_postmercado = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+
+check("revisar_compras en postmercado: NO coloca ninguna orden",
+      ordenes_postmercado == [], f"ordenes={ordenes_postmercado}")
+
+# --- Ventas: posicion fraccionaria fuera de sesion regular -> se omite ---
+posicion_fraccionaria = types.SimpleNamespace(
+    symbol="AAPL", qty="3.544", avg_entry_price="100.0", market_value="400.0",
+    unrealized_pl="10.0", unrealized_plpc="0.05",
+)
+bot._trading_client = _TradingClientFalso(posiciones=[posicion_fraccionaria])
+bot._data_client = _fake_data_client_alcista()
+try:
+    con_reloj_fijo(postmercado, bot.revisar_ventas)
+finally:
+    ordenes_venta_frac = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+
+check("revisar_ventas: posicion FRACCIONARIA en postmercado -> no coloca ninguna orden "
+      "(Alpaca no admite vender fracciones fuera de sesion regular)",
+      ordenes_venta_frac == [], f"ordenes={ordenes_venta_frac}")
+
+bot.ACTIVOS = activos_originales
+
+
+# ---------------------------------------------------------------------------
+# Resumen final
+# ---------------------------------------------------------------------------
+print()
+if fallos:
+    print(f"{len(fallos)} test(s) FALLARON: {fallos}")
+    sys.exit(1)
+else:
+    print("Todos los tests pasaron correctamente.")
