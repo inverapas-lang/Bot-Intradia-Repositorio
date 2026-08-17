@@ -491,6 +491,12 @@ def pedir_velas(ib, contrato, duration, barSize):
             log(f"{contrato.symbol} - sin datos en el intento {intento}/{intentos}, "
                 f"reintentando en {ESPERA_ENTRE_INTENTOS_SEGUNDOS}s...")
             ib.sleep(ESPERA_ENTRE_INTENTOS_SEGUNDOS)
+        else:
+            # El ultimo intento tambien fallo: se deja constancia explicita
+            # en el log (antes se descartaba en silencio si fallaba sin
+            # lanzar excepcion, dejando un hueco dificil de diagnosticar).
+            log(f"{contrato.symbol} - sin datos tras el ultimo intento ({intento}/{intentos}), "
+                f"se omite este valor en este ciclo.")
 
     _fallos_seguidos_datos += 1
     return []
