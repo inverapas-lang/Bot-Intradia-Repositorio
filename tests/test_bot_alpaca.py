@@ -155,14 +155,11 @@ check("en_ventana_venta_forzada: 15:50 ET (10 min antes del cierre) -> True",
 
 
 # ---------------------------------------------------------------------------
-# 5. Comisiones: solo aplican en ventas (0 en compras, coherente con Alpaca).
+# 5. Comisiones: a peticion del usuario, se asume 0 en compras Y en ventas
+#    (no hay ninguna funcion de comision que probar; se comprueba mas abajo,
+#    en los tests de revisar_ventas, que el beneficio mostrado es el bruto
+#    sin ningun descuento).
 # ---------------------------------------------------------------------------
-comision_venta = bot.estimar_comision_venta(1_000_000, 1000)
-comision_esperada = 1_000_000 / 1_000_000 * bot.TASA_SEC_POR_MILLON_VENDIDO + 1000 * bot.TASA_FINRA_TAF_POR_ACCION
-check("estimar_comision_venta: coincide con la formula SEC+FINRA",
-      abs(comision_venta - comision_esperada) < 1e-9, f"obtenido={comision_venta}")
-check("estimar_comision_venta: para una venta pequeña, la comision es minima (<1 USD)",
-      bot.estimar_comision_venta(45, 1) < 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +336,39 @@ finally:
 check("revisar_ventas: posicion FRACCIONARIA en postmercado -> no coloca ninguna orden "
       "(Alpaca no admite vender fracciones fuera de sesion regular)",
       ordenes_venta_frac == [], f"ordenes={ordenes_venta_frac}")
+
+# --- Ventas: sin comision, el beneficio bruto exacto en el umbral (0.5%)
+# debe bastar para vender (si hubiera comision restando, se quedaria por
+# debajo del umbral y NO vendería) ---
+posicion_en_el_umbral = types.SimpleNamespace(
+    symbol="AAPL", qty="10", avg_entry_price="100.0", market_value="1005.0",
+    unrealized_pl="5.0", unrealized_plpc="0.005",
+)
+
+
+class _DataClientPrecioFijo:
+    def __init__(self, precio):
+        self.precio = precio
+
+    def get_stock_bars(self, peticion):
+        return _BarSetFalso({t: [_VelaFalsa(self.precio)] for t in peticion.symbol_or_symbols})
+
+
+macd_5min_bajista_original = bot.macd_5min_bajista
+bot._trading_client = _TradingClientFalso(posiciones=[posicion_en_el_umbral])
+bot._data_client = _DataClientPrecioFijo(100.5)  # exactamente +0.5% sobre el coste medio (100.0)
+bot.macd_5min_bajista = lambda ticker: True  # forzar señal de venta
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    ordenes_umbral = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.macd_5min_bajista = macd_5min_bajista_original
+
+check("revisar_ventas sin comision: +0.5% bruto exacto (= umbral) SI vende "
+      "(con comision se habria quedado por debajo y no habria vendido)",
+      len(ordenes_umbral) == 1, f"ordenes={ordenes_umbral}")
 
 bot.ACTIVOS = activos_originales
 

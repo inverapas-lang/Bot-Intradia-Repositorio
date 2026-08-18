@@ -59,14 +59,17 @@ python bot_alpaca.py
 
 ### Comisiones
 
-Modelo mucho más simple que el de IBKR: **0€ en compras**, y en **ventas**
-solo las tasas regulatorias que Alpaca repercute sin margen propio:
-- SEC: 23.10 USD por cada 1.000.000 USD vendidos.
-- FINRA TAF: 0.000119 USD por acción vendida.
+**Se asume 0€, tanto en compras como en ventas** — decisión explícita del
+usuario (agosto 2026) para simplificar el cálculo. `beneficio_pct` en
+`revisar_ventas` es directamente el beneficio bruto, sin ningún descuento.
 
-Cifras tan pequeñas que, para el tamaño de cartera actual, el impacto es
-casi nulo — pero se calculan igual para que el beneficio neto mostrado sea
-preciso.
+Nota para el futuro: en la realidad, Alpaca sigue repercutiendo tasas
+regulatorias mínimas de SEC/FINRA en ventas (no son comisión de Alpaca,
+sino de la SEC/FINRA — del orden de 0.0023% + 0.000119 USD/acción), que se
+decidió ignorar por ser insignificantes para el tamaño de cartera actual.
+Si la cartera crece mucho, podría valer la pena reintroducirlas para mayor
+precisión (el código anterior con `estimar_comision_venta` está en el
+historial de git si hace falta recuperarlo).
 
 ### Fracciones de acción y horario extendido — restricción real de Alpaca
 

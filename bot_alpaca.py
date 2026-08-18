@@ -7,9 +7,11 @@ y limitado al mercado de EE.UU. (Alpaca no cubre HK ni KR).
 Por que Alpaca: API oficial pensada para trading algoritmico (no hace falta
 tener una app de escritorio abierta como con IB Gateway -esto es una API
 REST/HTTPS normal-, lo que lo hace mucho mas facil de mover a un servidor
-en la nube mas adelante), comision 0 EUR en acciones/ETFs de US (solo tasas
-regulatorias minimas de SEC/FINRA en ventas, sin margen del broker), y
-fracciones de accion soportadas de forma nativa via API.
+en la nube mas adelante), comision 0 EUR en acciones/ETFs de US, y
+fracciones de accion soportadas de forma nativa via API. Se asume 0 EUR de
+comision tanto en compras como en ventas (a peticion expresa del usuario;
+en la realidad Alpaca repercute tasas regulatorias minimas de SEC/FINRA en
+ventas, insignificantes para el tamaño de cartera actual, ver ALPACA_NOTES.md).
 
 Diferencias clave frente al mercado en fracciones, respecto a IBKR:
   - Alpaca SI admite fracciones de verdad por API (a diferencia de los
@@ -357,24 +359,13 @@ def precio_actual_ticker(ticker):
     return float(velas[-1].close) if velas else None
 
 
-# --- Comisiones: Alpaca cobra 0 EUR de comision propia en acciones/ETFs de
-# US. Solo hay tasas regulatorias minimas de SEC/FINRA en VENTAS (no en
-# compras), que Alpaca repercute integras sin quedarse margen:
-#   - SEC: 23.10 USD por cada 1.000.000 USD vendidos (0.00231%).
-#   - FINRA TAF: 0.000119 USD por accion vendida.
-# Son cifras tan pequeñas que, para carteras de este tamaño, el impacto es
-# practicamente nulo -pero se calculan igualmente para que el beneficio neto
-# mostrado sea preciso, no una aproximacion optimista como pasaba antes con
-# el modelo generico de IBKR-.
-TASA_SEC_POR_MILLON_VENDIDO = 23.10
-TASA_FINRA_TAF_POR_ACCION = 0.000119
-
-
-def estimar_comision_venta(valor_venta_usd, cantidad_acciones):
-    """Comision de UNA venta (las compras no tienen tasa). Las compras
-    devuelven 0.0 directamente en las llamadas correspondientes."""
-    return (valor_venta_usd / 1_000_000 * TASA_SEC_POR_MILLON_VENDIDO
-            + cantidad_acciones * TASA_FINRA_TAF_POR_ACCION)
+# --- Comisiones: se asume 0 EUR en compras Y en ventas (a peticion expresa
+# del usuario). NOTA: en la realidad Alpaca sigue repercutiendo tasas
+# regulatorias minimas de SEC/FINRA en ventas (unos pocos centimos por cada
+# operacion, del orden de 0.0023% + 0.000119 USD/accion) que no son
+# comision de Alpaca sino de la SEC/FINRA -pero son tan pequeñas para el
+# tamaño de esta cartera que se ignoran a proposito para simplificar el
+# calculo de beneficio neto-.
 
 
 # --- Cliente de trading ---
@@ -464,14 +455,10 @@ def revisar_ventas():
                 log(f"VENTAS: {ticker} - no se pudo obtener precio actual, se omite.")
                 continue
 
-            beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
-            valor_venta = cantidad * precio_actual
-            comision = estimar_comision_venta(valor_venta, cantidad)
-            comision_pct = comision / (cantidad * coste_medio) * 100
-            beneficio_pct = beneficio_pct_bruto - comision_pct
+            # Sin comision (ni de Alpaca ni de terceros, a peticion del usuario).
+            beneficio_pct = (precio_actual - coste_medio) / coste_medio * 100
 
-            info_posicion = (f"{cantidad:g} acciones, precio medio {coste_medio:.4f} USD, "
-                              f"comision estimada {comision:.4f} USD")
+            info_posicion = f"{cantidad:g} acciones, precio medio {coste_medio:.4f} USD"
 
             fuera_sesion = fuera_de_sesion_regular_us()
             fraccionaria = es_cantidad_fraccionaria(cantidad)
@@ -491,10 +478,9 @@ def revisar_ventas():
 
             if en_ventana_venta_forzada() and UMBRAL_BENEFICIO_PCT <= beneficio_pct <= BENEFICIO_MAX_VENTA_FORZADA_PCT:
                 precio_limite = calcular_precio_limite_venta(precio_actual)
-                log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), dentro de los ultimos "
-                    f"{MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del cierre -> VENTA FORZADA "
-                    f"(orden limitada a {precio_limite} USD).")
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, "
+                    f"dentro de los ultimos {MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del "
+                    f"cierre -> VENTA FORZADA (orden limitada a {precio_limite} USD).")
                 orden = LimitOrderRequest(symbol=ticker, qty=cantidad, limit_price=precio_limite,
                                            side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
                 trade = _trading_client.submit_order(order_data=orden)
@@ -503,8 +489,7 @@ def revisar_ventas():
                 continue
 
             if beneficio_pct < UMBRAL_BENEFICIO_PCT:
-                log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, por debajo del umbral -> se mantiene.")
                 continue
 
             bajista = macd_5min_bajista(ticker)
@@ -513,21 +498,19 @@ def revisar_ventas():
                 continue
 
             if not bajista:
-                log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, MACD 5min ALCISTA -> se deja correr.")
                 continue
 
             if fuera_sesion:
                 precio_limite = precio_actual
-                log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO "
-                    f"(orden limitada al precio exacto, fuera de sesion regular).")
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, "
+                    f"MACD 5min BAJISTA -> VENDIENDO (orden limitada al precio exacto, "
+                    f"fuera de sesion regular).")
                 orden = LimitOrderRequest(symbol=ticker, qty=cantidad, limit_price=precio_limite,
                                            side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
                                            extended_hours=True)
             else:
-                log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden a mercado).")
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, MACD 5min BAJISTA -> VENDIENDO (orden a mercado).")
                 orden = MarketOrderRequest(symbol=ticker, qty=cantidad, side=OrderSide.SELL,
                                             time_in_force=TimeInForce.DAY)
 
