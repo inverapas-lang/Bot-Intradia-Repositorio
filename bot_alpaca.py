@@ -121,7 +121,7 @@ BENEFICIO_MAX_VENTA_FORZADA_PCT = 2.0
 UMBRAL_BENEFICIO_PCT = 0.5
 MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2
 
-INTERVALO_SEGUNDOS = 4 * 60  # 4 minutos, igual que el bot de IBKR
+INTERVALO_SEGUNDOS = 130  # 2 min 10 s (ajustado tras pruebas en paper, ago 2026)
 LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera por valor
 IMPORTE_EUROS = 1000         # presupuesto maximo por operacion (convertido a USD)
 TIPO_CAMBIO_EUR_USD = 1.14   # actualiza a mano si quieres mas precision
