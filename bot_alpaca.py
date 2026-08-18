@@ -671,6 +671,27 @@ def generar_resumen():
     log(f"TOTAL: {total_valor:.2f} USD invertidos, P/L no realizado {total_pl:+.2f} USD")
 
 
+TRAMO_ESPERA_LARGA_SEGUNDOS = 60  # bastante por debajo de UMBRAL_CONGELACION_SEGUNDOS (20 min)
+
+
+def esperar_en_tramos(segundos_totales):
+    """Espera el numero de segundos indicado, pero en tramos cortos que
+    refrescan el latido en cada uno (actualizar_latido()). Un unico
+    time.sleep() largo (p.ej. los ~7-8 horas que el mercado esta cerrado de
+    noche) deja pasar mas de UMBRAL_CONGELACION_SEGUNDOS sin dar señal de
+    vida, y el vigilante interno lo confunde con una congelacion real y mata
+    el proceso -bug real visto en produccion: 'fuera de horario, esperando
+    464 minutos' seguido de '[VIGILANTE] 20 minutos sin señal de vida' a los
+    20 minutos exactos-. Con tramos de 60s (bien por debajo del umbral de 20
+    min) esto no puede volver a pasar."""
+    restante = segundos_totales
+    while restante > 0:
+        tramo = min(TRAMO_ESPERA_LARGA_SEGUNDOS, restante)
+        time.sleep(tramo)
+        actualizar_latido()
+        restante -= tramo
+
+
 def evitar_suspension_windows():
     try:
         import ctypes
@@ -708,8 +729,7 @@ def main():
                 minutos_espera = segundos_espera / 60
                 log(f"Fuera de horario operativo (4:00-20:00 ET). Esperando {minutos_espera:.0f} "
                     f"minutos hasta la proxima apertura...")
-                time.sleep(min(segundos_espera, 1800))  # nunca dormir mas de 30 min de una vez,
-                actualizar_latido()                       # para seguir dando señales de vida
+                esperar_en_tramos(segundos_espera)
                 continue
 
             hoy = datetime.now(ZONA_NY).date()

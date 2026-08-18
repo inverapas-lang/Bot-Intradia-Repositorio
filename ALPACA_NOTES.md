@@ -117,10 +117,29 @@ peticiones por ciclo de compras, muy por debajo del límite.
 Mismo mecanismo que el bot de IBKR (hilo interno + archivo de latido +
 PID), pero con nombres de archivo DISTINTOS
 (`latido_bot_alpaca.txt`/`bot_alpaca.pid`) para poder correr los dos bots a
-la vez en la misma carpeta sin que se pisen entre ellos. **Pendiente**:
-adaptar `vigilante_externo.ps1` (o crear una copia) para vigilar también
-estos archivos si se quiere protección externa igual que en el bot de
-IBKR.
+la vez en la misma carpeta sin que se pisen entre ellos.
+
+Supervisor externo ya creado: `run.bot.alpaca.bat` (relanza el bot si
+termina) + `vigilante_externo_alpaca.ps1` (mata el proceso si se congela
+más de 25 min, análogo a `vigilante_externo.ps1` del bot de IBKR). Mismo
+uso: dejar `run.bot.alpaca.bat` corriendo en una ventana y
+`powershell -ExecutionPolicy Bypass -File vigilante_externo_alpaca.ps1` en
+otra (o como Tarea Programada al iniciar sesión).
+
+**Bug real encontrado y corregido (agosto 2026, primera prueba en
+paper)**: fuera de horario de mercado, el bot dormía hasta 30 minutos de
+una vez (`time.sleep(min(segundos_espera, 1800))`) sin refrescar el latido
+durante la espera — como el umbral de congelación son 20 minutos
+(`UMBRAL_CONGELACION_SEGUNDOS`), el vigilante interno confundía esa espera
+larga y legítima con una congelación real y mataba el proceso él solo, sin
+que hubiera ningún fallo de verdad. Se ve en el log real:
+`"Esperando 464 minutos..."` seguido, exactamente 20 minutos después, de
+`"[VIGILANTE] 20 minutos sin señal de vida"`. → se añadió
+`esperar_en_tramos()`, que trocea la espera en bloques de 60s y refresca el
+latido en cada uno (mismo patrón que `esperar_pumpeando()` en
+`bot_completo.py`, que ya troceaba las esperas largas por el mismo motivo,
+aunque ahí el motivo original era poder detectar cortes de conexión con
+IBKR, no solo el latido).
 
 ### Resumen de cierre
 
@@ -143,9 +162,7 @@ copiada literalmente como lista simple de símbolos (Alpaca no necesita
 
 ## Pendiente / próximos pasos
 
-- Probar A FONDO en modo paper antes de pasar a real.
-- Adaptar o duplicar `vigilante_externo.ps1` para vigilar también
-  `latido_bot_alpaca.txt`/`bot_alpaca.pid`.
+- Probar A FONDO en modo paper antes de pasar a real (en curso).
 - Si se quiere la tabla de "operaciones cerradas hoy" en el resumen, usar
   `TradingClient.get_orders()` con filtro de fecha.
 - Cuando llegue el momento de mover esto a la nube (objetivo declarado del
