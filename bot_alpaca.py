@@ -77,6 +77,35 @@ if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         "Ver ALPACA_NOTES.md para como obtenerlas y configurarlas."
     )
 
+# --- Timeout por defecto para TODAS las peticiones HTTP a Alpaca ---
+# BUG REAL visto en produccion (agosto 2026): el SDK alpaca-py (v0.44.0) no
+# pone NINGUN timeout por defecto en sus peticiones HTTP (usa requests.Session
+# internamente, y sin `timeout` explicito requests espera indefinidamente).
+# Un simple corte de red momentaneo mientras se colocaba una orden dejo al
+# bot congelado durante mas de 3 HORAS -exactamente el mismo tipo de fallo
+# que ya vimos con IBKR (una llamada bloqueante que nunca vuelve), solo que
+# aqui a nivel HTTP en vez de socket API-. Como el hilo principal se queda
+# literalmente parado dentro de la llamada de red, ni siquiera el vigilante
+# interno (hilo daemon) puede reaccionar -mismo problema del GIL que con
+# IBKR-. La solucion de raiz aqui es mas directa que con IBKR: forzar un
+# timeout razonable en cada peticion HTTP, para que un corte de red se
+# traduzca en una excepcion normal (que el try/except de cada ticker ya
+# maneja) en vez de una espera infinita.
+HTTP_TIMEOUT_SEGUNDOS = 30
+
+
+def _forzar_timeout_por_defecto(cliente, segundos=HTTP_TIMEOUT_SEGUNDOS):
+    """Envuelve el metodo request() de la sesion HTTP interna de un cliente
+    de alpaca-py para que SIEMPRE lleve un timeout, aunque la libreria no lo
+    ponga por defecto."""
+    peticion_original = cliente._session.request
+
+    def peticion_con_timeout(*args, **kwargs):
+        kwargs.setdefault("timeout", segundos)
+        return peticion_original(*args, **kwargs)
+
+    cliente._session.request = peticion_con_timeout
+
 # --- Horarios de US (identico a bot_completo.py) ---
 ZONA_NY = ZoneInfo("America/New_York")
 HORA_INICIO_US = dt_time(4, 0)             # 4:00 ET (inicio del premercado)
@@ -299,6 +328,7 @@ INTENTOS_MAXIMOS_DATOS = 3
 ESPERA_ENTRE_INTENTOS_DATOS_SEGUNDOS = 15
 
 _data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+_forzar_timeout_por_defecto(_data_client)
 
 
 def pedir_velas_lote(tickers, timeframe, duration_dias):
@@ -370,6 +400,7 @@ def precio_actual_ticker(ticker):
 
 # --- Cliente de trading ---
 _trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
+_forzar_timeout_por_defecto(_trading_client)
 
 ESPERA_MAXIMA_ESTADO_ORDEN_SEGUNDOS = 10
 INTERVALO_CHEQUEO_ESTADO_ORDEN_SEGUNDOS = 0.5

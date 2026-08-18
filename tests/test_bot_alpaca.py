@@ -172,6 +172,43 @@ check("calcular_precio_limite_venta: 0.2% por debajo del precio actual",
 
 
 # ---------------------------------------------------------------------------
+# 6b. _forzar_timeout_por_defecto: bug real visto en produccion -alpaca-py
+#     no pone NINGUN timeout por defecto en sus peticiones HTTP, asi que un
+#     corte de red deja el bot colgado indefinidamente (paso 3 horas hasta
+#     que el usuario hizo Ctrl+C a mano). Se comprueba que la peticion
+#     resultante SIEMPRE lleva un timeout, tanto si el llamador no pasa
+#     ninguno como si ya pasaba uno explicito (no se debe sobreescribir).
+# ---------------------------------------------------------------------------
+class _SesionFalsa:
+    def __init__(self):
+        self.ultima_llamada_kwargs = None
+
+    def request(self, *args, **kwargs):
+        self.ultima_llamada_kwargs = kwargs
+        return "respuesta-falsa"
+
+
+class _ClienteFalso:
+    def __init__(self):
+        self._session = _SesionFalsa()
+
+
+cliente_falso = _ClienteFalso()
+sesion_falsa = cliente_falso._session
+bot._forzar_timeout_por_defecto(cliente_falso)
+
+cliente_falso._session.request("GET", "http://ejemplo")
+check("_forzar_timeout_por_defecto: añade timeout cuando el llamador no pasa ninguno",
+      sesion_falsa.ultima_llamada_kwargs.get("timeout") == bot.HTTP_TIMEOUT_SEGUNDOS,
+      f"kwargs={sesion_falsa.ultima_llamada_kwargs}")
+
+cliente_falso._session.request("GET", "http://ejemplo", timeout=5)
+check("_forzar_timeout_por_defecto: NO sobreescribe un timeout ya puesto por el llamador",
+      sesion_falsa.ultima_llamada_kwargs.get("timeout") == 5,
+      f"kwargs={sesion_falsa.ultima_llamada_kwargs}")
+
+
+# ---------------------------------------------------------------------------
 # 7. pedir_velas_lote: reintentos ante fallo, exito al primer intento, y
 #    devuelve dict {ticker: [velas]} para varios tickers a la vez.
 # ---------------------------------------------------------------------------

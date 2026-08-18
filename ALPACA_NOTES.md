@@ -144,6 +144,31 @@ latido en cada uno (mismo patrón que `esperar_pumpeando()` en
 aunque ahí el motivo original era poder detectar cortes de conexión con
 IBKR, no solo el latido).
 
+**Segundo bug real, más serio (agosto 2026, primera prueba en paper)**: el
+bot se quedó congelado **más de 3 horas** justo después de colocar una
+orden de compra (XOM), sin que el vigilante interno reaccionara — hizo
+falta que el usuario pulsara Ctrl+C a mano, exactamente el mismo síntoma
+que ya vimos con IBKR meses atrás. Causa raíz: **`alpaca-py` (v0.44.0) no
+pone ningún `timeout` por defecto en sus peticiones HTTP** (usa
+`requests.Session` internamente, y sin `timeout` explícito `requests`
+espera indefinidamente). Un corte de red momentáneo mientras se colocaba
+la orden dejó la llamada HTTP colgada para siempre — como eso bloquea el
+hilo principal a nivel de socket, ni el vigilante interno (que vive en
+otro hilo) puede reaccionar, por el mismo motivo del GIL que con IBKR.
+
+A diferencia de IBKR (donde la única solución de verdad era un vigilante
+externo, porque `ib_async` no expone ningún control de timeout), aquí sí
+se pudo arreglar de raíz: `_forzar_timeout_por_defecto()` envuelve
+`cliente._session.request()` para que **toda** petición HTTP a Alpaca
+(datos y trading) lleve un timeout de `HTTP_TIMEOUT_SEGUNDOS = 30`
+segundos si el llamador no especifica uno propio. Así, un corte de red se
+convierte en una excepción normal (`requests.exceptions.Timeout`), que el
+`try/except` de cada ticker ya captura y registra en el log — el ciclo
+sigue con el siguiente valor en vez de congelarse. El vigilante externo
+(`vigilante_externo_alpaca.ps1`) sigue siendo una buena red de seguridad
+adicional por si se congela en cualquier otro punto no cubierto por este
+timeout, pero ya no es la única defensa.
+
 ### Resumen de cierre
 
 Versión simplificada respecto al de IBKR: solo posiciones abiertas (precio
