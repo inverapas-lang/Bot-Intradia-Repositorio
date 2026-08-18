@@ -195,6 +195,31 @@ días anteriores.
   se prioriza la fecha calculada de `reqExecutions()` (ver bug #13 en la lista de abajo), para
   no mostrar la apertura de una ronda de compra posterior a la venta que se está resumiendo.
 
+## Historial de operaciones ejecutadas (`historial_operaciones_ibkr.json`) y `cartera_ibkr.py`
+
+Archivo JSON local nuevo (agosto 2026, fuera de git), distinto del anterior (ese solo guarda la
+fecha de apertura; este guarda **cada compra y venta ejecutada con éxito**, con cantidad, precio,
+comisión estimada, coste medio y beneficio % en el caso de las ventas). Existe porque
+`reqExecutions()` de IBKR solo devuelve el día actual, así que no sirve para consultar el
+historial de operaciones cerradas de días anteriores — este archivo sí acumula indefinidamente.
+
+- Se rellena solo (`registrar_operacion_historial()`) justo después de confirmar que una orden
+  quedó `Filled`, en los 3 puntos de ejecución de `revisar_ventas`/`revisar_compras` (venta
+  forzada, venta por MACD bajista, compra). Usa la cantidad/precio REALES de la orden
+  (`trade.orderStatus.filled`/`avgFillPrice`) cuando están disponibles, con la cantidad/precio
+  previstos como fallback.
+- Solo registro: no participa en ninguna decisión de trading, así que un fallo al escribir el
+  archivo (p. ej. disco lleno) no aborta el ciclo, solo se registra en el log.
+- Solo empieza a acumular desde que se desplegó esta función — no hay datos retroactivos de
+  operaciones anteriores a agosto 2026.
+
+**`cartera_ibkr.py`** es un script nuevo, aparte del bot, que consulta el estado de cartera A
+DEMANDA sin tocar el bot en marcha (se conecta a IB Gateway con `clientId=9`, distinto del `1`
+que usa `bot_completo.py`, para poder correr a la vez). Muestra las posiciones abiertas de todos
+los mercados activos (con beneficio/pérdida no realizado en moneda local y en EUR) y las
+operaciones cerradas en un rango de fechas configurable (hoy por defecto; `--ayer`, `--semana`,
+o `--desde`/`--hasta`), leyendo este historial. Es de solo lectura.
+
 ## Totales en el resumen de cierre de mercado
 
 Además de las tablas de detalle por símbolo (que se mantienen igual), el resumen ahora muestra:

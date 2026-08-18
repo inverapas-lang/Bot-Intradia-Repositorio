@@ -36,6 +36,7 @@ Revisa bien la configuracion (IMPORTE_EUROS, LIMITE_EXPOSICION_PCT, lista
 de activos) antes de dejarlo corriendo desatendido.
 """
 
+import json
 import os
 import threading
 import time
@@ -421,6 +422,59 @@ def esperar_estado_final_orden(order_id, espera_maxima=ESPERA_MAXIMA_ESTADO_ORDE
     return estado
 
 
+# --- Historial persistente de operaciones ejecutadas (compras y ventas) ---
+# La API de Alpaca no da directamente el beneficio realizado de cada venta
+# (get_orders() devuelve la orden, pero no el coste medio de compra en el
+# momento de vender), asi que se registra aqui mismo, justo cuando ya se
+# conoce ese dato, para poder consultar despues el estado de cartera y las
+# operaciones cerradas de cualquier rango de fechas con cartera_alpaca.py.
+# Solo registro, no participa en ninguna decision de trading.
+ARCHIVO_HISTORIAL_OPERACIONES = "historial_operaciones_alpaca.json"
+
+
+def cargar_historial_operaciones():
+    try:
+        with open(ARCHIVO_HISTORIAL_OPERACIONES, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def registrar_operacion_historial(ticker, lado, cantidad, precio, coste_medio=None, beneficio_pct=None):
+    registro = {
+        "fecha_hora": datetime.now().isoformat(timespec="seconds"),
+        "ticker": ticker,
+        "lado": lado,  # "COMPRA" o "VENTA"
+        "cantidad": cantidad,
+        "precio": precio,
+    }
+    if coste_medio is not None:
+        registro["coste_medio"] = coste_medio
+    if beneficio_pct is not None:
+        registro["beneficio_pct"] = beneficio_pct
+    try:
+        operaciones = cargar_historial_operaciones()
+        operaciones.append(registro)
+        with open(ARCHIVO_HISTORIAL_OPERACIONES, "w", encoding="utf-8") as f:
+            json.dump(operaciones, f, indent=2, sort_keys=True)
+    except OSError as e:
+        log(f"No se pudo guardar el historial de operaciones ({ARCHIVO_HISTORIAL_OPERACIONES}): {type(e).__name__}: {e}")
+
+
+def obtener_ejecucion_real(order_id, cantidad_prevista, precio_previsto):
+    """Tras confirmar que una orden ha quedado 'filled', intenta leer la
+    cantidad y precio REALES de ejecucion (filled_qty/filled_avg_price). Si
+    no estan disponibles por cualquier motivo, cae en los valores previstos
+    -son solo para el registro historico, no afectan a ninguna decision-."""
+    try:
+        orden = _trading_client.get_order_by_id(order_id)
+        cantidad_real = float(orden.filled_qty) if orden.filled_qty else cantidad_prevista
+        precio_real = float(orden.filled_avg_price) if orden.filled_avg_price else precio_previsto
+        return cantidad_real, precio_real
+    except Exception:
+        return cantidad_prevista, precio_previsto
+
+
 def es_cantidad_fraccionaria(cantidad):
     return abs(cantidad - round(cantidad)) > 1e-6
 
@@ -497,6 +551,10 @@ def revisar_ventas():
                 trade = _trading_client.submit_order(order_data=orden)
                 estado = esperar_estado_final_orden(trade.id)
                 log(f"VENTAS: {ticker} - orden limitada, estado: {estado}")
+                if estado == "filled":
+                    cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_limite)
+                    registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
+                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
                 continue
 
             if beneficio_pct < UMBRAL_BENEFICIO_PCT:
@@ -528,6 +586,10 @@ def revisar_ventas():
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"VENTAS: {ticker} - orden colocada, estado: {estado}")
+            if estado == "filled":
+                cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_actual)
+                registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
+                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct)
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
 
@@ -628,6 +690,9 @@ def revisar_compras():
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
+            if estado == "filled":
+                cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
+                registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {type(e).__name__}: {e}. Se omite.")
             errores += 1

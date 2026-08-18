@@ -180,15 +180,47 @@ timeout, pero ya no es la única defensa.
 ### Resumen de cierre
 
 Versión simplificada respecto al de IBKR: solo posiciones abiertas (precio
-actual, P/L no realizado). **No** tiene todavía la tabla de "operaciones
-cerradas hoy" — para eso haría falta consultar el historial de órdenes de
-Alpaca (`get_orders`), pendiente si se necesita más adelante.
+actual, P/L no realizado). Para un resumen completo (abiertas + cerradas,
+con rango de fechas), ver `cartera_alpaca.py` más abajo.
 
 ### Historial de fecha de apertura
 
 **No implementado todavía** (el `historial_compras.json` persistente que sí
 tiene el bot de IBKR). Como el resumen de Alpaca por ahora no muestra fecha
 de apertura, no hace falta de momento — pendiente si se añade esa tabla.
+
+### Consulta de cartera a demanda: `cartera_alpaca.py`
+
+Script aparte (agosto 2026), **no toca el bot en marcha**: se puede
+ejecutar en cualquier momento, en paralelo a `run.bot.alpaca.bat`, y solo
+lee datos (no coloca, modifica ni cancela ninguna orden). Usa las mismas
+variables de entorno que `bot_alpaca.py` (`ALPACA_API_KEY`,
+`ALPACA_SECRET_KEY`, `ALPACA_PAPER`).
+
+Muestra:
+- **Posiciones abiertas**: ticker, cantidad, precio medio, invertido (USD,
+  sin comisión — ver más arriba), precio actual, beneficio/pérdida no
+  realizado en USD y en EUR, y en %.
+- **Posiciones cerradas** en un rango de fechas (por defecto, hoy):
+  ticker, cantidad, coste medio, precio de venta, ganancia/pérdida
+  realizada en USD y en EUR, y en %.
+
+La tabla de cerradas se lee de un historial persistente nuevo,
+`historial_operaciones_alpaca.json` (en `.gitignore`, no se sube al
+repo), que `bot_alpaca.py` va rellenando el mismo justo cuando una compra
+o venta se confirma como `filled` (`registrar_operacion_historial()`) —
+la API de Alpaca no expone directamente el beneficio realizado de una
+venta pasada, así que se guarda en el momento en que sí se conoce. Solo
+empieza a acumular historial desde que se desplegó esta función; los días
+anteriores a eso no tendrán operaciones cerradas que mostrar.
+
+Uso:
+```
+python cartera_alpaca.py                        # hoy
+python cartera_alpaca.py --ayer                  # dia anterior
+python cartera_alpaca.py --semana                # semana laboral actual (lunes a hoy)
+python cartera_alpaca.py --desde 2026-08-01 --hasta 2026-08-15
+```
 
 ## Activos
 
@@ -199,8 +231,6 @@ copiada literalmente como lista simple de símbolos (Alpaca no necesita
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).
-- Si se quiere la tabla de "operaciones cerradas hoy" en el resumen, usar
-  `TradingClient.get_orders()` con filtro de fecha.
 - Cuando llegue el momento de mover esto a la nube (objetivo declarado del
   usuario: gestionar todo desde el móvil, sin gastos iniciales), este bot
   es el candidato natural para ir primero — no depende de una app de

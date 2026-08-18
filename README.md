@@ -64,3 +64,28 @@ etc.) y cómo conseguir las claves API.
 **IMPORTANTE:** igual que con IBKR, este script envía órdenes reales en
 cuanto `ALPACA_PAPER=false`. Revisa bien la configuración antes de dejarlo
 corriendo desatendido.
+
+## Consulta de cartera a demanda
+
+Dos scripts de solo lectura (no tocan el bot en marcha, no colocan ni
+modifican ninguna orden) para consultar el estado de la cartera cuando
+quieras, en paralelo al bot correspondiente:
+
+```
+python cartera_ibkr.py       # posiciones abiertas + cerradas (IBKR)
+python cartera_alpaca.py     # posiciones abiertas + cerradas (Alpaca)
+```
+
+Muestran las posiciones abiertas (cantidad, precio medio, invertido con
+comisión, precio actual, beneficio/pérdida no realizado en moneda local y
+en EUR, %) y las operaciones cerradas en un rango de fechas configurable
+(hoy por defecto):
+
+```
+python cartera_alpaca.py --ayer
+python cartera_alpaca.py --semana                # semana laboral actual (lunes a hoy)
+python cartera_alpaca.py --desde 2026-08-01 --hasta 2026-08-15
+```
+
+Ver `NOTES.md` / `ALPACA_NOTES.md` para el detalle del historial persistente
+del que se leen las operaciones cerradas.

@@ -809,6 +809,48 @@ def guardar_historial_compras(historial):
         log(f"No se pudo guardar el historial de compras ({ARCHIVO_HISTORIAL_COMPRAS}): {type(e).__name__}: {e}")
 
 
+# --- Historial persistente de operaciones ejecutadas (compras y ventas) ---
+# A diferencia de reqExecutions() de IBKR (solo devuelve el dia actual), este
+# archivo acumula CADA operacion ejecutada con exito desde que existe esta
+# funcionalidad, para poder consultar el estado de cartera y las operaciones
+# cerradas de cualquier rango de fechas con cartera_ibkr.py. Solo registro,
+# no participa en ninguna decision de trading.
+ARCHIVO_HISTORIAL_OPERACIONES = "historial_operaciones_ibkr.json"
+
+
+def cargar_historial_operaciones():
+    try:
+        with open(ARCHIVO_HISTORIAL_OPERACIONES, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def registrar_operacion_historial(mercado, ticker, lado, cantidad, precio, comision, currency,
+                                   coste_medio=None, beneficio_pct=None):
+    registro = {
+        "fecha_hora": datetime.now().isoformat(timespec="seconds"),
+        "mercado": mercado,
+        "ticker": ticker,
+        "lado": lado,  # "COMPRA" o "VENTA"
+        "cantidad": cantidad,
+        "precio": precio,
+        "comision": comision,
+        "currency": currency,
+    }
+    if coste_medio is not None:
+        registro["coste_medio"] = coste_medio
+    if beneficio_pct is not None:
+        registro["beneficio_pct"] = beneficio_pct
+    try:
+        operaciones = cargar_historial_operaciones()
+        operaciones.append(registro)
+        with open(ARCHIVO_HISTORIAL_OPERACIONES, "w", encoding="utf-8") as f:
+            json.dump(operaciones, f, indent=2, sort_keys=True)
+    except OSError as e:
+        log(f"No se pudo guardar el historial de operaciones ({ARCHIVO_HISTORIAL_OPERACIONES}): {type(e).__name__}: {e}")
+
+
 def registrar_apertura_de_posicion(mercado, ticker):
     """Marca AHORA como la fecha de apertura de una posicion nueva desde
     cero (solo debe llamarse cuando se confirma que la compra se ejecuto de
@@ -974,7 +1016,13 @@ def revisar_ventas(ib):
                     estado = esperar_estado_final_orden(ib, trade)
                     log(f"VENTAS: {contrato.symbol} - orden limitada (cantidad fraccionaria directa), "
                         f"estado: {estado}")
-                if estado != 'Filled':
+                if estado == 'Filled':
+                    precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_limite
+                    cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad
+                    registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
+                                                   precio_ejecucion, comision_total, contrato.currency,
+                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                else:
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
                 continue
 
@@ -1027,7 +1075,13 @@ def revisar_ventas(ib):
                     estado = esperar_estado_final_orden(ib, trade)
                     log(f"VENTAS: {contrato.symbol} - orden {tipo_orden_texto} (cantidad fraccionaria directa), "
                         f"estado: {estado}")
-                if estado != 'Filled':
+                if estado == 'Filled':
+                    precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
+                    cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad
+                    registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
+                                                   precio_ejecucion, comision_total, contrato.currency,
+                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                else:
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
             else:
                 log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
@@ -1370,12 +1424,18 @@ def revisar_compras(ib):
                     ib, contrato, cantidad_antes_compra, f"COMPRAS: {ticker}")
                 compra_confirmada = cantidad_tras_compra > cantidad_antes_compra + 1e-6
 
-            if compra_confirmada and cantidad_antes_compra <= 1e-6:
-                # Posicion nueva desde cero (no una ampliacion para promediar
-                # a la baja): se registra AHORA como fecha de apertura, para
-                # que el resumen de cierre de mercado la muestre aunque
-                # reqExecutions() ya no la tenga en dias posteriores.
-                registrar_apertura_de_posicion(activo["mercado"], ticker)
+            if compra_confirmada:
+                precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
+                cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad
+                comision_ejecucion = estimar_comision(cantidad_ejecutada * precio_ejecucion, currency, cantidad_ejecutada)
+                registrar_operacion_historial(activo["mercado"], ticker, "COMPRA", cantidad_ejecutada,
+                                               precio_ejecucion, comision_ejecucion, currency)
+                if cantidad_antes_compra <= 1e-6:
+                    # Posicion nueva desde cero (no una ampliacion para promediar
+                    # a la baja): se registra AHORA como fecha de apertura, para
+                    # que el resumen de cierre de mercado la muestre aunque
+                    # reqExecutions() ya no la tenga en dias posteriores.
+                    registrar_apertura_de_posicion(activo["mercado"], ticker)
         except Exception as e:
             # Un fallo al procesar UNA señal de compra (precio raro, error de
             # red al colocar la orden, etc.) no debe abortar el escaneo del
