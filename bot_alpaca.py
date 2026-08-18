@@ -15,21 +15,15 @@ ventas, insignificantes para el tamaño de cartera actual, ver ALPACA_NOTES.md).
 
 Diferencias clave frente al mercado en fracciones, respecto a IBKR:
   - Alpaca SI admite fracciones de verdad por API (a diferencia de los
-    problemas que dimos con cashQty en IBKR), pero con una restriccion
-    fija de la propia plataforma: las ordenes fraccionarias (via `qty`
-    fraccionario o `notional`) SOLO se admiten con tipo MARKET y
-    time_in_force DAY. Las ordenes LIMITADAS (necesarias en pre/postmercado,
-    ver mas abajo) exigen cantidad de acciones ENTERA, sin excepcion.
+    problemas que dimos con cashQty en IBKR). Las ordenes A MERCADO admiten
+    `qty` fraccionario o `notional`, siempre con time_in_force DAY.
   - Las ordenes fuera de la sesion regular (pre/postmercado, extended_hours)
-    SOLO se admiten como LIMITADAS con time_in_force=DAY -Alpaca rechaza
-    ordenes a mercado fuera de la sesion regular directamente-.
-  - Combinando ambas reglas: una posicion FRACCIONARIA no se puede vender
-    en pre/postmercado (ni a mercado -no permitido fuera de sesion regular-
-    ni limitada -no admite fracciones-). Si toca vender una posicion
-    fraccionaria fuera de sesion regular, se omite con un aviso claro en
-    el log hasta que vuelva a haber sesion regular o postmercado... en
-    realidad hasta la proxima sesion regular, que es la unica combinacion
-    valida para una venta fraccionaria.
+    exigen tipo LIMITADO con time_in_force DAY (o GTC) -Alpaca rechaza
+    ordenes a mercado fuera de la sesion regular directamente-. Desde que
+    Alpaca amplio el soporte de fracciones (marzo 2024), estas ordenes
+    LIMITADAS con extended_hours=True SI admiten `qty` fraccionario -ya no
+    exigen cantidad entera-, asi que una posicion fraccionaria SI se puede
+    comprar o vender en pre/postmercado con una orden limitada normal.
 
 Requiere las variables de entorno ALPACA_API_KEY y ALPACA_SECRET_KEY (ver
 ALPACA_NOTES.md). Por defecto conecta al entorno PAPER (simulado); hace
@@ -492,20 +486,6 @@ def revisar_ventas():
             info_posicion = f"{cantidad:g} acciones, precio medio {coste_medio:.4f} USD"
 
             fuera_sesion = fuera_de_sesion_regular_us()
-            fraccionaria = es_cantidad_fraccionaria(cantidad)
-
-            # Alpaca no permite vender una posicion FRACCIONARIA fuera de
-            # sesion regular: las ordenes fuera de horario exigen LIMITADA
-            # (y las limitadas no admiten fracciones), y las ordenes a
-            # mercado (que si admiten fracciones) no se permiten fuera de
-            # sesion regular. No hay combinacion valida -se omite hasta que
-            # vuelva la sesion regular-.
-            if fuera_sesion and fraccionaria:
-                log(f"VENTAS: {ticker} - {info_posicion} - posicion fraccionaria y estamos "
-                    f"fuera de sesion regular: Alpaca no admite vender fracciones fuera de "
-                    f"horario regular (ni a mercado -no permitido- ni limitada -no admite "
-                    f"fracciones-), se omite hasta la proxima sesion regular.")
-                continue
 
             if en_ventana_venta_forzada() and UMBRAL_BENEFICIO_PCT <= beneficio_pct <= BENEFICIO_MAX_VENTA_FORZADA_PCT:
                 precio_limite = calcular_precio_limite_venta(precio_actual)
@@ -619,32 +599,26 @@ def revisar_compras():
 
             importe_a_usar = min(IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD, margen_disponible)
 
+            if importe_a_usar < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
+                    f"({importe_a_usar:.2f} USD) no llega al minimo de "
+                    f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} USD por operacion, se omite.")
+                continue
+            cantidad_estimada = round(importe_a_usar / precio_actual, DECIMALES_FRACCION)
+
             if fuera_sesion:
-                # Fuera de sesion regular, Alpaca exige orden LIMITADA con
-                # cantidad ENTERA (no admite fracciones ni ordenes a
-                # mercado fuera de horario regular). Se calcula la cantidad
-                # entera maxima que cabe en el presupuesto.
-                cantidad = int(importe_a_usar // precio_actual)
-                if cantidad < 1:
-                    log(f"COMPRAS: {ticker} - senal de COMPRA en pre/postmercado, pero las "
-                        f"fracciones no funcionan fuera de sesion regular en Alpaca y el "
-                        f"presupuesto ({importe_a_usar:.2f} USD) no llega ni para 1 accion "
-                        f"entera a {precio_actual} USD, se omite.")
-                    continue
-                log(f"COMPRAS: {ticker} - senal de COMPRA, comprando {cantidad} acciones enteras "
-                    f"a ~{precio_actual} USD (posicion actual: {valor_posicion_actual:.2f} USD, "
-                    f"limite: {limite_por_valor_usd:.2f} USD). [pre/postmercado: orden limitada "
-                    f"al precio exacto]")
-                orden = LimitOrderRequest(symbol=ticker, qty=cantidad, limit_price=precio_actual,
+                # Fuera de sesion regular Alpaca exige orden LIMITADA (no
+                # admite ordenes a mercado), pero desde marzo 2024 SI admite
+                # `qty` fraccionario en ordenes limitadas con
+                # extended_hours=True, igual que en sesion regular.
+                log(f"COMPRAS: {ticker} - senal de COMPRA, comprando ~{cantidad_estimada:g} acciones "
+                    f"(importe {importe_a_usar:.2f} USD) a ~{precio_actual} USD (posicion actual: "
+                    f"{valor_posicion_actual:.2f} USD, limite: {limite_por_valor_usd:.2f} USD). "
+                    f"[pre/postmercado: orden limitada al precio exacto]")
+                orden = LimitOrderRequest(symbol=ticker, qty=cantidad_estimada, limit_price=precio_actual,
                                            side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
                                            extended_hours=True)
             else:
-                if importe_a_usar < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
-                    log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
-                        f"({importe_a_usar:.2f} USD) no llega al minimo de "
-                        f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} USD por operacion, se omite.")
-                    continue
-                cantidad_estimada = round(importe_a_usar / precio_actual, DECIMALES_FRACCION)
                 log(f"COMPRAS: {ticker} - senal de COMPRA, comprando ~{cantidad_estimada:g} acciones "
                     f"(importe {importe_a_usar:.2f} USD) a ~{precio_actual} USD (posicion actual: "
                     f"{valor_posicion_actual:.2f} USD, limite: {limite_por_valor_usd:.2f} USD).")

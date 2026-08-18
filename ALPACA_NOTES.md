@@ -73,26 +73,34 @@ historial de git si hace falta recuperarlo).
 
 ### Fracciones de acción y horario extendido — restricción real de Alpaca
 
-Alpaca sí admite fracciones de verdad vía API (a diferencia de los
-problemas que dimos con `cashQty` en IBKR), pero con una regla fija de la
-propia plataforma:
+**Corregido (agosto 2026)**: la versión anterior de esta sección (y del
+código) asumía una regla de Alpaca que quedó **obsoleta desde marzo de
+2024** — Alpaca amplió el soporte de fracciones para admitirlas también en
+órdenes LIMITADAS con horario extendido. El usuario detectó el síntoma en
+el log real (ventas fraccionarias omitidas sistemáticamente fuera de
+sesión regular) y se verificó contra la documentación oficial de Alpaca
+(`docs.alpaca.markets/us/docs/fractional-trading` y el changelog
+"Support for Fractional ... with Extended Hours Orders").
 
-- Las órdenes **fraccionarias** (cantidad no entera, o por importe/`notional`)
-  **solo se admiten con tipo MARKET y `time_in_force=DAY`**.
-- Las órdenes **fuera de sesión regular** (pre/postmercado, `extended_hours=True`)
-  **solo se admiten como LIMITADAS con `time_in_force=DAY`**.
-- Combinando ambas reglas: **una orden fraccionaria fuera de sesión regular
-  es imposible** — no hay combinación válida.
+Regla real actual:
+- Las órdenes **a MERCADO** admiten `qty` fraccionario o `notional`,
+  siempre con `time_in_force=DAY`. Alpaca rechaza órdenes a mercado fuera
+  de sesión regular.
+- Las órdenes **fuera de sesión regular** (pre/postmercado,
+  `extended_hours=True`) exigen tipo LIMITADO con `time_in_force=DAY` (o
+  GTC) — pero **sí admiten `qty` fraccionario**, ya no exigen cantidad
+  entera.
+- Es decir: **una posición fraccionaria SÍ se puede comprar y vender fuera
+  de sesión regular**, con una orden limitada normal y `qty` fraccionario.
 
 Consecuencias implementadas:
-- **Compras en pre/postmercado**: se calcula la cantidad ENTERA máxima que
-  cabe en el presupuesto y se manda una orden LIMITADA al precio exacto
-  (`extended_hours=True`). Si no llega ni para 1 acción entera, se omite
-  (igual que ya hacíamos en el bot de IBKR).
-- **Ventas en pre/postmercado**: si la posición es fraccionaria, **se omite
-  la venta hasta la próxima sesión regular** — no hay forma de venderla
-  fuera de sesión regular en Alpaca. Si la posición es de acciones enteras,
-  se vende con normalidad (orden limitada al precio exacto).
+- **Compras y ventas en pre/postmercado**: se manda una orden LIMITADA al
+  precio exacto (`extended_hours=True`) con la cantidad fraccionaria
+  calculada igual que en sesión regular — ya no se redondea a entero ni se
+  omite por ser fracción.
+- El código anterior (que forzaba cantidad entera en compras y omitía
+  ventas fraccionarias fuera de sesión regular) está en el historial de
+  git si hace falta consultarlo.
 
 ### Horario
 

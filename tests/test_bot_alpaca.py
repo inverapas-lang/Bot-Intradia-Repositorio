@@ -320,7 +320,9 @@ if ordenes_regular:
     check("revisar_compras en sesion regular: NO tiene extended_hours activado",
           not ordenes_regular[0].extended_hours)
 
-# --- Compras en premercado: debe colocar una orden LIMITADA con qty entera ---
+# --- Compras en premercado: debe colocar una orden LIMITADA con qty
+# fraccionaria (Alpaca admite fracciones en limitadas con extended_hours
+# desde marzo 2024, ya no exige cantidad entera) ---
 bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
 bot._data_client = _fake_data_client_alcista()
 try:
@@ -334,9 +336,10 @@ check("revisar_compras en premercado: coloca exactamente una orden",
       len(ordenes_premercado) == 1, f"ordenes={len(ordenes_premercado)}")
 if ordenes_premercado:
     orden_pre = ordenes_premercado[0]
-    check("revisar_compras en premercado: la orden usa qty ENTERA, no notional",
-          orden_pre.qty is not None and orden_pre.notional is None
-          and not bot.es_cantidad_fraccionaria(orden_pre.qty))
+    check("revisar_compras en premercado: la orden usa qty (no notional)",
+          orden_pre.qty is not None and orden_pre.notional is None)
+    check("revisar_compras en premercado: la cantidad es FRACCIONARIA",
+          bot.es_cantidad_fraccionaria(orden_pre.qty))
     check("revisar_compras en premercado: tiene extended_hours activado",
           orden_pre.extended_hours is True)
     check("revisar_compras en premercado: es una orden LIMITADA",
@@ -356,23 +359,44 @@ finally:
 check("revisar_compras en postmercado: NO coloca ninguna orden",
       ordenes_postmercado == [], f"ordenes={ordenes_postmercado}")
 
-# --- Ventas: posicion fraccionaria fuera de sesion regular -> se omite ---
+class _DataClientPrecioFijo:
+    def __init__(self, precio):
+        self.precio = precio
+
+    def get_stock_bars(self, peticion):
+        return _BarSetFalso({t: [_VelaFalsa(self.precio)] for t in peticion.symbol_or_symbols})
+
+
+# --- Ventas: posicion fraccionaria fuera de sesion regular -> SI se vende
+# (Alpaca admite qty fraccionaria en ordenes LIMITADAS con extended_hours
+# desde marzo 2024; antes se asumia, por error, que era imposible) ---
 posicion_fraccionaria = types.SimpleNamespace(
     symbol="AAPL", qty="3.544", avg_entry_price="100.0", market_value="400.0",
     unrealized_pl="10.0", unrealized_plpc="0.05",
 )
+macd_5min_bajista_original = bot.macd_5min_bajista
 bot._trading_client = _TradingClientFalso(posiciones=[posicion_fraccionaria])
-bot._data_client = _fake_data_client_alcista()
+bot._data_client = _DataClientPrecioFijo(105.0)  # +5% sobre el coste medio (100.0)
+bot.macd_5min_bajista = lambda ticker: True  # forzar señal de venta
 try:
     con_reloj_fijo(postmercado, bot.revisar_ventas)
 finally:
     ordenes_venta_frac = bot._trading_client.ordenes
     bot._trading_client = trading_client_original
     bot._data_client = data_client_original
+    bot.macd_5min_bajista = macd_5min_bajista_original
 
-check("revisar_ventas: posicion FRACCIONARIA en postmercado -> no coloca ninguna orden "
-      "(Alpaca no admite vender fracciones fuera de sesion regular)",
-      ordenes_venta_frac == [], f"ordenes={ordenes_venta_frac}")
+check("revisar_ventas: posicion FRACCIONARIA en postmercado SI coloca una orden "
+      "(Alpaca admite fracciones en limitadas con extended_hours)",
+      len(ordenes_venta_frac) == 1, f"ordenes={ordenes_venta_frac}")
+if ordenes_venta_frac:
+    orden_venta_frac = ordenes_venta_frac[0]
+    check("revisar_ventas fraccionaria en postmercado: la cantidad sigue siendo FRACCIONARIA",
+          bot.es_cantidad_fraccionaria(orden_venta_frac.qty))
+    check("revisar_ventas fraccionaria en postmercado: tiene extended_hours activado",
+          orden_venta_frac.extended_hours is True)
+    check("revisar_ventas fraccionaria en postmercado: es una orden LIMITADA",
+          orden_venta_frac.type.value == "limit")
 
 # --- Ventas: sin comision, el beneficio bruto exacto en el umbral (0.5%)
 # debe bastar para vender (si hubiera comision restando, se quedaria por
@@ -381,15 +405,6 @@ posicion_en_el_umbral = types.SimpleNamespace(
     symbol="AAPL", qty="10", avg_entry_price="100.0", market_value="1005.0",
     unrealized_pl="5.0", unrealized_plpc="0.005",
 )
-
-
-class _DataClientPrecioFijo:
-    def __init__(self, precio):
-        self.precio = precio
-
-    def get_stock_bars(self, peticion):
-        return _BarSetFalso({t: [_VelaFalsa(self.precio)] for t in peticion.symbol_or_symbols})
-
 
 macd_5min_bajista_original = bot.macd_5min_bajista
 bot._trading_client = _TradingClientFalso(posiciones=[posicion_en_el_umbral])
