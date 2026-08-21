@@ -271,10 +271,12 @@ check("pedir_velas_lote: devuelve listas vacias (no lanza excepcion) si nunca ha
 #    en sesion regular y en pre/postmercado.
 # ---------------------------------------------------------------------------
 class _TradingClientFalso:
-    def __init__(self, portfolio_value=10_000, posiciones=None):
+    def __init__(self, portfolio_value=10_000, posiciones=None, ordenes_abiertas=None):
         self.portfolio_value = portfolio_value
         self._posiciones = posiciones or []
         self.ordenes = []
+        self._ordenes_abiertas = ordenes_abiertas or []  # simuladas, por simbolo
+        self.ordenes_canceladas = []
 
     def get_account(self):
         return types.SimpleNamespace(portfolio_value=str(self.portfolio_value))
@@ -288,6 +290,13 @@ class _TradingClientFalso:
 
     def get_order_by_id(self, order_id):
         return types.SimpleNamespace(status=types.SimpleNamespace(value="filled"))
+
+    def get_orders(self, filter):
+        simbolos = set(filter.symbols or [])
+        return [o for o in self._ordenes_abiertas if o.symbol in simbolos]
+
+    def cancel_order_by_id(self, order_id):
+        self.ordenes_canceladas.append(order_id)
 
 
 def _fake_data_client_alcista():
@@ -422,6 +431,30 @@ finally:
 check("revisar_ventas sin comision: +0.5% bruto exacto (= umbral) SI vende "
       "(con comision se habria quedado por debajo y no habria vendido)",
       len(ordenes_umbral) == 1, f"ordenes={ordenes_umbral}")
+
+# --- Ventas: si hay una orden abierta anterior sin rellenar (p.ej. limitada
+# que no llego a ejecutarse), se cancela ANTES de mandar la venta nueva -bug
+# real visto en produccion: "insufficient qty available", la posicion entera
+# quedaba retenida (held_for_orders) por la orden vieja- ---
+orden_abierta_previa = types.SimpleNamespace(id="orden-vieja-META", symbol="AAPL")
+macd_5min_bajista_original = bot.macd_5min_bajista
+cliente_con_orden_abierta = _TradingClientFalso(posiciones=[posicion_en_el_umbral],
+                                                 ordenes_abiertas=[orden_abierta_previa])
+bot._trading_client = cliente_con_orden_abierta
+bot._data_client = _DataClientPrecioFijo(100.5)
+bot.macd_5min_bajista = lambda ticker: True
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.macd_5min_bajista = macd_5min_bajista_original
+
+check("revisar_ventas: cancela la orden abierta anterior antes de mandar la venta nueva",
+      cliente_con_orden_abierta.ordenes_canceladas == ["orden-vieja-META"],
+      f"canceladas={cliente_con_orden_abierta.ordenes_canceladas}")
+check("revisar_ventas: tras cancelar la orden vieja, SI coloca la venta nueva",
+      len(cliente_con_orden_abierta.ordenes) == 1, f"ordenes={cliente_con_orden_abierta.ordenes}")
 
 bot.ACTIVOS = activos_originales
 

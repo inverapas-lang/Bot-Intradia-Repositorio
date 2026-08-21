@@ -47,8 +47,8 @@ import pandas as pd
 
 try:
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
-    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -422,6 +422,30 @@ def esperar_estado_final_orden(order_id, espera_maxima=ESPERA_MAXIMA_ESTADO_ORDE
     return estado
 
 
+def cancelar_ordenes_abiertas(ticker):
+    """Cancela cualquier orden todavia ABIERTA (no rellenada) de un ticker,
+    antes de mandar una orden nueva. Bug real visto en produccion (agosto
+    2026, META en premercado): una orden limitada anterior que se quedo sin
+    rellenar (el precio se alejo del limite) se queda "viva" en Alpaca
+    reteniendo TODA la cantidad de la posicion (held_for_orders); el
+    siguiente intento de venta, aunque la posicion siga apareciendo con
+    cantidad > 0, es rechazado por la API con "insufficient qty available
+    for order (... available: 0)". Cancelando cualquier orden abierta antes
+    de operar, la cantidad vuelve a estar disponible para la orden nueva."""
+    try:
+        ordenes_abiertas = _trading_client.get_orders(
+            filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker]))
+    except Exception as e:
+        log(f"{ticker} - no se pudieron consultar ordenes abiertas antes de operar: {type(e).__name__}: {e}")
+        return
+    for orden in ordenes_abiertas:
+        try:
+            _trading_client.cancel_order_by_id(orden.id)
+            log(f"{ticker} - orden abierta anterior ({orden.id}) cancelada antes de mandar una nueva.")
+        except Exception as e:
+            log(f"{ticker} - no se pudo cancelar la orden abierta {orden.id}: {type(e).__name__}: {e}")
+
+
 # --- Historial persistente de operaciones ejecutadas (compras y ventas) ---
 # La API de Alpaca no da directamente el beneficio realizado de cada venta
 # (get_orders() devuelve la orden, pero no el coste medio de compra en el
@@ -546,6 +570,7 @@ def revisar_ventas():
                 log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, "
                     f"dentro de los ultimos {MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del "
                     f"cierre -> VENTA FORZADA (orden limitada a {precio_limite} USD).")
+                cancelar_ordenes_abiertas(ticker)
                 orden = LimitOrderRequest(symbol=ticker, qty=cantidad, limit_price=precio_limite,
                                            side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
                 trade = _trading_client.submit_order(order_data=orden)
@@ -583,6 +608,7 @@ def revisar_ventas():
                 orden = MarketOrderRequest(symbol=ticker, qty=cantidad, side=OrderSide.SELL,
                                             time_in_force=TimeInForce.DAY)
 
+            cancelar_ordenes_abiertas(ticker)
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"VENTAS: {ticker} - orden colocada, estado: {estado}")
@@ -687,6 +713,7 @@ def revisar_compras():
                 orden = MarketOrderRequest(symbol=ticker, notional=round(importe_a_usar, 2),
                                             side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
 
+            cancelar_ordenes_abiertas(ticker)
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")

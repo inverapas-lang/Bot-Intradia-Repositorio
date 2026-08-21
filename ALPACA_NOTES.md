@@ -177,6 +177,23 @@ sigue con el siguiente valor en vez de congelarse. El vigilante externo
 adicional por si se congela en cualquier otro punto no cubierto por este
 timeout, pero ya no es la única defensa.
 
+**Tercer bug real (agosto 2026, primera semana con las fracciones en
+horario extendido activadas)**: una venta de META en premercado quedó
+como orden LIMITADA abierta sin rellenarse (el precio se alejó del
+límite). En un ciclo posterior, con nueva señal de venta, el bot intentó
+mandar OTRA orden de venta para la misma posición y Alpaca la rechazó:
+`"insufficient qty available for order (requested: 8.3558, available:
+0)"`, con `held_for_orders` mostrando que la posición entera seguía
+retenida por la orden vieja todavía abierta. El bot nunca cancelaba una
+orden que se quedaba sin rellenar, así que se quedaba viva bloqueando
+cualquier venta futura de ese valor hasta que expirara sola (o para
+siempre, según cómo trate Alpaca el `time_in_force=DAY` en operaciones de
+horario extendido). → se añadió `cancelar_ordenes_abiertas(ticker)`, que
+se llama justo antes de cada `submit_order` (compra y venta): consulta las
+órdenes abiertas de ese ticker (`get_orders` con `status=OPEN`) y las
+cancela (`cancel_order_by_id`) antes de mandar la nueva, para que la
+cantidad retenida vuelva a estar disponible.
+
 ### Resumen de cierre
 
 Versión simplificada respecto al de IBKR: solo posiciones abiertas (precio
