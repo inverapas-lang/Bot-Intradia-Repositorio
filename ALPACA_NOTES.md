@@ -207,6 +207,34 @@ ahora llama a `esperar_estado_final_orden(orden.id)` después de cancelar
 cada orden abierta, para no continuar hasta que la cancelación llegue a
 un estado final de verdad.
 
+**Consecuencia observada (31 agosto 2026): operaciones "huérfanas" no
+registradas en el historial.** Tras migrar a AWS, `/hoy` en Telegram decía
+"ninguna operación cerrada hoy" pese a que en el panel de Alpaca sí
+aparecían ventas reales de QCOM (y compras de DIS/WFC/INTC/F/V) ese mismo
+día. Diagnóstico: `sudo journalctl -u bot-alpaca` no tenía **ninguna**
+mención a QCOM en todo el día — el bot en marcha nunca colocó esa orden.
+Explicación: la orden de venta de QCOM (`held_for_orders`) que se vio
+atascada en el log de esa misma mañana (antes del segundo arreglo de
+cancelación) quedó abierta en Alpaca durante horas; más tarde, **por su
+cuenta**, el mercado alcanzó su precio límite y se ejecutó sola (en varias
+ejecuciones parciales), sin que ningún proceso en marcha (ni el bot de
+Windows, ya parado, ni el nuevo de AWS) la hubiera colocado en ese momento.
+
+`registrar_operacion_historial()` solo anota una operación en el instante
+en que el propio bot la coloca y confirma su ejecución — una orden
+huérfana de un proceso que ya no corre, que se ejecuta por su cuenta más
+tarde, no la ve ningún bot en marcha y por tanto no queda registrada.
+**No es un bug del registro en sí**, sino una consecuencia colateral de
+los dos bugs de cancelación ya corregidos: con esos arreglos desplegados,
+no deberían quedar más órdenes huérfanas a partir de ahora, así que las
+operaciones nuevas sí deberían registrarse con normalidad. Si en algún
+momento se quiere que `/hoy`/`/ayer`/etc. sean 100% fieles incluso a estos
+restos antiguos, habría que reconciliar el historial local contra
+`get_orders()` de Alpaca (que sí tiene el historial real completo,
+independientemente de quién colocó cada orden) — pendiente, no
+implementado por decisión expresa del usuario (con que las operaciones
+futuras queden bien registradas es suficiente por ahora).
+
 ### Resumen de cierre
 
 Versión simplificada respecto al de IBKR: solo posiciones abiertas (precio
