@@ -252,6 +252,128 @@ python cartera_alpaca.py --semana                # semana laboral actual (lunes 
 python cartera_alpaca.py --desde 2026-08-01 --hasta 2026-08-15
 ```
 
+## Control y consulta desde el móvil (Telegram)
+
+Desde agosto 2026, además de correr en un servidor en la nube (ver más
+abajo), el bot se puede **gestionar y consultar desde Telegram**: avisos
+automáticos de cada compra/venta y del resumen diario, y comandos para
+arrancar/parar el bot y consultar la cartera sin tener que entrar por SSH.
+
+### Piezas involucradas
+
+- **`bot_alpaca.py`** (el bot de trading): manda un mensaje de Telegram
+  automáticamente cada vez que se ejecuta una compra o una venta, y en el
+  resumen diario de cierre (`generar_resumen()`). Función clave:
+  `notificar_telegram()`. Si `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` no
+  están configuradas, esta función simplemente no hace nada — el bot
+  funciona exactamente igual sin Telegram, es un extra opcional.
+- **`telegram_bot.py`** (proceso NUEVO y APARTE, con su propio servicio
+  systemd): escucha los mensajes que le mandas por Telegram (comandos) y
+  responde. Vive en un proceso separado del bot de trading a propósito —
+  un fallo aquí no puede afectar al trading, y viceversa.
+- **`cartera_alpaca.py`**: sus funciones `formatear_posiciones_abiertas()`
+  y `formatear_operaciones_cerradas()` (antes solo imprimían por
+  terminal) ahora devuelven texto, para que `telegram_bot.py` las
+  reutilice directamente en los comandos `/cartera`, `/hoy`, `/ayer`,
+  `/semana` — la misma lógica y datos, sin duplicar código.
+
+### Comandos disponibles en Telegram
+
+```
+/estado    - si el bot esta corriendo o parado
+/arrancar  - arranca el bot (systemctl start bot-alpaca)
+/parar     - para el bot (systemctl stop bot-alpaca)
+/cartera   - posiciones abiertas (igual que cartera_alpaca.py)
+/hoy       - operaciones cerradas hoy
+/ayer      - operaciones cerradas ayer
+/semana    - operaciones cerradas esta semana laboral
+/log       - ultimas 25 lineas del log del bot (journalctl)
+/ayuda     - lista de comandos
+```
+
+Solo responde al chat configurado en `TELEGRAM_CHAT_ID` — cualquier otro
+mensaje de cualquier otro chat se ignora y se registra en el log de
+`telegram_bot.py`.
+
+### Cómo crear el bot de Telegram
+
+1. En Telegram, busca **@BotFather** y escríbele `/newbot`.
+2. Ponle un nombre y un usuario (debe terminar en `bot`, p. ej.
+   `mi_bot_alpaca_bot`).
+3. BotFather te da un **token** (algo como
+   `123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`) — es tu
+   `TELEGRAM_BOT_TOKEN`.
+4. Para conseguir tu `TELEGRAM_CHAT_ID`: escríbele cualquier mensaje a tu
+   bot nuevo desde tu cuenta de Telegram, y luego visita en el navegador
+   (sustituyendo el token):
+   `https://api.telegram.org/bot<TU_TOKEN>/getUpdates`
+   Busca en la respuesta JSON el campo `"chat":{"id": ...}` — ese número es
+   tu `TELEGRAM_CHAT_ID`.
+
+### Variables de entorno adicionales
+
+```
+TELEGRAM_BOT_TOKEN=el_token_de_botfather
+TELEGRAM_CHAT_ID=tu_chat_id_numerico
+```
+
+Van en el mismo sitio que las de Alpaca (el archivo `.env` que lee el
+`EnvironmentFile` de los servicios systemd, ver más abajo).
+
+### Permiso de sudo para arrancar/parar el bot (`/arrancar`, `/parar`)
+
+`telegram_bot.py` corre como el usuario normal (`ubuntu`), pero necesita
+poder ejecutar `systemctl start/stop bot-alpaca` sin que le pida
+contraseña (si no, esos dos comandos fallan con un aviso claro, aunque el
+resto —`/estado`, `/cartera`, `/log`, etc., que son de solo lectura—
+funcionan igual). Para darle permiso, en el servidor:
+
+```bash
+sudo visudo -f /etc/sudoers.d/telegram-bot-alpaca
+```
+
+Y añade esta línea exacta (sustituye `ubuntu` si tu usuario se llama
+distinto):
+
+```
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl start bot-alpaca, /usr/bin/systemctl stop bot-alpaca
+```
+
+Guarda y sal. Esto da permiso **únicamente** para esos dos comandos
+exactos, no para systemctl en general — no relajes esto a `ALL` sin
+necesidad.
+
+### Servicio systemd de `telegram_bot.py`
+
+Igual que `bot-alpaca.service`, pero apuntando a `telegram_bot.py`:
+
+```ini
+[Unit]
+Description=Telegram bot control (Alpaca)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Alpaca
+EnvironmentFile=/home/ubuntu/Alpaca/.env
+ExecStart=/home/ubuntu/Alpaca/venv/bin/python /home/ubuntu/Alpaca/telegram_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Guardar en `/etc/systemd/system/telegram-bot.service`, y luego:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable telegram-bot
+sudo systemctl start telegram-bot
+sudo systemctl status telegram-bot
+```
+
 ## Activos
 
 Misma lista de 30 tickers de US que en `bot_completo.py` (`ACTIVOS_US`),
@@ -261,8 +383,8 @@ copiada literalmente como lista simple de símbolos (Alpaca no necesita
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).
-- Cuando llegue el momento de mover esto a la nube (objetivo declarado del
-  usuario: gestionar todo desde el móvil, sin gastos iniciales), este bot
-  es el candidato natural para ir primero — no depende de una app de
-  escritorio como IB Gateway, solo de las variables de entorno con las API
-  keys.
+- **Ya en marcha (agosto 2026)**: el bot corre 24/7 en un servidor AWS
+  (EC2, capa gratuita) en vez de en el PC de Windows, con `systemd` para
+  arranque/reinicio automático, y control + avisos desde Telegram (ver
+  sección dedicada más arriba) — cumple el objetivo original de "gestionar
+  todo desde el móvil, sin gastos iniciales".

@@ -15,6 +15,11 @@ Usa las mismas credenciales (ALPACA_API_KEY/ALPACA_SECRET_KEY/ALPACA_PAPER)
 que bot_alpaca.py. Es de solo lectura: no coloca, modifica ni cancela
 ninguna orden.
 
+Las funciones formatear_*() devuelven texto plano (sin tablas de ancho fijo,
+pensado para caber bien en un mensaje de Telegram) y son las que reutiliza
+telegram_bot.py para los comandos /cartera, /hoy, /ayer, /semana. main()
+las usa igual para la version de terminal.
+
 Uso:
     python cartera_alpaca.py                        # hoy
     python cartera_alpaca.py --ayer                  # dia anterior
@@ -52,17 +57,13 @@ def calcular_rango(args):
     return hoy, hoy
 
 
-def imprimir_posiciones_abiertas():
+def formatear_posiciones_abiertas():
     posiciones = bot.obtener_posiciones()
 
-    print("\n=== POSICIONES ABIERTAS ===")
+    lineas = ["📈 POSICIONES ABIERTAS"]
     if not posiciones:
-        print("(ninguna)")
-        return
-
-    cab = (f"{'Ticker':<8}{'Cantidad':>10}{'Precio medio':>15}{'Invertido USD':>15}"
-           f"{'Precio actual':>15}{'P/L USD':>12}{'P/L EUR':>12}{'P/L %':>9}")
-    print(cab)
+        lineas.append("(ninguna)")
+        return "\n".join(lineas)
 
     total_invertido = 0.0
     total_actual = 0.0
@@ -80,18 +81,19 @@ def imprimir_posiciones_abiertas():
         total_invertido += invertido
         total_actual += valor_actual
 
-        print(f"{p.symbol:<8}{cantidad:>10.4g}{coste_medio:>15.4f}{invertido:>15.2f}"
-              f"{precio_actual:>15.4f}{pl_usd:>12.2f}{pl_eur:>12.2f}{pl_pct:>8.2f}%")
+        lineas.append(f"{p.symbol}: {cantidad:g} acciones a {coste_medio:.4f} USD "
+                      f"(invertido {invertido:.2f} USD, ahora {precio_actual:.4f} USD) "
+                      f"P/L {pl_usd:+.2f} USD / {pl_eur:+.2f} EUR ({pl_pct:+.2f}%)")
 
     pl_total_usd = total_actual - total_invertido
     pl_total_pct = (pl_total_usd / total_invertido * 100) if total_invertido else 0.0
-    print("-" * len(cab))
-    print(f"TOTAL invertido: {total_invertido:.2f} USD ({total_invertido / bot.TIPO_CAMBIO_EUR_USD:.2f} EUR) | "
-          f"valor actual: {total_actual:.2f} USD | "
-          f"P/L: {pl_total_usd:.2f} USD ({pl_total_usd / bot.TIPO_CAMBIO_EUR_USD:.2f} EUR, {pl_total_pct:.2f}%)")
+    lineas.append(f"TOTAL invertido: {total_invertido:.2f} USD ({total_invertido / bot.TIPO_CAMBIO_EUR_USD:.2f} EUR) | "
+                  f"valor actual: {total_actual:.2f} USD | "
+                  f"P/L: {pl_total_usd:+.2f} USD ({pl_total_usd / bot.TIPO_CAMBIO_EUR_USD:+.2f} EUR, {pl_total_pct:+.2f}%)")
+    return "\n".join(lineas)
 
 
-def imprimir_operaciones_cerradas(desde, hasta):
+def formatear_operaciones_cerradas(desde, hasta):
     operaciones = bot.cargar_historial_operaciones()
     ventas = sorted(
         (o for o in operaciones
@@ -99,14 +101,10 @@ def imprimir_operaciones_cerradas(desde, hasta):
         key=lambda o: o["fecha_hora"]
     )
 
-    print(f"\n=== OPERACIONES CERRADAS ({desde} a {hasta}) ===")
+    lineas = [f"📉 OPERACIONES CERRADAS ({desde} a {hasta})"]
     if not ventas:
-        print("(ninguna)")
-        return
-
-    cab = (f"{'Fecha/hora':<17}{'Ticker':<8}{'Cantidad':>10}{'Coste medio':>13}"
-           f"{'Precio venta':>13}{'Ganancia USD':>13}{'Ganancia EUR':>13}{'%':>8}")
-    print(cab)
+        lineas.append("(ninguna)")
+        return "\n".join(lineas)
 
     ganancia_total_usd = 0.0
     for o in ventas:
@@ -123,15 +121,14 @@ def imprimir_operaciones_cerradas(desde, hasta):
         ganancia_total_usd += ganancia_usd or 0.0
 
         fecha_str = o["fecha_hora"][:16].replace("T", " ")
-        ganancia_usd_str = f"{ganancia_usd:.2f}" if ganancia_usd is not None else "N/D"
-        ganancia_eur_str = f"{ganancia_eur:.2f}" if ganancia_eur is not None else "N/D"
-        beneficio_pct_str = f"{beneficio_pct:.2f}%" if beneficio_pct is not None else "N/D"
-        print(f"{fecha_str:<17}{o['ticker']:<8}{cantidad:>10.4g}{(coste_medio or 0):>13.4f}"
-              f"{precio:>13.4f}{ganancia_usd_str:>13}{ganancia_eur_str:>13}{beneficio_pct_str:>8}")
+        ganancia_str = f", ganancia {ganancia_usd:+.2f} USD / {ganancia_eur:+.2f} EUR" if ganancia_usd is not None else ""
+        beneficio_pct_str = f" ({beneficio_pct:+.2f}%)" if beneficio_pct is not None else ""
+        lineas.append(f"{fecha_str} {o['ticker']}: {cantidad:g} acciones a {precio:.4f} USD"
+                      f"{ganancia_str}{beneficio_pct_str}")
 
-    print("-" * len(cab))
-    print(f"TOTAL ganancia/perdida realizada: {ganancia_total_usd:.2f} USD "
-          f"({ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD:.2f} EUR)")
+    lineas.append(f"TOTAL ganancia/perdida realizada: {ganancia_total_usd:+.2f} USD "
+                  f"({ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD:+.2f} EUR)")
+    return "\n".join(lineas)
 
 
 def main():
@@ -139,9 +136,10 @@ def main():
     desde, hasta = calcular_rango(args)
 
     modo = "PAPER (simulado)" if bot.ALPACA_PAPER else "REAL"
-    print(f"Cartera Alpaca [{modo}] - operaciones cerradas: {desde} a {hasta}")
-    imprimir_posiciones_abiertas()
-    imprimir_operaciones_cerradas(desde, hasta)
+    print(f"Cartera Alpaca [{modo}] - operaciones cerradas: {desde} a {hasta}\n")
+    print(formatear_posiciones_abiertas())
+    print()
+    print(formatear_operaciones_cerradas(desde, hasta))
 
 
 if __name__ == "__main__":

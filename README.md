@@ -89,3 +89,13 @@ python cartera_alpaca.py --desde 2026-08-01 --hasta 2026-08-15
 
 Ver `NOTES.md` / `ALPACA_NOTES.md` para el detalle del historial persistente
 del que se leen las operaciones cerradas.
+
+## Control desde Telegram (bot_alpaca.py)
+
+`bot_alpaca.py` manda avisos de Telegram automáticamente (compras, ventas,
+resumen diario) si se configuran `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
+(opcional). Además, `telegram_bot.py` es un proceso aparte que permite
+arrancar/parar el bot y consultar la cartera con comandos de Telegram desde
+el móvil (`/estado`, `/arrancar`, `/parar`, `/cartera`, `/hoy`, `/ayer`,
+`/semana`, `/log`). Ver `ALPACA_NOTES.md` para cómo crear el bot de
+Telegram y desplegar `telegram_bot.py`.

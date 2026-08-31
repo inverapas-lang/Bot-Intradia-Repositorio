@@ -209,6 +209,39 @@ check("_forzar_timeout_por_defecto: NO sobreescribe un timeout ya puesto por el 
       f"kwargs={sesion_falsa.ultima_llamada_kwargs}")
 
 
+# --- 6c. notificar_telegram: opcional, no rompe nada si no esta configurado ---
+llamadas_post = []
+
+
+def _post_falso(url, data=None, timeout=None):
+    llamadas_post.append((url, data, timeout))
+    return types.SimpleNamespace(status_code=200)
+
+
+token_original = bot.TELEGRAM_BOT_TOKEN
+chat_id_original = bot.TELEGRAM_CHAT_ID
+post_original = bot.requests.post
+bot.requests.post = _post_falso
+
+try:
+    bot.TELEGRAM_BOT_TOKEN = ""
+    bot.TELEGRAM_CHAT_ID = ""
+    bot.notificar_telegram("mensaje de prueba")
+    check("notificar_telegram: sin configurar, NO llama a requests.post",
+          llamadas_post == [], f"llamadas={llamadas_post}")
+
+    bot.TELEGRAM_BOT_TOKEN = "token-falso"
+    bot.TELEGRAM_CHAT_ID = "12345"
+    bot.notificar_telegram("mensaje de prueba")
+    check("notificar_telegram: configurado, SI llama a requests.post con el chat_id correcto",
+          len(llamadas_post) == 1 and llamadas_post[0][1]["chat_id"] == "12345",
+          f"llamadas={llamadas_post}")
+finally:
+    bot.TELEGRAM_BOT_TOKEN = token_original
+    bot.TELEGRAM_CHAT_ID = chat_id_original
+    bot.requests.post = post_original
+
+
 # ---------------------------------------------------------------------------
 # 7. pedir_velas_lote: reintentos ante fallo, exito al primer intento, y
 #    devuelve dict {ticker: [velas]} para varios tickers a la vez.

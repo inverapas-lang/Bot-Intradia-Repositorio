@@ -44,6 +44,7 @@ from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 
 try:
     from alpaca.trading.client import TradingClient
@@ -71,6 +72,31 @@ if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         "Faltan las variables de entorno ALPACA_API_KEY y/o ALPACA_SECRET_KEY. "
         "Ver ALPACA_NOTES.md para como obtenerlas y configurarlas."
     )
+
+# --- Notificaciones a Telegram (opcional) ---
+# Si no se configuran estas dos variables, notificar_telegram() simplemente no
+# hace nada -el bot funciona igual sin Telegram, esto es un extra opcional-.
+# Ver ALPACA_NOTES.md para como crear el bot de Telegram y conseguir estos valores.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TIMEOUT_SEGUNDOS = 10
+
+
+def notificar_telegram(mensaje):
+    """Envia un mensaje a Telegram (compra/venta ejecutada, resumen diario).
+    No lanza excepcion nunca hacia el llamador: un fallo de red o de
+    configuracion aqui no debe interrumpir ni un ciclo de trading ni el
+    guardado del historial, solo se registra en el log normal."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje},
+            timeout=TELEGRAM_TIMEOUT_SEGUNDOS,
+        )
+    except Exception as e:
+        log(f"No se pudo enviar la notificacion a Telegram: {type(e).__name__}: {e}")
 
 # --- Timeout por defecto para TODAS las peticiones HTTP a Alpaca ---
 # BUG REAL visto en produccion (agosto 2026): el SDK alpaca-py (v0.44.0) no
@@ -592,6 +618,8 @@ def revisar_ventas():
                     cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_limite)
                     registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                    notificar_telegram(f"🔴 VENTA FORZADA {ticker}: {cantidad_real:g} acciones a "
+                                        f"{precio_real:.2f} USD (beneficio {beneficio_pct:.2f}%)")
                 continue
 
             if beneficio_pct < UMBRAL_BENEFICIO_PCT:
@@ -628,6 +656,8 @@ def revisar_ventas():
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_actual)
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                notificar_telegram(f"🔴 VENTA {ticker}: {cantidad_real:g} acciones a "
+                                    f"{precio_real:.2f} USD (beneficio {beneficio_pct:.2f}%)")
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
 
@@ -732,6 +762,7 @@ def revisar_compras():
             if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
+                notificar_telegram(f"🟢 COMPRA {ticker}: {cantidad_real:g} acciones a {precio_real:.2f} USD")
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {type(e).__name__}: {e}. Se omite.")
             errores += 1
@@ -740,27 +771,52 @@ def revisar_compras():
 
 
 def generar_resumen():
-    """Version simplificada del resumen de cierre de bot_completo.py: solo
-    posiciones abiertas (Alpaca no distingue facilmente "cerrado hoy" via
-    la API de posiciones; para eso habria que consultar el historial de
-    ordenes -pendiente si hace falta mas adelante-)."""
+    """Resumen de cierre: posiciones abiertas (P/L no realizado) + operaciones
+    cerradas HOY (P/L realizado, leido del historial persistente -ver
+    registrar_operacion_historial()-). Se registra en el log y, si esta
+    configurado, tambien se manda como mensaje de Telegram (ver
+    notificar_telegram() / ALPACA_NOTES.md)."""
     posiciones = obtener_posiciones()
-    log("\n========== RESUMEN DE POSICIONES ABIERTAS (Alpaca) ==========")
+    lineas = ["📊 RESUMEN DE CIERRE (Alpaca)", "", "Posiciones abiertas:"]
+
     if not posiciones:
-        log("(ninguna)")
-        return
-    total_valor = 0.0
-    total_pl = 0.0
-    for p in sorted(posiciones, key=lambda p: p.symbol):
-        valor = float(p.market_value)
-        pl = float(p.unrealized_pl)
-        pl_pct = float(p.unrealized_plpc) * 100
-        total_valor += valor
-        total_pl += pl
-        log(f"{p.symbol:<8}{float(p.qty):>12.4f} acciones{'':>3}valor {valor:>12.2f} USD{'':>3}"
-            f"P/L {pl:>10.2f} USD ({pl_pct:+.2f}%)")
-    log("-" * 60)
-    log(f"TOTAL: {total_valor:.2f} USD invertidos, P/L no realizado {total_pl:+.2f} USD")
+        lineas.append("(ninguna)")
+    else:
+        total_valor = 0.0
+        total_pl = 0.0
+        for p in sorted(posiciones, key=lambda p: p.symbol):
+            valor = float(p.market_value)
+            pl = float(p.unrealized_pl)
+            pl_pct = float(p.unrealized_plpc) * 100
+            total_valor += valor
+            total_pl += pl
+            lineas.append(f"{p.symbol}: {float(p.qty):g} acciones, valor {valor:.2f} USD, "
+                          f"P/L {pl:+.2f} USD ({pl_pct:+.2f}%)")
+        lineas.append(f"TOTAL invertido: {total_valor:.2f} USD, P/L no realizado {total_pl:+.2f} USD")
+
+    hoy = datetime.now().date()
+    ventas_hoy = [o for o in cargar_historial_operaciones()
+                  if o.get("lado") == "VENTA" and datetime.fromisoformat(o["fecha_hora"]).date() == hoy]
+    lineas.append("")
+    lineas.append("Operaciones cerradas hoy:")
+    if not ventas_hoy:
+        lineas.append("(ninguna)")
+    else:
+        ganancia_total = 0.0
+        for o in sorted(ventas_hoy, key=lambda o: o["fecha_hora"]):
+            coste_medio = o.get("coste_medio")
+            ganancia = (o["precio"] - coste_medio) * o["cantidad"] if coste_medio is not None else None
+            if ganancia is not None:
+                ganancia_total += ganancia
+            beneficio_pct = o.get("beneficio_pct")
+            lineas.append(f"{o['ticker']}: {o['cantidad']:g} acciones a {o['precio']:.2f} USD"
+                          + (f", ganancia {ganancia:+.2f} USD" if ganancia is not None else "")
+                          + (f" ({beneficio_pct:+.2f}%)" if beneficio_pct is not None else ""))
+        lineas.append(f"TOTAL ganancia/perdida realizada hoy: {ganancia_total:+.2f} USD")
+
+    resumen = "\n".join(lineas)
+    log("\n" + "=" * 60 + "\n" + resumen + "\n" + "=" * 60)
+    notificar_telegram(resumen)
 
 
 TRAMO_ESPERA_LARGA_SEGUNDOS = 60  # bastante por debajo de UMBRAL_CONGELACION_SEGUNDOS (20 min)
