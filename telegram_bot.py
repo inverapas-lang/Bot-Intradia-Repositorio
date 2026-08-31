@@ -62,9 +62,15 @@ def log(mensaje):
 
 def enviar_mensaje(texto):
     try:
-        requests.post(f"{API_URL}/sendMessage", data={"chat_id": TELEGRAM_CHAT_ID, "text": texto}, timeout=10)
+        requests.post(f"{API_URL}/sendMessage",
+                      data={"chat_id": TELEGRAM_CHAT_ID, "text": texto, "parse_mode": "HTML"},
+                      timeout=10)
     except Exception as e:
         log(f"No se pudo enviar respuesta a Telegram: {type(e).__name__}: {e}")
+
+
+def escapar_html(texto):
+    return texto.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def ejecutar_systemctl(accion):
@@ -93,15 +99,21 @@ def consultar_estado_servicio():
         return f"desconocido ({type(e).__name__})"
 
 
-def obtener_ultimas_lineas_log(n=25):
+LIMITE_CARACTERES_LOG_TELEGRAM = 3500  # margen bajo el limite de 4096 de un mensaje de Telegram
+
+
+def obtener_ultimas_lineas_log(n=15):
     try:
         resultado = subprocess.run(
             ["journalctl", "-u", NOMBRE_SERVICIO_BOT, "-n", str(n), "--no-pager"],
             capture_output=True, text=True, timeout=15
         )
-        return resultado.stdout.strip() or "(sin lineas de log)"
+        texto = resultado.stdout.strip() or "(sin lineas de log)"
     except Exception as e:
         return f"No se pudo leer el log: {type(e).__name__}: {e}"
+    if len(texto) > LIMITE_CARACTERES_LOG_TELEGRAM:
+        texto = "(...)\n" + texto[-LIMITE_CARACTERES_LOG_TELEGRAM:]
+    return "📄 <b>ULTIMAS LINEAS DEL LOG</b>\n<pre>" + escapar_html(texto) + "</pre>"
 
 
 AYUDA = (
@@ -135,14 +147,14 @@ def procesar_comando(texto):
         return error or "🔴 Bot parado."
 
     if comando == "cartera":
-        return cartera.formatear_posiciones_abiertas()
+        return cartera.formatear_posiciones_abiertas(html=True)
 
     if comando in ("hoy", "ayer", "semana"):
         args_falsos = type("Args", (), {
             "ayer": comando == "ayer", "semana": comando == "semana", "desde": None, "hasta": None,
         })()
         desde, hasta = cartera.calcular_rango(args_falsos)
-        return cartera.formatear_operaciones_cerradas(desde, hasta)
+        return cartera.formatear_operaciones_cerradas(desde, hasta, html=True)
 
     if comando == "log":
         return obtener_ultimas_lineas_log()

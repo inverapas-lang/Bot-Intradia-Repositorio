@@ -92,7 +92,7 @@ def notificar_telegram(mensaje):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje},
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"},
             timeout=TELEGRAM_TIMEOUT_SEGUNDOS,
         )
     except Exception as e:
@@ -618,7 +618,7 @@ def revisar_ventas():
                     cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_limite)
                     registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
-                    notificar_telegram(f"🔴 VENTA FORZADA {ticker}: {cantidad_real:g} acciones a "
+                    notificar_telegram(f"🔴 VENTA FORZADA <b>{ticker}</b>: {cantidad_real:g} acciones a "
                                         f"{precio_real:.2f} USD (beneficio {beneficio_pct:.2f}%)")
                 continue
 
@@ -656,7 +656,7 @@ def revisar_ventas():
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_actual)
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct)
-                notificar_telegram(f"🔴 VENTA {ticker}: {cantidad_real:g} acciones a "
+                notificar_telegram(f"🔴 VENTA <b>{ticker}</b>: {cantidad_real:g} acciones a "
                                     f"{precio_real:.2f} USD (beneficio {beneficio_pct:.2f}%)")
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
@@ -762,7 +762,7 @@ def revisar_compras():
             if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
-                notificar_telegram(f"🟢 COMPRA {ticker}: {cantidad_real:g} acciones a {precio_real:.2f} USD")
+                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {cantidad_real:g} acciones a {precio_real:.2f} USD")
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {type(e).__name__}: {e}. Se omite.")
             errores += 1
@@ -770,17 +770,22 @@ def revisar_compras():
     log(f"COMPRAS: {analizados} analizados, {senales} señales de compra, {errores} errores.")
 
 
+def _emoji_pl(valor):
+    return "🟢" if valor >= 0 else "🔴"
+
+
 def generar_resumen():
     """Resumen de cierre: posiciones abiertas (P/L no realizado) + operaciones
     cerradas HOY (P/L realizado, leido del historial persistente -ver
-    registrar_operacion_historial()-). Se registra en el log y, si esta
-    configurado, tambien se manda como mensaje de Telegram (ver
-    notificar_telegram() / ALPACA_NOTES.md)."""
+    registrar_operacion_historial()-). Se registra en el log en texto plano
+    y, si esta configurado, tambien se manda como mensaje de Telegram en
+    formato tabla (ver notificar_telegram() / ALPACA_NOTES.md)."""
     posiciones = obtener_posiciones()
-    lineas = ["📊 RESUMEN DE CIERRE (Alpaca)", "", "Posiciones abiertas:"]
+    lineas_log = ["📊 RESUMEN DE CIERRE (Alpaca)", "", "Posiciones abiertas:"]
+    filas_abiertas = []
 
     if not posiciones:
-        lineas.append("(ninguna)")
+        lineas_log.append("(ninguna)")
     else:
         total_valor = 0.0
         total_pl = 0.0
@@ -790,33 +795,57 @@ def generar_resumen():
             pl_pct = float(p.unrealized_plpc) * 100
             total_valor += valor
             total_pl += pl
-            lineas.append(f"{p.symbol}: {float(p.qty):g} acciones, valor {valor:.2f} USD, "
-                          f"P/L {pl:+.2f} USD ({pl_pct:+.2f}%)")
-        lineas.append(f"TOTAL invertido: {total_valor:.2f} USD, P/L no realizado {total_pl:+.2f} USD")
+            filas_abiertas.append((p.symbol, float(p.qty), valor, pl, pl_pct))
+            lineas_log.append(f"{p.symbol}: {float(p.qty):g} acciones, valor {valor:.2f} USD, "
+                              f"P/L {pl:+.2f} USD ({pl_pct:+.2f}%)")
+        lineas_log.append(f"TOTAL invertido: {total_valor:.2f} USD, P/L no realizado {total_pl:+.2f} USD")
 
     hoy = datetime.now().date()
     ventas_hoy = [o for o in cargar_historial_operaciones()
                   if o.get("lado") == "VENTA" and datetime.fromisoformat(o["fecha_hora"]).date() == hoy]
-    lineas.append("")
-    lineas.append("Operaciones cerradas hoy:")
+    lineas_log.append("")
+    lineas_log.append("Operaciones cerradas hoy:")
+    filas_cerradas = []
+    ganancia_total = 0.0
     if not ventas_hoy:
-        lineas.append("(ninguna)")
+        lineas_log.append("(ninguna)")
     else:
-        ganancia_total = 0.0
         for o in sorted(ventas_hoy, key=lambda o: o["fecha_hora"]):
             coste_medio = o.get("coste_medio")
             ganancia = (o["precio"] - coste_medio) * o["cantidad"] if coste_medio is not None else None
             if ganancia is not None:
                 ganancia_total += ganancia
             beneficio_pct = o.get("beneficio_pct")
-            lineas.append(f"{o['ticker']}: {o['cantidad']:g} acciones a {o['precio']:.2f} USD"
-                          + (f", ganancia {ganancia:+.2f} USD" if ganancia is not None else "")
-                          + (f" ({beneficio_pct:+.2f}%)" if beneficio_pct is not None else ""))
-        lineas.append(f"TOTAL ganancia/perdida realizada hoy: {ganancia_total:+.2f} USD")
+            filas_cerradas.append((o["ticker"], o["cantidad"], o["precio"], ganancia, beneficio_pct))
+            lineas_log.append(f"{o['ticker']}: {o['cantidad']:g} acciones a {o['precio']:.2f} USD"
+                              + (f", ganancia {ganancia:+.2f} USD" if ganancia is not None else "")
+                              + (f" ({beneficio_pct:+.2f}%)" if beneficio_pct is not None else ""))
+        lineas_log.append(f"TOTAL ganancia/perdida realizada hoy: {ganancia_total:+.2f} USD")
 
-    resumen = "\n".join(lineas)
-    log("\n" + "=" * 60 + "\n" + resumen + "\n" + "=" * 60)
-    notificar_telegram(resumen)
+    log("\n" + "=" * 60 + "\n" + "\n".join(lineas_log) + "\n" + "=" * 60)
+
+    # Version HTML compacta (tabla monoespaciada) para Telegram.
+    bloques_html = ["📊 <b>RESUMEN DE CIERRE</b>", "", "<b>Posiciones abiertas:</b>"]
+    if not filas_abiertas:
+        bloques_html.append("(ninguna)")
+    else:
+        tabla = [f"  {'Ticker':<7}{'P/L %':>9}{'P/L USD':>10}"]
+        for symbol, cantidad, valor, pl, pl_pct in filas_abiertas:
+            tabla.append(f"{_emoji_pl(pl)} {symbol:<6}{pl_pct:>+8.2f}%{pl:>+10.2f}")
+        bloques_html.append("<pre>" + "\n".join(tabla) + "</pre>")
+    bloques_html.append("<b>Operaciones cerradas hoy:</b>")
+    if not filas_cerradas:
+        bloques_html.append("(ninguna)")
+    else:
+        tabla = [f"  {'Ticker':<7}{'Cant.':>7}{'Gan. USD':>10}"]
+        for ticker, cantidad, precio, ganancia, beneficio_pct in filas_cerradas:
+            emoji = _emoji_pl(ganancia) if ganancia is not None else "⚪"
+            ganancia_str = f"{ganancia:>+10.2f}" if ganancia is not None else f"{'N/D':>10}"
+            tabla.append(f"{emoji} {ticker:<6}{cantidad:>7.2f}{ganancia_str}")
+        bloques_html.append("<pre>" + "\n".join(tabla) + "</pre>")
+        bloques_html.append(f"<b>TOTAL</b> ganancia/perdida realizada hoy: {ganancia_total:+.2f} USD")
+
+    notificar_telegram("\n".join(bloques_html))
 
 
 TRAMO_ESPERA_LARGA_SEGUNDOS = 60  # bastante por debajo de UMBRAL_CONGELACION_SEGUNDOS (20 min)

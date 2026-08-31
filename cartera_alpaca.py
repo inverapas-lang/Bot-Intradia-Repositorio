@@ -57,16 +57,25 @@ def calcular_rango(args):
     return hoy, hoy
 
 
-def formatear_posiciones_abiertas():
+def _emoji_pl(valor):
+    return "🟢" if valor >= 0 else "🔴"
+
+
+def formatear_posiciones_abiertas(html=False):
+    """Si html=True, devuelve el texto listo para mandar a Telegram con
+    parse_mode=HTML: una tabla monoespaciada (<pre>) mas facil de leer en el
+    movil que una lista de frases largas. Si html=False (uso desde la
+    terminal, cartera_alpaca.py --*), devuelve texto plano sin ninguna
+    etiqueta, igual que antes."""
     posiciones = bot.obtener_posiciones()
 
-    lineas = ["📈 POSICIONES ABIERTAS"]
     if not posiciones:
-        lineas.append("(ninguna)")
-        return "\n".join(lineas)
+        titulo = "📈 <b>POSICIONES ABIERTAS</b>" if html else "📈 POSICIONES ABIERTAS"
+        return titulo + "\n(ninguna)"
 
     total_invertido = 0.0
     total_actual = 0.0
+    filas = []
 
     for p in sorted(posiciones, key=lambda p: p.symbol):
         cantidad = float(p.qty)
@@ -80,20 +89,33 @@ def formatear_posiciones_abiertas():
 
         total_invertido += invertido
         total_actual += valor_actual
-
-        lineas.append(f"{p.symbol}: {cantidad:g} acciones a {coste_medio:.4f} USD "
-                      f"(invertido {invertido:.2f} USD, ahora {precio_actual:.4f} USD) "
-                      f"P/L {pl_usd:+.2f} USD / {pl_eur:+.2f} EUR ({pl_pct:+.2f}%)")
+        filas.append((p.symbol, cantidad, coste_medio, precio_actual, invertido, pl_usd, pl_eur, pl_pct))
 
     pl_total_usd = total_actual - total_invertido
     pl_total_pct = (pl_total_usd / total_invertido * 100) if total_invertido else 0.0
+
+    if html:
+        lineas_tabla = [f"  {'Ticker':<7}{'Cant.':>8}{'P/L %':>9}{'P/L USD':>10}"]
+        for symbol, cantidad, coste_medio, precio_actual, invertido, pl_usd, pl_eur, pl_pct in filas:
+            lineas_tabla.append(f"{_emoji_pl(pl_usd)} {symbol:<6}{cantidad:>8.2f}{pl_pct:>+8.2f}%{pl_usd:>+10.2f}")
+        tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
+        resumen = (f"<b>TOTAL</b> invertido: {total_invertido:.2f} USD ({total_invertido / bot.TIPO_CAMBIO_EUR_USD:.2f} EUR)\n"
+                  f"P/L: {pl_total_usd:+.2f} USD ({pl_total_usd / bot.TIPO_CAMBIO_EUR_USD:+.2f} EUR, {pl_total_pct:+.2f}%)")
+        return f"📈 <b>POSICIONES ABIERTAS</b>\n{tabla}\n{resumen}"
+
+    lineas = ["📈 POSICIONES ABIERTAS"]
+    for symbol, cantidad, coste_medio, precio_actual, invertido, pl_usd, pl_eur, pl_pct in filas:
+        lineas.append(f"{symbol}: {cantidad:g} acciones a {coste_medio:.4f} USD "
+                      f"(invertido {invertido:.2f} USD, ahora {precio_actual:.4f} USD) "
+                      f"P/L {pl_usd:+.2f} USD / {pl_eur:+.2f} EUR ({pl_pct:+.2f}%)")
     lineas.append(f"TOTAL invertido: {total_invertido:.2f} USD ({total_invertido / bot.TIPO_CAMBIO_EUR_USD:.2f} EUR) | "
                   f"valor actual: {total_actual:.2f} USD | "
                   f"P/L: {pl_total_usd:+.2f} USD ({pl_total_usd / bot.TIPO_CAMBIO_EUR_USD:+.2f} EUR, {pl_total_pct:+.2f}%)")
     return "\n".join(lineas)
 
 
-def formatear_operaciones_cerradas(desde, hasta):
+def formatear_operaciones_cerradas(desde, hasta, html=False):
+    """Ver formatear_posiciones_abiertas() para el significado de html=."""
     operaciones = bot.cargar_historial_operaciones()
     ventas = sorted(
         (o for o in operaciones
@@ -101,11 +123,12 @@ def formatear_operaciones_cerradas(desde, hasta):
         key=lambda o: o["fecha_hora"]
     )
 
-    lineas = [f"📉 OPERACIONES CERRADAS ({desde} a {hasta})"]
+    titulo_plano = f"📉 OPERACIONES CERRADAS ({desde} a {hasta})"
+    titulo_html = f"📉 <b>OPERACIONES CERRADAS</b> ({desde} a {hasta})"
     if not ventas:
-        lineas.append("(ninguna)")
-        return "\n".join(lineas)
+        return (titulo_html if html else titulo_plano) + "\n(ninguna)"
 
+    filas = []
     ganancia_total_usd = 0.0
     for o in ventas:
         cantidad = o["cantidad"]
@@ -119,13 +142,27 @@ def formatear_operaciones_cerradas(desde, hasta):
         else:
             ganancia_usd = ganancia_eur = None
         ganancia_total_usd += ganancia_usd or 0.0
+        filas.append((o["fecha_hora"], o["ticker"], cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct))
 
-        fecha_str = o["fecha_hora"][:16].replace("T", " ")
+    if html:
+        lineas_tabla = [f"  {'Fecha':<12}{'Ticker':<7}{'Cant.':>7}{'Gan. USD':>10}"]
+        for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct in filas:
+            fecha_corta = fecha_hora[5:16].replace("T", " ")  # MM-DD HH:MM (11 caracteres)
+            emoji = _emoji_pl(ganancia_usd) if ganancia_usd is not None else "⚪"
+            ganancia_str = f"{ganancia_usd:>+10.2f}" if ganancia_usd is not None else f"{'N/D':>10}"
+            lineas_tabla.append(f"{emoji} {fecha_corta:<12}{ticker:<7}{cantidad:>7.2f}{ganancia_str}")
+        tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
+        resumen = (f"<b>TOTAL</b> ganancia/perdida realizada: {ganancia_total_usd:+.2f} USD "
+                  f"({ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD:+.2f} EUR)")
+        return f"{titulo_html}\n{tabla}\n{resumen}"
+
+    lineas = [titulo_plano]
+    for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct in filas:
+        fecha_str = fecha_hora[:16].replace("T", " ")
         ganancia_str = f", ganancia {ganancia_usd:+.2f} USD / {ganancia_eur:+.2f} EUR" if ganancia_usd is not None else ""
         beneficio_pct_str = f" ({beneficio_pct:+.2f}%)" if beneficio_pct is not None else ""
-        lineas.append(f"{fecha_str} {o['ticker']}: {cantidad:g} acciones a {precio:.4f} USD"
+        lineas.append(f"{fecha_str} {ticker}: {cantidad:g} acciones a {precio:.4f} USD"
                       f"{ganancia_str}{beneficio_pct_str}")
-
     lineas.append(f"TOTAL ganancia/perdida realizada: {ganancia_total_usd:+.2f} USD "
                   f"({ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD:+.2f} EUR)")
     return "\n".join(lineas)

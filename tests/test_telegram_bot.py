@@ -28,8 +28,8 @@ def check(nombre, condicion, detalle=""):
 
 
 # --- Dobles de prueba ---
-tb.cartera.formatear_posiciones_abiertas = lambda: "POSICIONES_FALSAS"
-tb.cartera.formatear_operaciones_cerradas = lambda d, h: f"CERRADAS de {d} a {h}"
+tb.cartera.formatear_posiciones_abiertas = lambda html=False: "POSICIONES_FALSAS"
+tb.cartera.formatear_operaciones_cerradas = lambda d, h, html=False: f"CERRADAS de {d} a {h}"
 
 llamadas_subprocess = []
 
@@ -51,7 +51,8 @@ tb.subprocess.run = _run_falso_ok
 check("/estado -> activo", tb.procesar_comando("/estado") == "🟢 Estado del bot: active")
 check("/cartera -> reutiliza cartera_alpaca.formatear_posiciones_abiertas",
       tb.procesar_comando("/cartera") == "POSICIONES_FALSAS")
-check("/log -> reutiliza journalctl", tb.procesar_comando("/log") == "linea 1\nlinea 2")
+check("/log -> reutiliza journalctl (envuelto en <pre> para Telegram)",
+      "linea 1\nlinea 2" in tb.procesar_comando("/log") and "<pre>" in tb.procesar_comando("/log"))
 check("/ayuda -> lista de comandos", "/estado" in tb.procesar_comando("/ayuda"))
 check("comando desconocido -> mensaje de error amigable, no excepcion",
       "No entiendo" in tb.procesar_comando("/algo_que_no_existe"))
@@ -96,7 +97,7 @@ finally:
 
 
 # --- 5. Comando que lanza una excepcion inesperada no rompe el bucle principal ---
-def _formatear_que_falla():
+def _formatear_que_falla(html=False):
     raise RuntimeError("fallo simulado en cartera")
 
 
