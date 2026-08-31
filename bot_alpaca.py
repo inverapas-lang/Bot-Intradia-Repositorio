@@ -441,7 +441,19 @@ def cancelar_ordenes_abiertas(ticker):
     for orden in ordenes_abiertas:
         try:
             _trading_client.cancel_order_by_id(orden.id)
-            log(f"{ticker} - orden abierta anterior ({orden.id}) cancelada antes de mandar una nueva.")
+            # Alpaca procesa la cancelacion de forma ASINCRONA (la orden pasa
+            # primero por "pending_cancel"): si se manda la orden nueva justo
+            # despues sin esperar, la cantidad puede seguir figurando como
+            # retenida (held_for_orders) por la orden vieja todavia no
+            # liberada del todo, y se repite el mismo error "insufficient
+            # qty available" aunque el codigo SI intente cancelarla primero
+            # (bug real visto en produccion: recurrio varios dias despues de
+            # añadir la cancelacion, por esta condicion de carrera). Se
+            # espera aqui a que la cancelacion llegue a un estado final
+            # antes de continuar.
+            estado_cancelacion = esperar_estado_final_orden(orden.id)
+            log(f"{ticker} - orden abierta anterior ({orden.id}) cancelada antes de mandar una nueva "
+                f"(estado final: {estado_cancelacion}).")
         except Exception as e:
             log(f"{ticker} - no se pudo cancelar la orden abierta {orden.id}: {type(e).__name__}: {e}")
 

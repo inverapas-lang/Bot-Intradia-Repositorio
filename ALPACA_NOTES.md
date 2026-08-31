@@ -194,6 +194,19 @@ se llama justo antes de cada `submit_order` (compra y venta): consulta las
 cancela (`cancel_order_by_id`) antes de mandar la nueva, para que la
 cantidad retenida vuelva a estar disponible.
 
+**Mismo bug, segunda vuelta (31 agosto 2026)**: el error
+`"insufficient qty available"` volvió a aparecer para varios tickers
+(AMZN, QCOM, V, WFC) **con el arreglo anterior ya desplegado**. Causa:
+`cancel_order_by_id()` solo ENVÍA la cancelación, pero Alpaca la procesa
+de forma asíncrona (la orden pasa primero por `pending_cancel` antes de
+llegar a `canceled`) — el código cancelaba y, sin esperar a que la
+cancelación se completara de verdad, mandaba la orden nueva justo
+después, así que la cantidad todavía podía seguir figurando como
+retenida por la orden vieja (condición de carrera). → `cancelar_ordenes_abiertas()`
+ahora llama a `esperar_estado_final_orden(orden.id)` después de cancelar
+cada orden abierta, para no continuar hasta que la cancelación llegue a
+un estado final de verdad.
+
 ### Resumen de cierre
 
 Versión simplificada respecto al de IBKR: solo posiciones abiertas (precio
