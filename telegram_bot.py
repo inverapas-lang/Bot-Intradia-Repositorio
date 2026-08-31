@@ -102,13 +102,24 @@ def consultar_estado_servicio():
 LIMITE_CARACTERES_LOG_TELEGRAM = 3500  # margen bajo el limite de 4096 de un mensaje de Telegram
 
 
-def obtener_ultimas_lineas_log(n=15):
+def _es_linea_separadora(linea):
+    """Lineas puramente decorativas que el propio bot imprime (p.ej. '====...'
+    o '##### VENTAS #####') no aportan nada en un movil y solo quitan sitio."""
+    return not linea.strip() or set(linea.strip()) <= {"=", "#", "-"}
+
+
+def obtener_ultimas_lineas_log(n=40):
     try:
+        # -o cat quita el prefijo propio de journalctl (fecha del sistema,
+        # nombre de host, unidad[PID]:) que duplica la marca de tiempo que ya
+        # pone el propio bot en cada linea -mucho ruido repetido en la
+        # pantalla pequeña de un movil-, dejando solo lo que el bot imprimio.
         resultado = subprocess.run(
-            ["journalctl", "-u", NOMBRE_SERVICIO_BOT, "-n", str(n), "--no-pager"],
+            ["journalctl", "-u", NOMBRE_SERVICIO_BOT, "-n", str(n), "--no-pager", "-o", "cat"],
             capture_output=True, text=True, timeout=15
         )
-        texto = resultado.stdout.strip() or "(sin lineas de log)"
+        lineas = [l for l in resultado.stdout.splitlines() if not _es_linea_separadora(l)]
+        texto = "\n".join(lineas) or "(sin lineas de log)"
     except Exception as e:
         return f"No se pudo leer el log: {type(e).__name__}: {e}"
     if len(texto) > LIMITE_CARACTERES_LOG_TELEGRAM:

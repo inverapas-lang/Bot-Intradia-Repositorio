@@ -53,6 +53,36 @@ check("/cartera -> reutiliza cartera_alpaca.formatear_posiciones_abiertas",
       tb.procesar_comando("/cartera") == "POSICIONES_FALSAS")
 check("/log -> reutiliza journalctl (envuelto en <pre> para Telegram)",
       "linea 1\nlinea 2" in tb.procesar_comando("/log") and "<pre>" in tb.procesar_comando("/log"))
+check("/log -> usa 'journalctl -o cat' (sin prefijo de fecha/host/PID duplicado)",
+      any(cmd == ["journalctl", "-u", "bot-alpaca", "-n", "40", "--no-pager", "-o", "cat"]
+          for cmd in llamadas_subprocess if cmd and cmd[0] == "journalctl"),
+      f"llamadas={[c for c in llamadas_subprocess if c and c[0] == 'journalctl']}")
+
+# --- 1b. /log quita las lineas puramente decorativas del propio bot ---
+
+
+def _run_falso_log_con_separadores(cmd, **kwargs):
+    if cmd[0] == "journalctl":
+        return types.SimpleNamespace(
+            stdout="============================================================\n"
+                   "[2026-08-31 12:47:22] Iniciando nuevo ciclo de revision.\n"
+                   "\n"
+                   "########## VENTAS ##########\n"
+                   "[2026-08-31 12:47:23] VENTAS: AMD - beneficio -2.42%, por debajo del umbral -> se mantiene.",
+            returncode=0)
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+
+run_original_log = tb.subprocess.run
+tb.subprocess.run = _run_falso_log_con_separadores
+try:
+    resultado_log = tb.procesar_comando("/log")
+    check("/log: quita las lineas separadoras puramente decorativas ('===...')",
+          "====" not in resultado_log, f"resultado={resultado_log!r}")
+    check("/log: SI conserva las cabeceras de seccion ('### VENTAS ###') y el contenido real",
+          "VENTAS" in resultado_log and "VENTAS: AMD" in resultado_log and "Iniciando nuevo ciclo" in resultado_log)
+finally:
+    tb.subprocess.run = run_original_log
 check("/ayuda -> lista de comandos", "/estado" in tb.procesar_comando("/ayuda"))
 check("comando desconocido -> mensaje de error amigable, no excepcion",
       "No entiendo" in tb.procesar_comando("/algo_que_no_existe"))
