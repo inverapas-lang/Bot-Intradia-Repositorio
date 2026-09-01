@@ -82,6 +82,18 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_TIMEOUT_SEGUNDOS = 10
 
 
+def formato_es(numero, decimales=2, signo=False):
+    """Formatea un numero al estilo español (punto para miles, coma para
+    decimales: 1234.5 -> '1.234,50'), para los mensajes de Telegram y la
+    consulta de cartera -pensados para un usuario en España, no en el
+    formato anglosajon por defecto de Python (1,234.50)."""
+    negativo = numero < 0
+    texto = f"{abs(numero):,.{decimales}f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    if negativo:
+        return f"-{texto}"
+    return f"+{texto}" if signo else texto
+
+
 def notificar_telegram(mensaje):
     """Envia un mensaje a Telegram (compra/venta ejecutada, resumen diario).
     No lanza excepcion nunca hacia el llamador: un fallo de red o de
@@ -618,8 +630,8 @@ def revisar_ventas():
                     cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_limite)
                     registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
-                    notificar_telegram(f"🔴 VENTA FORZADA <b>{ticker}</b>: {cantidad_real:g} acciones a "
-                                        f"{precio_real:.2f} USD (beneficio {beneficio_pct:.2f}%)")
+                    notificar_telegram(f"🔴 VENTA FORZADA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
+                                        f"{formato_es(precio_real)} USD (beneficio {formato_es(beneficio_pct, signo=True)}%)")
                 continue
 
             if beneficio_pct < UMBRAL_BENEFICIO_PCT:
@@ -656,8 +668,8 @@ def revisar_ventas():
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_actual)
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct)
-                notificar_telegram(f"🔴 VENTA <b>{ticker}</b>: {cantidad_real:g} acciones a "
-                                    f"{precio_real:.2f} USD (beneficio {beneficio_pct:.2f}%)")
+                notificar_telegram(f"🔴 VENTA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
+                                    f"{formato_es(precio_real)} USD (beneficio {formato_es(beneficio_pct, signo=True)}%)")
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
 
@@ -762,7 +774,7 @@ def revisar_compras():
             if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
-                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {cantidad_real:g} acciones a {precio_real:.2f} USD")
+                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a {formato_es(precio_real)} USD")
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {type(e).__name__}: {e}. Se omite.")
             errores += 1
@@ -829,21 +841,21 @@ def generar_resumen():
     if not filas_abiertas:
         bloques_html.append("(ninguna)")
     else:
-        tabla = [f"  {'Ticker':<7}{'P/L %':>9}{'P/L USD':>10}"]
+        tabla = [f"  {'Ticker':<7}{'P/L %':>10}{'P/L USD':>12}"]
         for symbol, cantidad, valor, pl, pl_pct in filas_abiertas:
-            tabla.append(f"{_emoji_pl(pl)} {symbol:<6}{pl_pct:>+8.2f}%{pl:>+10.2f}")
+            tabla.append(f"{_emoji_pl(pl)} {symbol:<6}{formato_es(pl_pct, signo=True):>9}%{formato_es(pl, signo=True):>12}")
         bloques_html.append("<pre>" + "\n".join(tabla) + "</pre>")
     bloques_html.append("<b>Operaciones cerradas hoy:</b>")
     if not filas_cerradas:
         bloques_html.append("(ninguna)")
     else:
-        tabla = [f"  {'Ticker':<7}{'Cant.':>7}{'Gan. USD':>10}"]
+        tabla = [f"  {'Ticker':<7}{'Cant.':>8}{'Gan. USD':>12}"]
         for ticker, cantidad, precio, ganancia, beneficio_pct in filas_cerradas:
             emoji = _emoji_pl(ganancia) if ganancia is not None else "⚪"
-            ganancia_str = f"{ganancia:>+10.2f}" if ganancia is not None else f"{'N/D':>10}"
-            tabla.append(f"{emoji} {ticker:<6}{cantidad:>7.2f}{ganancia_str}")
+            ganancia_str = f"{formato_es(ganancia, signo=True):>12}" if ganancia is not None else f"{'N/D':>12}"
+            tabla.append(f"{emoji} {ticker:<6}{formato_es(cantidad, 2):>8}{ganancia_str}")
         bloques_html.append("<pre>" + "\n".join(tabla) + "</pre>")
-        bloques_html.append(f"<b>TOTAL</b> ganancia/perdida realizada hoy: {ganancia_total:+.2f} USD")
+        bloques_html.append(f"<b>TOTAL</b> ganancia/perdida realizada hoy: {formato_es(ganancia_total, signo=True)} USD")
 
     notificar_telegram("\n".join(bloques_html))
 
