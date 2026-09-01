@@ -30,6 +30,7 @@ def check(nombre, condicion, detalle=""):
 # --- Dobles de prueba ---
 tb.cartera.formatear_posiciones_abiertas = lambda html=False: "POSICIONES_FALSAS"
 tb.cartera.formatear_operaciones_cerradas = lambda d, h, html=False: f"CERRADAS de {d} a {h}"
+tb.cartera.formatear_actividad = lambda d, h, html=False: f"ACTIVIDAD de {d} a {h}"
 
 llamadas_subprocess = []
 
@@ -105,6 +106,9 @@ resultado_semana = tb.procesar_comando("/semana")
 check("/hoy y /ayer piden rangos DISTINTOS", resultado_hoy != resultado_ayer,
       f"hoy={resultado_hoy!r} ayer={resultado_ayer!r}")
 check("/semana no lanza excepcion y devuelve texto", isinstance(resultado_semana, str) and resultado_semana)
+check("/hoy combina el resumen de ACTIVIDAD con el detalle de CERRADAS",
+      resultado_hoy.startswith("ACTIVIDAD de") and "CERRADAS de" in resultado_hoy,
+      f"resultado_hoy={resultado_hoy!r}")
 
 # --- 3. Arrancar/parar: exito ---
 tb.subprocess.run = _run_falso_ok

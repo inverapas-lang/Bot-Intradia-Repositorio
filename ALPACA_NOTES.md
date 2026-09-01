@@ -312,12 +312,21 @@ arrancar/parar el bot y consultar la cartera sin tener que entrar por SSH.
 /arrancar  - arranca el bot (systemctl start bot-alpaca)
 /parar     - para el bot (systemctl stop bot-alpaca)
 /cartera   - posiciones abiertas (igual que cartera_alpaca.py)
-/hoy       - operaciones cerradas hoy
-/ayer      - operaciones cerradas ayer
-/semana    - operaciones cerradas esta semana laboral
-/log       - ultimas 25 lineas del log del bot (journalctl)
+/hoy       - actividad de hoy (num. compras/ventas y acciones de cada
+             lado) + detalle de las ventas cerradas
+/ayer      - lo mismo, del dia anterior
+/semana    - lo mismo, de la semana laboral actual (lunes a hoy)
+/log       - actividad reciente (compras, ventas, avisos, errores), en
+             lista y sin el ruido rutinario de cada ciclo (journalctl)
 /ayuda     - lista de comandos
 ```
+
+`/hoy`, `/ayer` y `/semana` combinan dos piezas: primero
+`cartera_alpaca.formatear_actividad()` (cuenta las operaciones —tanto
+COMPRA como VENTA— del historial en ese rango: numero de operaciones y
+acciones totales de cada lado), y despues
+`cartera_alpaca.formatear_operaciones_cerradas()` (el detalle linea a
+linea de las ventas, con su beneficio/perdida realizado, que ya existía).
 
 Solo responde al chat configurado en `TELEGRAM_CHAT_ID` — cualquier otro
 mensaje de cualquier otro chat se ignora y se registra en el log de

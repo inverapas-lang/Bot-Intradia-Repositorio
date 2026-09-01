@@ -177,6 +177,26 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
     return "\n".join(lineas)
 
 
+def formatear_actividad(desde, hasta, html=False):
+    """Cuenta cuantas COMPRAS y VENTAS se han ejecutado en el rango de
+    fechas (numero de operaciones y acciones totales de cada lado) — un
+    resumen rapido de "cuanta actividad ha habido", antes del detalle
+    linea a linea de las ventas cerradas que ya da
+    formatear_operaciones_cerradas()."""
+    operaciones = bot.cargar_historial_operaciones()
+    en_rango = [o for o in operaciones if desde <= datetime.fromisoformat(o["fecha_hora"]).date() <= hasta]
+    compras = [o for o in en_rango if o["lado"] == "COMPRA"]
+    ventas = [o for o in en_rango if o["lado"] == "VENTA"]
+
+    acciones_compradas = sum(o["cantidad"] for o in compras)
+    acciones_vendidas = sum(o["cantidad"] for o in ventas)
+
+    titulo = f"📊 <b>ACTIVIDAD</b> ({desde} a {hasta})" if html else f"📊 ACTIVIDAD ({desde} a {hasta})"
+    return (f"{titulo}\n"
+            f"🟢 Compras: {len(compras)} operaciones, {bot.formato_es(acciones_compradas, 2)} acciones\n"
+            f"🔴 Ventas: {len(ventas)} operaciones, {bot.formato_es(acciones_vendidas, 2)} acciones")
+
+
 def main():
     args = parsear_argumentos()
     desde, hasta = calcular_rango(args)
@@ -184,6 +204,8 @@ def main():
     modo = "PAPER (simulado)" if bot.ALPACA_PAPER else "REAL"
     print(f"Cartera Alpaca [{modo}] - operaciones cerradas: {desde} a {hasta}\n")
     print(formatear_posiciones_abiertas())
+    print()
+    print(formatear_actividad(desde, hasta))
     print()
     print(formatear_operaciones_cerradas(desde, hasta))
 

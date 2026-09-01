@@ -13,9 +13,10 @@ Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
     /arrancar    - arranca el servicio (systemctl start bot-alpaca)
     /parar       - para el servicio (systemctl stop bot-alpaca)
     /cartera     - posiciones abiertas (igual que cartera_alpaca.py)
-    /hoy         - operaciones cerradas hoy
-    /ayer        - operaciones cerradas ayer
-    /semana      - operaciones cerradas esta semana laboral (lunes a hoy)
+    /hoy         - resumen de actividad de hoy (num. compras/ventas y
+                   acciones totales de cada lado) + detalle de las ventas cerradas
+    /ayer        - lo mismo, del dia anterior
+    /semana      - lo mismo, de la semana laboral actual (lunes a hoy)
     /log         - actividad reciente (compras, ventas, avisos y errores; se
                    filtran los mensajes rutinarios de cada ciclo -"se
                    mantiene", "se deja correr", etc.- para que sea una lista
@@ -183,7 +184,7 @@ AYUDA = (
     "/arrancar - arranca el bot\n"
     "/parar - para el bot\n"
     "/cartera - posiciones abiertas\n"
-    "/hoy - operaciones cerradas hoy\n"
+    "/hoy - actividad y operaciones cerradas hoy\n"
     "/ayer - operaciones cerradas ayer\n"
     "/semana - operaciones cerradas esta semana\n"
     "/log - actividad reciente (compras, ventas, avisos)\n"
@@ -215,7 +216,8 @@ def procesar_comando(texto):
             "ayer": comando == "ayer", "semana": comando == "semana", "desde": None, "hasta": None,
         })()
         desde, hasta = cartera.calcular_rango(args_falsos)
-        return cartera.formatear_operaciones_cerradas(desde, hasta, html=True)
+        return (cartera.formatear_actividad(desde, hasta, html=True) + "\n\n"
+                + cartera.formatear_operaciones_cerradas(desde, hasta, html=True))
 
     if comando == "log":
         return obtener_ultimas_lineas_log()
