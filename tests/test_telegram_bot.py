@@ -51,36 +51,46 @@ tb.subprocess.run = _run_falso_ok
 check("/estado -> activo", tb.procesar_comando("/estado") == "🟢 Estado del bot: active")
 check("/cartera -> reutiliza cartera_alpaca.formatear_posiciones_abiertas",
       tb.procesar_comando("/cartera") == "POSICIONES_FALSAS")
-check("/log -> reutiliza journalctl (envuelto en <pre> para Telegram)",
-      "linea 1\nlinea 2" in tb.procesar_comando("/log") and "<pre>" in tb.procesar_comando("/log"))
+check("/log -> reutiliza journalctl, en forma de lista con viñetas",
+      "linea 1\nlinea 2".replace("\n", "") not in tb.procesar_comando("/log").replace("\n", "")
+      and "• linea 1" in tb.procesar_comando("/log") and "• linea 2" in tb.procesar_comando("/log"))
 check("/log -> usa 'journalctl -o cat' (sin prefijo de fecha/host/PID duplicado)",
-      any(cmd == ["journalctl", "-u", "bot-alpaca", "-n", "40", "--no-pager", "-o", "cat"]
+      any(cmd == ["journalctl", "-u", "bot-alpaca", "-n", "150", "--no-pager", "-o", "cat"]
           for cmd in llamadas_subprocess if cmd and cmd[0] == "journalctl"),
       f"llamadas={[c for c in llamadas_subprocess if c and c[0] == 'journalctl']}")
 
-# --- 1b. /log quita las lineas puramente decorativas del propio bot ---
+# --- 1b. /log quita separadores y ruido rutinario, y convierte numeros a formato español ---
 
 
-def _run_falso_log_con_separadores(cmd, **kwargs):
+def _run_falso_log_con_ruido(cmd, **kwargs):
     if cmd[0] == "journalctl":
         return types.SimpleNamespace(
             stdout="============================================================\n"
                    "[2026-08-31 12:47:22] Iniciando nuevo ciclo de revision.\n"
                    "\n"
                    "########## VENTAS ##########\n"
-                   "[2026-08-31 12:47:23] VENTAS: AMD - beneficio -2.42%, por debajo del umbral -> se mantiene.",
+                   "[2026-08-31 12:47:23] VENTAS: AMD - beneficio -2.42%, por debajo del umbral -> se mantiene.\n"
+                   "[2026-08-31 12:47:24] VENTAS: META - beneficio 1.16%, MACD 5min BAJISTA -> VENDIENDO "
+                   "(orden limitada al precio exacto).\n"
+                   "[2026-08-31 12:47:24] VENTAS: META - orden colocada, estado: filled",
             returncode=0)
     return types.SimpleNamespace(returncode=1, stdout="", stderr="")
 
 
 run_original_log = tb.subprocess.run
-tb.subprocess.run = _run_falso_log_con_separadores
+tb.subprocess.run = _run_falso_log_con_ruido
 try:
     resultado_log = tb.procesar_comando("/log")
     check("/log: quita las lineas separadoras puramente decorativas ('===...')",
           "====" not in resultado_log, f"resultado={resultado_log!r}")
-    check("/log: SI conserva las cabeceras de seccion ('### VENTAS ###') y el contenido real",
-          "VENTAS" in resultado_log and "VENTAS: AMD" in resultado_log and "Iniciando nuevo ciclo" in resultado_log)
+    check("/log: quita el ruido rutinario ('se mantiene', 'Iniciando nuevo ciclo', cabecera de seccion)",
+          "se mantiene" not in resultado_log and "Iniciando nuevo ciclo" not in resultado_log
+          and "##########" not in resultado_log,
+          f"resultado={resultado_log!r}")
+    check("/log: SI conserva las lineas de accion real (VENDIENDO, orden colocada)",
+          "VENDIENDO" in resultado_log and "orden colocada" in resultado_log)
+    check("/log: convierte el punto decimal a coma (formato español)",
+          "1,16%" in resultado_log and "1.16%" not in resultado_log, f"resultado={resultado_log!r}")
 finally:
     tb.subprocess.run = run_original_log
 check("/ayuda -> lista de comandos", "/estado" in tb.procesar_comando("/ayuda"))

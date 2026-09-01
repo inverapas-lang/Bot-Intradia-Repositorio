@@ -16,7 +16,10 @@ Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
     /hoy         - operaciones cerradas hoy
     /ayer        - operaciones cerradas ayer
     /semana      - operaciones cerradas esta semana laboral (lunes a hoy)
-    /log         - ultimas lineas del log del bot (journalctl)
+    /log         - actividad reciente (compras, ventas, avisos y errores; se
+                   filtran los mensajes rutinarios de cada ciclo -"se
+                   mantiene", "se deja correr", etc.- para que sea una lista
+                   corta y legible, con los numeros en formato español)
     /ayuda       - lista de comandos
 
 Variables de entorno necesarias (ver ALPACA_NOTES.md):
@@ -31,6 +34,7 @@ con un error de permisos, pero el resto de comandos (solo lectura) funcionan
 igual.
 """
 import os
+import re
 import subprocess
 import sys
 import time
@@ -103,28 +107,74 @@ LIMITE_CARACTERES_LOG_TELEGRAM = 3500  # margen bajo el limite de 4096 de un men
 
 
 def _es_linea_separadora(linea):
-    """Lineas puramente decorativas que el propio bot imprime (p.ej. '====...'
-    o '##### VENTAS #####') no aportan nada en un movil y solo quitan sitio."""
-    return not linea.strip() or set(linea.strip()) <= {"=", "#", "-"}
+    """Lineas puramente decorativas que el propio bot imprime: '====...', o
+    cabeceras de seccion como '##### VENTAS #####' -esto ultimo es
+    redundante en la lista filtrada, ya que cada linea de accion real
+    empieza igualmente por 'VENTAS: TICKER - ...' o 'COMPRAS: TICKER - ...'-."""
+    linea = linea.strip()
+    return not linea or set(linea) <= {"=", "#", "-"} or (linea.startswith("##") and linea.endswith("##"))
 
 
-def obtener_ultimas_lineas_log(n=40):
+# Fragmentos de lineas RUTINARIAS (se repiten para cada uno de los ~30
+# tickers en CADA ciclo, cada ~130s) que no aportan nada al ver "que ha
+# hecho el bot" desde el movil -solo las compras/ventas reales, avisos y
+# errores son interesantes-. Lista curada a mano, no exhaustiva: si el
+# texto de estos mensajes cambia en bot_alpaca.py, puede hacer falta
+# actualizar esta lista tambien.
+FRAGMENTOS_RUIDO_LOG = [
+    "Iniciando nuevo ciclo de revision.",
+    "analizando 30 valores en lote",
+    "por debajo del umbral -> se mantiene",
+    "MACD 5min ALCISTA -> se deja correr",
+    "datos insuficientes para MACD",
+    "no se pudo obtener precio",
+    "ya tiene",
+    "dentro de la ventana de no-compra",
+    "no hay posiciones abiertas",
+    "fuera de horario operativo",
+    "no se analiza ningun valor",
+    "Ciclo completado.",
+    "señales de compra, 0 errores.",
+]
+
+
+def _es_linea_ruido(linea):
+    return any(fragmento in linea for fragmento in FRAGMENTOS_RUIDO_LOG)
+
+
+_PATRON_DECIMAL = re.compile(r"(?<!\d)(\d+)\.(\d+)")
+
+
+def _numeros_a_formato_es(texto):
+    """Cambia el punto decimal por coma en una linea de log ya escrita (estas
+    lineas nunca llevan separador de miles, asi que basta con este cambio;
+    ver bot.formato_es() para el formateo completo usado en /cartera, /hoy,
+    etc., generado desde los numeros crudos en vez de sobre texto ya
+    formateado)."""
+    return _PATRON_DECIMAL.sub(r"\1,\2", texto)
+
+
+def obtener_ultimas_lineas_log(n=150):
     try:
         # -o cat quita el prefijo propio de journalctl (fecha del sistema,
         # nombre de host, unidad[PID]:) que duplica la marca de tiempo que ya
-        # pone el propio bot en cada linea -mucho ruido repetido en la
-        # pantalla pequeña de un movil-, dejando solo lo que el bot imprimio.
+        # pone el propio bot en cada linea.
         resultado = subprocess.run(
             ["journalctl", "-u", NOMBRE_SERVICIO_BOT, "-n", str(n), "--no-pager", "-o", "cat"],
             capture_output=True, text=True, timeout=15
         )
-        lineas = [l for l in resultado.stdout.splitlines() if not _es_linea_separadora(l)]
-        texto = "\n".join(lineas) or "(sin lineas de log)"
+        lineas = [l for l in resultado.stdout.splitlines()
+                  if not _es_linea_separadora(l) and not _es_linea_ruido(l)]
     except Exception as e:
         return f"No se pudo leer el log: {type(e).__name__}: {e}"
-    if len(texto) > LIMITE_CARACTERES_LOG_TELEGRAM:
-        texto = "(...)\n" + texto[-LIMITE_CARACTERES_LOG_TELEGRAM:]
-    return "📄 <b>ULTIMAS LINEAS DEL LOG</b>\n<pre>" + escapar_html(texto) + "</pre>"
+
+    if not lineas:
+        return "📄 <b>ACTIVIDAD RECIENTE</b>\n(sin compras, ventas ni avisos en las últimas líneas del log)"
+
+    lista = "\n".join(f"• {escapar_html(_numeros_a_formato_es(l))}" for l in lineas)
+    if len(lista) > LIMITE_CARACTERES_LOG_TELEGRAM:
+        lista = "(...)\n" + lista[-LIMITE_CARACTERES_LOG_TELEGRAM:]
+    return "📄 <b>ACTIVIDAD RECIENTE</b>\n" + lista
 
 
 AYUDA = (
@@ -136,7 +186,7 @@ AYUDA = (
     "/hoy - operaciones cerradas hoy\n"
     "/ayer - operaciones cerradas ayer\n"
     "/semana - operaciones cerradas esta semana\n"
-    "/log - ultimas lineas del log\n"
+    "/log - actividad reciente (compras, ventas, avisos)\n"
     "/ayuda - esta lista"
 )
 
