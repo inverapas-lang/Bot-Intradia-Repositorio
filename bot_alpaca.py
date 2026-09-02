@@ -156,7 +156,9 @@ MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2
 
 INTERVALO_SEGUNDOS = 130  # 2 min 10 s (ajustado tras pruebas en paper, ago 2026)
 LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera por valor
-IMPORTE_EUROS = 1000         # presupuesto maximo por operacion (convertido a USD)
+IMPORTE_EUROS = 45           # presupuesto maximo por operacion (convertido a USD) - ajustado
+                              # para capital real de ~300 EUR (antes 1000, pensado para el
+                              # saldo simulado de $100.000 de la cuenta paper)
 TIPO_CAMBIO_EUR_USD = 1.14   # actualiza a mano si quieres mas precision
 
 DECIMALES_FRACCION = 4
