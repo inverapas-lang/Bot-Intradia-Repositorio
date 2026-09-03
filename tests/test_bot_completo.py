@@ -1115,6 +1115,59 @@ check("resumen cierre: el total invertido de posiciones abiertas sigue mostrando
 
 
 # ---------------------------------------------------------------------------
+# 15b. generar_resumen_cierre_mercado: el resumen diario por Telegram SOLO
+#      se manda para CRYPTO (US/HK/KR ya se consultan a demanda desde
+#      telegram_bot_ibkr.py con /cartera, /hoy, etc.)
+# ---------------------------------------------------------------------------
+class _ContratoCriptoParaResumen:
+    def __init__(self, symbol, currency="USD"):
+        self.symbol = symbol
+        self.currency = currency
+        self.secType = "CRYPTO"
+
+
+class _EjecucionFalsaCripto:
+    def __init__(self, side, time, shares, avgPrice, symbol):
+        self.contract = _ContratoCriptoParaResumen(symbol)
+        self.execution = types.SimpleNamespace(side=side, time=time, shares=shares, avgPrice=avgPrice)
+
+
+mensajes_telegram_resumen = []
+notificar_telegram_original = bot.notificar_telegram
+bot.notificar_telegram = lambda mensaje: mensajes_telegram_resumen.append(mensaje)
+
+try:
+    # Mercado US: mismas ejecuciones de QCOM de antes, pero NO debe disparar
+    # ningun mensaje de Telegram.
+    with contextlib.redirect_stdout(io.StringIO()):
+        bot.generar_resumen_cierre_mercado(_IBFalsoResumen(ejecuciones_qcom), "US")
+    check("resumen cierre US: NO manda nada a Telegram",
+          len(mensajes_telegram_resumen) == 0, f"mensajes={mensajes_telegram_resumen}")
+
+    # Mercado CRYPTO: SI debe disparar un mensaje de Telegram con el resumen.
+    _venta_btc = _hoy_resumen.replace(hour=15, minute=0, second=0, microsecond=0)
+    _compra_btc = _hoy_resumen.replace(hour=13, minute=0, second=0, microsecond=0)
+    ejecuciones_btc = [
+        _EjecucionFalsaCripto("BOT", _compra_btc, 0.001, 50000.0, "BTC"),
+        _EjecucionFalsaCripto("SLD", _venta_btc, 0.001, 51000.0, "BTC"),
+    ]
+    with contextlib.redirect_stdout(io.StringIO()):
+        bot.generar_resumen_cierre_mercado(_IBFalsoResumen(ejecuciones_btc), "CRYPTO")
+    check("resumen cierre CRYPTO: SI manda un mensaje a Telegram",
+          len(mensajes_telegram_resumen) == 1, f"mensajes={mensajes_telegram_resumen}")
+    if mensajes_telegram_resumen:
+        mensaje_cripto = mensajes_telegram_resumen[0]
+        check("resumen cripto por Telegram: incluye el titulo del resumen diario",
+              "RESUMEN DIARIO CRYPTO" in mensaje_cripto, f"mensaje={mensaje_cripto!r}")
+        check("resumen cripto por Telegram: incluye el ticker BTC",
+              "BTC" in mensaje_cripto, f"mensaje={mensaje_cripto!r}")
+        check("resumen cripto por Telegram: incluye la ganancia total del dia",
+              "Ganancia total hoy" in mensaje_cripto, f"mensaje={mensaje_cripto!r}")
+finally:
+    bot.notificar_telegram = notificar_telegram_original
+
+
+# ---------------------------------------------------------------------------
 # 16. Pre/postmercado de US: en AMBOS tramos las ordenes ejecutadas deben
 #     ser LIMITADAS al precio exacto (con outsideRth), no a mercado. En
 #     premercado se compra Y se vende con normalidad; en postmercado SOLO
@@ -1291,6 +1344,25 @@ check("es_horario_operativo CRYPTO (Basic): lunes 10:00 ET -> abierto",
       con_reloj_fijo(lunes_cripto, bot.es_horario_operativo, "CRYPTO") is True)
 
 bot.CRYPTO_24_7 = crypto_24_7_original
+
+
+# --- 9a-bis. justo_hora_resumen_cripto: dispara en una ventana fija diaria
+#     (cripto no tiene cierre real, a diferencia de justo_cerro_mercado) ---
+justo_las_23_55 = datetime(2026, 8, 12, 23, 55, tzinfo=bot.ZONA_NY)
+check("justo_hora_resumen_cripto: justo a la hora fijada -> True",
+      con_reloj_fijo(justo_las_23_55, bot.justo_hora_resumen_cripto) is True)
+
+dos_horas_despues = datetime(2026, 8, 13, 1, 55, tzinfo=bot.ZONA_NY)
+check("justo_hora_resumen_cripto: 2h despues, dentro del margen de 4h -> True",
+      con_reloj_fijo(dos_horas_despues, bot.justo_hora_resumen_cripto) is True)
+
+cinco_horas_despues = datetime(2026, 8, 13, 4, 55, tzinfo=bot.ZONA_NY)
+check("justo_hora_resumen_cripto: 5h despues, fuera del margen de 4h -> False",
+      con_reloj_fijo(cinco_horas_despues, bot.justo_hora_resumen_cripto) is False)
+
+antes_de_hora = datetime(2026, 8, 12, 23, 0, tzinfo=bot.ZONA_NY)
+check("justo_hora_resumen_cripto: antes de la hora fijada -> False",
+      con_reloj_fijo(antes_de_hora, bot.justo_hora_resumen_cripto) is False)
 
 
 # --- 9b. crear_contrato: activo CRYPTO -> objeto Crypto, no Stock ---

@@ -493,11 +493,24 @@ calcular minutos-hasta-cierre) — las ventas de cripto van siempre por la lógi
 hueco a rellenar: no tiene sentido un concepto de "última hora antes del cierre" en un mercado
 continuo.
 
-**Hueco conocido, aceptado por ahora**: no hay un resumen de cierre automático para cripto
-(`generar_resumen_cierre_mercado` se sigue llamando solo para US/HK/KR en `main()`, disparado
-por `justo_cerro_mercado()`, que requiere una entrada en `CIERRE_POR_MERCADO` que cripto no
-tiene por no tener un cierre diario). Para consultar posiciones/operaciones de cripto, usar
-`cartera_ibkr.py` (ya corregido para distinguir cripto de US igual que el bot principal).
+**Resumen diario automático por Telegram (añadido sept. 2026, petición del usuario)**: cripto
+no tiene cierre diario real, así que `justo_cerro_mercado()` (basado en `CIERRE_POR_MERCADO`)
+nunca dispara para `"CRYPTO"`. Se añadió `justo_hora_resumen_cripto()`, que dispara en su lugar
+a una hora fija (`HORA_RESUMEN_DIARIO_CRYPTO = 23:55 ET`), con el mismo margen de 4h que
+`justo_cerro_mercado()` por si el bot estuvo desconectado justo a esa hora — con una salvedad:
+como la hora fijada está pegada a medianoche, el margen de 4h cae en el día SIGUIENTE, así que
+la función calcula la última ocurrencia PASADA de las 23:55 (la de hoy si ya pasó, si no la de
+ayer) en vez de asumir siempre la fecha de hoy (a diferencia de `justo_cerro_mercado()`, cuyos
+cierres son todos de tarde y no tienen este problema de "cruce de medianoche"). Cuando dispara,
+`generar_resumen_cierre_mercado(ib, "CRYPTO")` ahora también manda un mensaje HTML compacto por
+Telegram (posiciones abiertas + ventas de hoy + ganancia total) vía `notificar_telegram()` —
+esto es exclusivo de `"CRYPTO"`: para US/HK/KR el resumen se sigue viendo solo en el log, ya que
+esos mercados se pueden consultar a demanda desde el móvil con `/cartera`, `/hoy`, etc. de
+`telegram_bot_ibkr.py`.
+
+Para consultar posiciones/operaciones de cripto A DEMANDA (no solo el resumen diario), usar
+`cartera_ibkr.py` o `/cartera`, `/hoy`, `/ayer`, `/semana` de `telegram_bot_ibkr.py` (ya
+corregidos para distinguir cripto de US igual que el bot principal).
 
 **Bucle principal (`main()`)**: con `CRYPTO_24_7 = True`, `es_horario_operativo("CRYPTO")`
 siempre es `True`, así que `hay_mercado_abierto` en `main()` nunca cae a `False` — el bot deja

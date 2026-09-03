@@ -1886,6 +1886,29 @@ def justo_cerro_mercado(mercado):
     return 0 <= minutos_desde_cierre <= margen
 
 
+HORA_RESUMEN_DIARIO_CRYPTO = dt_time(23, 55)  # ET, igual que el resto de horarios del bot
+
+
+def justo_hora_resumen_cripto():
+    """Cripto no tiene un cierre de mercado real (24/7), asi que
+    justo_cerro_mercado() nunca da True para 'CRYPTO' (no esta en
+    CIERRE_POR_MERCADO). Se dispara en su lugar a una hora fija del dia, con
+    el mismo margen amplio de justo_cerro_mercado() por si el bot estuvo
+    desconectado justo a esa hora. A diferencia de justo_cerro_mercado()
+    (cuyos cierres son todos de tarde, lejos de medianoche), aqui la hora
+    fijada (23:55 ET) esta pegada a medianoche, asi que la ventana de margen
+    (+4h) cae en el dia SIGUIENTE: se calcula la ultima ocurrencia PASADA de
+    la hora fijada (la de hoy si ya paso, si no la de ayer) en vez de asumir
+    siempre la fecha de hoy."""
+    ahora = datetime.now(ZONA_NY)
+    candidato_hoy = ahora.replace(hour=HORA_RESUMEN_DIARIO_CRYPTO.hour, minute=HORA_RESUMEN_DIARIO_CRYPTO.minute,
+                                   second=0, microsecond=0)
+    ultima_ocurrencia = candidato_hoy if ahora >= candidato_hoy else candidato_hoy - timedelta(days=1)
+    minutos_desde_resumen = (ahora - ultima_ocurrencia).total_seconds() / 60
+    margen = 240  # 4 horas, igual que justo_cerro_mercado()
+    return 0 <= minutos_desde_resumen <= margen
+
+
 def valor_en_eur(valor, currency):
     """Convierte un valor a EUR, pasando por USD como paso intermedio."""
     return valor_en_usd(valor, currency) / TIPO_CAMBIO_EUR_USD
@@ -1947,6 +1970,11 @@ def generar_resumen_cierre_mercado(ib, mercado):
     total_valor_actual_eur_acumulado = 0.0
     total_invertido_usd_acumulado = 0.0
     total_valor_actual_usd_acumulado = 0.0
+    # Datos minimos de cada posicion/venta, recolectados aqui para poder
+    # mandar el resumen de CRYPTO tambien por Telegram al final de la
+    # funcion (ver mas abajo) sin repetir toda la logica de arriba.
+    resumen_posiciones_telegram = []
+    resumen_ventas_telegram = []
 
     for pos in posiciones:
         symbol = pos.contract.symbol
@@ -1989,7 +2017,9 @@ def generar_resumen_cierre_mercado(ib, mercado):
             total_valor_actual_eur_acumulado += total_invertido_eur  # fallback: asumimos sin cambio
             total_valor_actual_usd_acumulado += total_invertido_usd
             beneficio_str = "N/D"
+            beneficio_pct_pos = None
 
+        resumen_posiciones_telegram.append((symbol, pos.position, beneficio_pct_pos, total_invertido_eur))
         log(f"{symbol:<10}{abierta_desde_str:<20}{pos.position:>10.4f}{coste_medio_con_comision:>20.4f}"
             f"{total_invertido:>20.2f}{total_invertido_eur:>18.2f}{beneficio_str:>13}")
 
@@ -2061,6 +2091,7 @@ def generar_resumen_cierre_mercado(ib, mercado):
             # vez de mostrar un 0% enganoso.
             log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.4f}"
                 f"{'N/D':>14}{'N/D':>14}{'N/D':>13}{'N/D':>12}")
+            resumen_ventas_telegram.append((symbol, None, None))
             continue
 
         coste_medio_compra = total_comprado_valor / total_comprado_acciones
@@ -2083,8 +2114,10 @@ def generar_resumen_cierre_mercado(ib, mercado):
         ganancia = ganancia_bruta - comision_estimada
         beneficio_pct = (ganancia / total_invertido * 100) if total_invertido else 0.0
         total_ganancia_usd_acumulada += valor_en_usd(ganancia, ventas_hoy[0].contract.currency)
-        total_ganancia_eur_acumulada += valor_en_eur(ganancia, ventas_hoy[0].contract.currency)
+        ganancia_eur = valor_en_eur(ganancia, ventas_hoy[0].contract.currency)
+        total_ganancia_eur_acumulada += ganancia_eur
 
+        resumen_ventas_telegram.append((symbol, ganancia_eur, beneficio_pct))
         log(f"{symbol:<10}{abierta_desde_str:<18}{cerrada_a_las_str:<18}{cantidad_vendida:>10.4f}"
             f"{coste_medio_compra:>14.4f}{total_invertido:>14.2f}{beneficio_pct:>12.2f}%{ganancia:>12.2f}")
 
@@ -2096,6 +2129,46 @@ def generar_resumen_cierre_mercado(ib, mercado):
     log("=" * 60)
     log("(Beneficio % es aproximado: se calcula sobre el valor de la venta, "
         "no lote a lote, cuando ha habido varias compras/ventas parciales del mismo valor.)")
+
+    # Resumen diario tambien por Telegram, SOLO para CRYPTO (a peticion del
+    # usuario): US/HK/KR ya se pueden consultar en cualquier momento desde
+    # el movil con /cartera, /hoy, etc. de telegram_bot_ibkr.py, pero cripto
+    # no tenia ningun aviso automatico de fin de dia -a diferencia de
+    # US/HK/KR, cripto no tiene un cierre real, asi que este resumen se
+    # dispara a una hora fija (ver justo_hora_resumen_cripto()), no al
+    # cierre del mercado.
+    if mercado == "CRYPTO":
+        lineas = [f"🪙 <b>RESUMEN DIARIO CRYPTO</b> ({hoy})"]
+
+        lineas.append("\n<b>Posiciones abiertas:</b>")
+        if not resumen_posiciones_telegram:
+            lineas.append("(ninguna)")
+        else:
+            for symbol, cantidad, beneficio_pct_pos, invertido_eur in resumen_posiciones_telegram:
+                emoji = "⚪" if beneficio_pct_pos is None else ("🟢" if beneficio_pct_pos >= 0 else "🔴")
+                beneficio_txt = "N/D" if beneficio_pct_pos is None else f"{formato_es(beneficio_pct_pos, signo=True)}%"
+                lineas.append(f"{emoji} {symbol}: {formato_es(cantidad, 6)} "
+                              f"(invertido {formato_es(invertido_eur)} EUR, {beneficio_txt})")
+            if total_invertido_eur_acumulado:
+                beneficio_pct_total = ((total_valor_actual_eur_acumulado - total_invertido_eur_acumulado)
+                                        / total_invertido_eur_acumulado * 100)
+                lineas.append(f"<b>Total invertido</b>: {formato_es(total_invertido_eur_acumulado)} EUR "
+                              f"({formato_es(beneficio_pct_total, signo=True)}%)")
+
+        lineas.append("\n<b>Ventas de hoy:</b>")
+        if not resumen_ventas_telegram:
+            lineas.append("(ninguna)")
+        else:
+            for symbol, ganancia_eur, beneficio_pct in resumen_ventas_telegram:
+                if ganancia_eur is None:
+                    lineas.append(f"⚪ {symbol}: N/D")
+                else:
+                    emoji = "🟢" if ganancia_eur >= 0 else "🔴"
+                    lineas.append(f"{emoji} {symbol}: {formato_es(ganancia_eur, signo=True)} EUR "
+                                  f"({formato_es(beneficio_pct, signo=True)}%)")
+            lineas.append(f"<b>Ganancia total hoy</b>: {formato_es(total_ganancia_eur_acumulada, signo=True)} EUR")
+
+        notificar_telegram("\n".join(lineas))
 
 
 def obtener_modo_cuenta(ib):
@@ -2291,6 +2364,13 @@ def main():
                     except Exception as e:
                         log(f"RESUMEN {mercado}: error al generar el resumen: {type(e).__name__}: {e}")
                     resumenes_enviados_hoy.add((mercado, hoy))
+
+            if justo_hora_resumen_cripto() and ("CRYPTO", hoy) not in resumenes_enviados_hoy:
+                try:
+                    generar_resumen_cierre_mercado(ib, "CRYPTO")
+                except Exception as e:
+                    log(f"RESUMEN CRYPTO: error al generar el resumen: {type(e).__name__}: {e}")
+                resumenes_enviados_hoy.add(("CRYPTO", hoy))
 
             hay_mercado_abierto = (es_horario_operativo("US")
                                     or es_horario_operativo("HK") or es_horario_operativo("KR")
