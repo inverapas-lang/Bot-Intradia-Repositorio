@@ -53,7 +53,43 @@ from collections import defaultdict
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 from ib_async import IB, Stock, Crypto, MarketOrder, LimitOrder, ExecutionFilter
+
+# --- Notificaciones a Telegram (opcional, igual que en bot_alpaca.py) ---
+# Si no se configuran estas dos variables, notificar_telegram() simplemente no
+# hace nada -el bot funciona igual sin Telegram, esto es un extra opcional-.
+# Ver NOTES.md para como crear el bot de Telegram y conseguir estos valores.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TIMEOUT_SEGUNDOS = 10
+
+
+def formato_es(numero, decimales=2, signo=False):
+    """Formatea un numero al estilo español (punto para miles, coma para
+    decimales: 1234.5 -> '1.234,50'), igual que en bot_alpaca.py."""
+    negativo = numero < 0
+    texto = f"{abs(numero):,.{decimales}f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    if negativo:
+        return f"-{texto}"
+    return f"+{texto}" if signo else texto
+
+
+def notificar_telegram(mensaje):
+    """Envia un mensaje a Telegram (compra/venta ejecutada, resumen diario).
+    No lanza excepcion nunca hacia el llamador: un fallo de red o de
+    configuracion aqui no debe interrumpir ni un ciclo de trading ni el
+    guardado del historial, solo se registra en el log normal."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"},
+            timeout=TELEGRAM_TIMEOUT_SEGUNDOS,
+        )
+    except Exception as e:
+        log(f"No se pudo enviar la notificacion a Telegram: {type(e).__name__}: {e}")
 
 # --- Horarios por mercado ---
 ZONA_NY = ZoneInfo("America/New_York")
@@ -363,6 +399,17 @@ ARCHIVO_LATIDO = "latido_bot.txt"
 ARCHIVO_PID = "bot.pid"
 INTERVALO_MIN_ESCRITURA_LATIDO_SEGUNDOS = 10  # no reescribir el archivo en CADA log, basta cada 10s
 
+# Parada limpia solicitada desde fuera (p.ej. /parar de telegram_bot_ibkr.py):
+# un archivo "de señal" en vez de matar el proceso a la fuerza, para no
+# interrumpir una orden a medio colocar. run.bot.bat comprueba este mismo
+# archivo tras cada ejecucion para decidir si reiniciar el bucle o parar del
+# todo (ver run.bot.bat).
+ARCHIVO_DETENER = "detener_bot.flag"
+
+
+def peticion_de_parada_pendiente():
+    return os.path.exists(ARCHIVO_DETENER)
+
 
 def actualizar_latido():
     global _ultimo_latido, _ultimo_latido_archivo
@@ -408,10 +455,50 @@ def vigilante_congelacion():
             os._exit(1)
 
 
+# Archivo de log en disco, ademas de la consola: run.bot.bat no redirige la
+# salida a ningun archivo (se ve en su propia ventana de CMD), y en Windows
+# no hay nada como journalctl para leerla desde fuera. Este archivo es lo
+# que usa /log de telegram_bot_ibkr.py para poder consultar la actividad
+# reciente desde el movil sin tener que mirar la ventana de CMD.
+ARCHIVO_LOG = "bot_completo.log"
+TAMANO_MAXIMO_LOG_BYTES = 5 * 1024 * 1024  # 5 MB: se trunca al alcanzarlo, ver _rotar_log_si_hace_falta()
+
+
+def _rotar_log_si_hace_falta():
+    """Si el archivo de log supera el tamaño maximo, se queda solo con la
+    mitad final -evita que crezca sin limite en un bot que corre 24/7
+    semanas seguidas-. No es una rotacion con archivos .1/.2/etc: para este
+    uso (consulta rapida de actividad reciente desde el movil) basta con
+    conservar lo mas reciente."""
+    try:
+        if os.path.getsize(ARCHIVO_LOG) <= TAMANO_MAXIMO_LOG_BYTES:
+            return
+        with open(ARCHIVO_LOG, "r", encoding="utf-8", errors="replace") as f:
+            contenido = f.read()
+        with open(ARCHIVO_LOG, "w", encoding="utf-8") as f:
+            f.write(contenido[len(contenido) // 2:])
+    except OSError:
+        pass
+
+
+_lineas_desde_ultima_rotacion = 0
+
+
 def log(mensaje):
+    global _lineas_desde_ultima_rotacion
     actualizar_latido()
     ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ahora}] {mensaje}")
+    linea = f"[{ahora}] {mensaje}"
+    print(linea)
+    try:
+        with open(ARCHIVO_LOG, "a", encoding="utf-8") as f:
+            f.write(linea + "\n")
+    except OSError:
+        pass  # igual que con el latido: si falla escribir el archivo no debe romper nada mas
+    _lineas_desde_ultima_rotacion += 1
+    if _lineas_desde_ultima_rotacion >= 200:  # no comprobar el tamaño en CADA linea, basta cada 200
+        _lineas_desde_ultima_rotacion = 0
+        _rotar_log_si_hace_falta()
 
 
 def es_horario_operativo(mercado):
@@ -1209,6 +1296,9 @@ def revisar_ventas(ib):
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                    precio_ejecucion, comision_total, contrato.currency,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                    notificar_telegram(f"🔴 VENTA <b>{contrato.symbol}</b> ({mercado}): "
+                                       f"{formato_es(cantidad_ejecutada, 6)} a {formato_es(precio_ejecucion, 4)} "
+                                       f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
                 else:
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
                 continue
@@ -1249,6 +1339,9 @@ def revisar_ventas(ib):
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                    precio_ejecucion, comision_total, contrato.currency,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                    notificar_telegram(f"🔴 VENTA FORZADA <b>{contrato.symbol}</b> ({mercado}): "
+                                       f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
+                                       f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
                 else:
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
                 continue
@@ -1308,6 +1401,9 @@ def revisar_ventas(ib):
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                    precio_ejecucion, comision_total, contrato.currency,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                    notificar_telegram(f"🔴 VENTA <b>{contrato.symbol}</b> ({mercado}): "
+                                       f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
+                                       f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
                 else:
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
             else:
@@ -1578,6 +1674,8 @@ def revisar_compras(ib):
                                                    precio_ejecucion, comision_ejecucion, currency)
                     if cantidad_antes_compra_cripto <= 1e-6:
                         registrar_apertura_de_posicion(activo["mercado"], ticker)
+                    notificar_telegram(f"🟢 COMPRA <b>{ticker}</b> ({activo['mercado']}): "
+                                       f"{formato_es(cantidad_ejecutada, 6)} a {formato_es(precio_ejecucion, 4)} {currency}")
                 continue
 
             fraccionable = FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False)
@@ -1707,6 +1805,8 @@ def revisar_compras(ib):
                     # que el resumen de cierre de mercado la muestre aunque
                     # reqExecutions() ya no la tenga en dias posteriores.
                     registrar_apertura_de_posicion(activo["mercado"], ticker)
+                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b> ({activo['mercado']}): "
+                                   f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} {currency}")
         except Exception as e:
             # Un fallo al procesar UNA señal de compra (precio raro, error de
             # red al colocar la orden, etc.) no debe abortar el escaneo del
@@ -2042,6 +2142,10 @@ def esperar_pumpeando(ib, segundos_totales, intervalo_chequeo=30):
         if not ib.isConnected():
             log("Conexion perdida durante la espera, se corta la espera para reconectar antes.")
             return
+        if peticion_de_parada_pendiente():
+            # Corta la espera cuanto antes: el bucle principal de main()
+            # detecta el archivo de parada nada mas volver aqui.
+            return
 
 
 # Codigos informativos de conexion de IBKR que no indican ningun problema
@@ -2070,6 +2174,18 @@ def main():
     actualizar_latido()
     threading.Thread(target=vigilante_congelacion, daemon=True).start()
 
+    # Si queda un archivo de parada de una sesion anterior (p.ej. el usuario
+    # detuvo el bot y luego lo volvio a arrancar sin pasar por /arrancar de
+    # telegram_bot_ibkr.py, que ya lo borra), se ignora al arrancar: un
+    # arranque nuevo nunca debe autopararse de inmediato.
+    if peticion_de_parada_pendiente():
+        log(f"Aviso: existia una peticion de parada pendiente ({ARCHIVO_DETENER}) de una sesion "
+            f"anterior, se ignora al arrancar de nuevo.")
+        try:
+            os.remove(ARCHIVO_DETENER)
+        except OSError:
+            pass
+
     ib = IB()
     ib.connect('127.0.0.1', 4002, clientId=1)
     ib.RequestTimeout = 30  # segundos: evita que cualquier peticion se quede colgada sin limite
@@ -2080,6 +2196,12 @@ def main():
 
     try:
         while True:
+            if peticion_de_parada_pendiente():
+                log(f"Parada solicitada (archivo {ARCHIVO_DETENER} detectado): cerrando limpiamente. "
+                    f"No se borra aqui el archivo -run.bot.bat lo borra al ver que fue una parada "
+                    f"limpia, para no reiniciar el bucle-.")
+                return
+
             if not conexion_esta_viva(ib):
                 log("Conexion con IB Gateway perdida. Intentando reconectar...")
                 reconectado = False

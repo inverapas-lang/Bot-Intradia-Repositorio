@@ -489,6 +489,89 @@ día se pone `CRYPTO_24_7 = False`, `segundos_hasta_pre_apertura()` ya tiene en 
 próxima apertura semanal de cripto (`proxima_apertura_cripto()`) para no sobre-dormir el fin
 de semana completo cuando cripto reabre el domingo antes que ningún mercado de acciones.
 
+## Control por Telegram del bot de IBKR (`telegram_bot_ibkr.py`) — añadido septiembre 2026
+
+Petición explícita del usuario: quería gestionar `bot_completo.py` (real, IBKR) desde el
+móvil, igual que ya podía con Alpaca (`telegram_bot.py`). Se le explicó primero la diferencia
+clave frente a Alpaca: **IBKR no es una API en la nube** — hace falta IB Gateway/TWS
+ejecutándose en algún ordenador (no hace falta con la ventana abierta en pantalla, pero sí
+encendido y con la sesión iniciada) para que el bot pueda conectarse. El usuario eligió
+empezar por la opción sencilla: seguir con el PC encendido y añadir Telegram como capa de
+control/consulta por encima, en vez de migrar IB Gateway a una VM en la nube (más trabajo,
+por la reautenticación/2FA periódica de IBKR). Si en el futuro quiere independizarse del todo
+del PC, esa migración a la nube queda pendiente como fase 2.
+
+**Diferencias frente a `telegram_bot.py` (Alpaca)**: aquella versión corre en Linux/AWS con
+`systemd` (`systemctl start/stop/is-active`) y lee el log con `journalctl`. Windows no tiene
+ninguno de los dos, así que `telegram_bot_ibkr.py` usa mecanismos propios:
+
+- **`/estado`**: no hay `systemctl is-active`. Se lee el PID guardado en `bot.pid` (el mismo
+  archivo que ya usaba `vigilante_externo.ps1`) y se comprueba con `tasklist` si ese proceso
+  sigue vivo en Windows. Además compara la fecha de modificación de `latido_bot.txt` con
+  `UMBRAL_CONGELACION_SEGUNDOS` para distinguir "corriendo bien" (🟢) de "el proceso vive pero
+  lleva mucho sin dar señales, probablemente congelado" (🟠) de "no hay ningún proceso con ese
+  PID" (🔴).
+- **`/arrancar`**: lanza `run.bot.bat` en una ventana de CMD nueva y detached
+  (`subprocess.Popen('start "" run.bot.bat', shell=True)`), en vez de arrancar
+  `bot_completo.py` directamente — así se conserva TODA la infraestructura de recuperación ya
+  existente (el propio bucle de reintento de `run.bot.bat`, el vigilante interno
+  `vigilante_congelacion`, y si el usuario lo tiene corriendo, `vigilante_externo.ps1`) en vez
+  de reinventar la supervisión de procesos en Python. Antes de lanzar, borra cualquier
+  `detener_bot.flag` que pudiera haber quedado de una parada anterior (ver más abajo).
+- **`/parar`**: NO mata el proceso a la fuerza (`taskkill`) — eso podría interrumpir una orden
+  real a medio colocar. En vez de eso, deja un archivo de señal (`detener_bot.flag`) que:
+  1. `bot_completo.py` comprueba en cada vuelta de su bucle principal (como máximo cada ~30s,
+     gracias al chequeo añadido dentro de `esperar_pumpeando()`) y, si lo ve, hace un `return`
+     limpio de `main()` (con su `try/finally` de siempre, así que sigue desconectando de IB
+     Gateway con normalidad).
+  2. `run.bot.bat` comprueba el mismo archivo justo después de que `python bot_completo.py`
+     termine: si existe, lo borra y sale del bucle (`goto :fin`) en vez de reiniciar el bot a
+     los 10s como hace siempre ante cualquier otro tipo de cierre (crash, congelación...). Esta
+     es la clave que distingue "parada limpia pedida por el usuario" de "el bot se cayó solo,
+     hay que reiniciarlo".
+  3. Al arrancar de nuevo (`main()`), si por lo que sea sigue existiendo el flag (p.ej. se
+     arrancó `python bot_completo.py` a mano sin pasar por `/arrancar`, que ya lo borra), se
+     ignora con un aviso en el log — un arranque nuevo nunca debe autopararse de inmediato.
+- **`/log`**: no hay `journalctl`. `bot_completo.py` ahora también escribe cada línea de
+  `log()` a un archivo (`bot_completo.log`, en la misma carpeta), además de la consola de
+  siempre — con una rotación simple (se trunca a la mitad si supera 5 MB, no crece sin límite
+  en un bot 24/7). `/log` lee las últimas líneas de ese archivo y aplica el mismo filtrado de
+  ruido rutinario y formato español de números que ya usaba `telegram_bot.py` para Alpaca
+  (lista `FRAGMENTOS_RUIDO_LOG`, adaptada a los mensajes propios de `bot_completo.py`).
+- **`/cartera`, `/hoy`, `/ayer`, `/semana`**: reutilizan `cartera_ibkr.py`, al que se le
+  añadieron versiones `formatear_*()` (igual que ya tenía `cartera_alpaca.py`) que devuelven
+  texto listo para Telegram (`html=True`, tablas `<pre>` monoespaciadas) en vez de solo
+  imprimir por `print()`. `formatear_posiciones_abiertas()` necesita una conexión `ib` propia
+  ya abierta (pide precios en vivo) — `telegram_bot_ibkr.py` abre y cierra esa conexión en cada
+  comando, con el mismo `clientId=9` de siempre (`cartera.CLIENT_ID_CARTERA`), distinto del
+  `clientId=1` del bot en marcha, para poder consultar sin interferir. **Importante**: estos
+  cuatro comandos fallan con un error de conexión si IB Gateway no está abierto/con sesión
+  iniciada en ese momento (se muestra el error tal cual en la respuesta de Telegram) —
+  `/estado`, `/arrancar` y `/parar` en cambio NO necesitan IB Gateway abierto, solo miran
+  archivos y procesos locales de Windows.
+
+**Notificaciones automáticas de compra/venta**: se añadió `notificar_telegram()` y
+`formato_es()` a `bot_completo.py` (copiados tal cual del patrón ya probado en
+`bot_alpaca.py`) y se enganchó una llamada justo después de cada `registrar_operacion_historial()`
+que confirma una operación ejecutada — los 2 puntos de compra (acciones y cripto) y los 3 de
+venta (normal, forzada, cripto). Si `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` no están puestas en
+el entorno, `notificar_telegram()` simplemente no hace nada (el bot funciona igual sin
+Telegram, es un extra opcional) — por eso no rompió ningún test existente al añadirlo.
+**Pendiente/no incluido en esta primera fase**: un resumen automático diario por Telegram (como
+sí tiene Alpaca) no se implementó para IBKR — el resumen de cierre de mercado
+(`generar_resumen_cierre_mercado`) solo corre para US/HK/KR (no cripto, ver más arriba) y solo
+imprime por log, no está conectado a `notificar_telegram()`. Se puede añadir si el usuario lo
+pide.
+
+**Cómo ejecutarlo**: variables de entorno `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` (el mismo bot
+de Telegram que ya tenía creado para Alpaca puede reutilizarse, o crear uno nuevo con
+@BotFather — un chat puede hablar con varios bots distintos sin problema), luego
+`python telegram_bot_ibkr.py` en una ventana de CMD aparte en el mismo PC que IB Gateway. Debe
+correr en la MISMA máquina (`/arrancar`, `/parar` y `/log` actúan sobre archivos/procesos
+locales de esa máquina, no tendría sentido correrlo en otro sitio). Para que arranque solo sin
+tener que acordarse, se puede añadir como Tarea Programada de Windows al iniciar sesión (igual
+que se sugiere para `vigilante_externo.ps1`).
+
 ## Bugs importantes encontrados y corregidos (orden cronológico)
 
 1. **Cuelgues por desconexión en esperas largas**: `time.sleep()` congelaba el bucle de

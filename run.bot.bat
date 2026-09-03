@@ -23,8 +23,22 @@ echo Iniciando bot_completo.py  (%DATE% %TIME%)
 echo ============================================================
 python bot_completo.py
 
+REM Parada limpia solicitada desde fuera (p.ej. /parar de
+REM telegram_bot_ibkr.py): bot_completo.py deja el archivo
+REM "detener_bot.flag" sin borrar precisamente para que se detecte aqui y
+REM el bucle no vuelva a arrancar el bot. Se borra el archivo (para que el
+REM proximo arranque no se autopare de inmediato) y se sale del bucle.
+if exist detener_bot.flag (
+    del detener_bot.flag
+    echo.
+    echo Parada solicitada de forma remota. El bot NO se reiniciara.
+    goto fin
+)
+
 echo.
 echo El bot se ha detenido. Reiniciando en 10 segundos...
 echo (Cierra esta ventana o pulsa Ctrl+C dos veces para no reiniciar)
 timeout /t 10
 goto bucle
+
+:fin

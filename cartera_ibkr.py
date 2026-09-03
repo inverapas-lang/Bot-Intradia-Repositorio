@@ -12,10 +12,18 @@ cartera_ibkr.py - consulta A DEMANDA del estado de la cartera de IBKR
     "historial_operaciones_ibkr.json" cada vez que una venta se ejecuta con
     exito -reqExecutions() de IBKR solo devuelve las ejecuciones del dia
     actual, asi que no sirve para consultar dias anteriores-.
+  - Actividad (numero de compras/ventas y cantidad total de cada lado) en un
+    rango de fechas, igual que cartera_alpaca.py.
 
 Se conecta a IB Gateway/TWS con un clientId DISTINTO al del bot en marcha
 (bot_completo.py usa clientId=1) para poder ejecutarse a la vez sin
 pisarse. Es de solo lectura: no coloca, modifica ni cancela ninguna orden.
+
+Las funciones formatear_*() devuelven texto (html=True para <pre>/<b> de
+Telegram, html=False para texto plano de terminal) y son las que reutiliza
+telegram_bot_ibkr.py para los comandos /cartera, /hoy, /ayer, /semana.
+formatear_posiciones_abiertas() necesita una conexion `ib` YA ABIERTA (pide
+precios actuales en vivo); las demas solo leen el historial en disco.
 
 Uso:
     python cartera_ibkr.py                        # hoy
@@ -56,7 +64,14 @@ def calcular_rango(args):
     return hoy, hoy
 
 
-def imprimir_posiciones_abiertas(ib):
+def _emoji_pl(valor):
+    return "🟢" if valor >= 0 else "🔴"
+
+
+def formatear_posiciones_abiertas(ib, html=False):
+    """Necesita una conexion `ib` ya abierta y conectada: pide reqPositions()
+    y el precio actual de cada una en vivo. Ver formatear_posiciones_abiertas
+    de cartera_alpaca.py para el significado de html=."""
     ib.reqPositions()
     ib.sleep(1)
     posiciones = sorted(
@@ -64,17 +79,14 @@ def imprimir_posiciones_abiertas(ib):
         key=lambda p: (bot.mercado_de_posicion(p), p.contract.symbol)
     )
 
-    print("\n=== POSICIONES ABIERTAS ===")
+    titulo_html = "📈 <b>POSICIONES ABIERTAS</b>"
+    titulo_plano = "📈 POSICIONES ABIERTAS"
     if not posiciones:
-        print("(ninguna)")
-        return
-
-    cab = (f"{'Mercado':<9}{'Ticker':<10}{'Cantidad':>10}{'Precio medio':>15}{'Invertido':>15}"
-           f"{'Precio actual':>15}{'P/L local':>13}{'P/L EUR':>12}{'P/L %':>9}")
-    print(cab)
+        return (titulo_html if html else titulo_plano) + "\n(ninguna)"
 
     total_invertido_eur = 0.0
     total_actual_eur = 0.0
+    filas = []
 
     for pos in posiciones:
         contrato = pos.contract
@@ -100,25 +112,49 @@ def imprimir_posiciones_abiertas(ib):
             pl_local = valor_actual - invertido
             pl_eur = valor_actual_eur - invertido_eur
             pl_pct = (pl_local / invertido * 100) if invertido else 0.0
-            precio_str = f"{precio_actual:.4f}"
-            pl_local_str = f"{pl_local:.2f}"
-            pl_eur_str = f"{pl_eur:.2f}"
-            pl_pct_str = f"{pl_pct:.2f}%"
         else:
             total_actual_eur += invertido_eur  # sin dato: asumimos sin cambio
-            precio_str = pl_local_str = pl_eur_str = pl_pct_str = "N/D"
+            precio_actual = pl_local = pl_eur = pl_pct = None
 
-        print(f"{mercado:<9}{contrato.symbol:<10}{cantidad:>10.4g}{coste_medio_con_comision:>15.4f}"
-              f"{invertido:>15.2f}{precio_str:>15}{pl_local_str:>13}{pl_eur_str:>12}{pl_pct_str:>9}")
+        filas.append((mercado, contrato.symbol, cantidad, coste_medio_con_comision, invertido,
+                      contrato.currency, precio_actual, pl_local, pl_eur, pl_pct))
 
     pl_total_eur = total_actual_eur - total_invertido_eur
     pl_total_pct = (pl_total_eur / total_invertido_eur * 100) if total_invertido_eur else 0.0
-    print("-" * len(cab))
-    print(f"TOTAL invertido: {total_invertido_eur:.2f} EUR | valor actual: {total_actual_eur:.2f} EUR | "
-          f"P/L: {pl_total_eur:.2f} EUR ({pl_total_pct:.2f}%)")
+
+    if html:
+        lineas_tabla = [f"  {'Ticker':<8}{'Merc.':<6}{'P/L %':>9}{'P/L EUR':>11}"]
+        for mercado, symbol, cantidad, coste_medio, invertido, currency, precio_actual, pl_local, pl_eur, pl_pct in filas:
+            if pl_eur is None:
+                lineas_tabla.append(f"⚪ {symbol:<7}{mercado:<6}{'N/D':>9}{'N/D':>11}")
+            else:
+                lineas_tabla.append(f"{_emoji_pl(pl_eur)} {symbol:<7}{mercado:<6}"
+                                    f"{bot.formato_es(pl_pct, signo=True):>8}%{bot.formato_es(pl_eur, signo=True):>11}")
+        tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
+        resumen = (f"<b>TOTAL</b> invertido: {bot.formato_es(total_invertido_eur)} EUR\n"
+                  f"P/L: {bot.formato_es(pl_total_eur, signo=True)} EUR "
+                  f"({bot.formato_es(pl_total_pct, signo=True)}%)")
+        return f"{titulo_html}\n{tabla}\n{resumen}"
+
+    lineas = [titulo_plano]
+    for mercado, symbol, cantidad, coste_medio, invertido, currency, precio_actual, pl_local, pl_eur, pl_pct in filas:
+        if pl_eur is None:
+            lineas.append(f"{mercado} {symbol}: {bot.formato_es(cantidad, 6)} a {bot.formato_es(coste_medio, 4)} "
+                          f"{currency} (invertido {bot.formato_es(invertido)} {currency}) - precio actual N/D")
+        else:
+            lineas.append(f"{mercado} {symbol}: {bot.formato_es(cantidad, 6)} a {bot.formato_es(coste_medio, 4)} "
+                          f"{currency} (invertido {bot.formato_es(invertido)} {currency}, ahora "
+                          f"{bot.formato_es(precio_actual, 4)} {currency}) "
+                          f"P/L {bot.formato_es(pl_local, signo=True)} {currency} / {bot.formato_es(pl_eur, signo=True)} EUR "
+                          f"({bot.formato_es(pl_pct, signo=True)}%)")
+    lineas.append(f"TOTAL invertido: {bot.formato_es(total_invertido_eur)} EUR | "
+                  f"P/L: {bot.formato_es(pl_total_eur, signo=True)} EUR ({bot.formato_es(pl_total_pct, signo=True)}%)")
+    return "\n".join(lineas)
 
 
-def imprimir_operaciones_cerradas(desde, hasta):
+def formatear_operaciones_cerradas(desde, hasta, html=False):
+    """Solo lee el historial en disco, no necesita conexion `ib`. Ver
+    formatear_posiciones_abiertas() para el significado de html=."""
     operaciones = bot.cargar_historial_operaciones()
     ventas = sorted(
         (o for o in operaciones
@@ -126,15 +162,12 @@ def imprimir_operaciones_cerradas(desde, hasta):
         key=lambda o: o["fecha_hora"]
     )
 
-    print(f"\n=== OPERACIONES CERRADAS ({desde} a {hasta}) ===")
+    titulo_html = f"📉 <b>OPERACIONES CERRADAS</b> ({desde} a {hasta})"
+    titulo_plano = f"📉 OPERACIONES CERRADAS ({desde} a {hasta})"
     if not ventas:
-        print("(ninguna)")
-        return
+        return (titulo_html if html else titulo_plano) + "\n(ninguna)"
 
-    cab = (f"{'Fecha/hora':<17}{'Mercado':<9}{'Ticker':<10}{'Cantidad':>10}{'Coste medio':>13}"
-           f"{'Precio venta':>13}{'Ganancia local':>15}{'Ganancia EUR':>13}{'%':>8}")
-    print(cab)
-
+    filas = []
     ganancia_total_eur = 0.0
     for o in ventas:
         cantidad = o["cantidad"]
@@ -150,17 +183,47 @@ def imprimir_operaciones_cerradas(desde, hasta):
         else:
             ganancia_local = ganancia_eur = None
         ganancia_total_eur += ganancia_eur or 0.0
+        filas.append((o["fecha_hora"], o.get("mercado", "?"), o["ticker"], cantidad, precio,
+                      currency, ganancia_local, ganancia_eur, beneficio_pct))
 
-        fecha_str = o["fecha_hora"][:16].replace("T", " ")
-        ganancia_local_str = f"{ganancia_local:.2f}" if ganancia_local is not None else "N/D"
-        ganancia_eur_str = f"{ganancia_eur:.2f}" if ganancia_eur is not None else "N/D"
-        beneficio_pct_str = f"{beneficio_pct:.2f}%" if beneficio_pct is not None else "N/D"
-        print(f"{fecha_str:<17}{o.get('mercado', '?'):<9}{o['ticker']:<10}{cantidad:>10.4g}"
-              f"{(coste_medio or 0):>13.4f}{precio:>13.4f}{ganancia_local_str:>15}"
-              f"{ganancia_eur_str:>13}{beneficio_pct_str:>8}")
+    if html:
+        lineas_tabla = [f"  {'Fecha':<12}{'Ticker':<8}{'Gan. EUR':>11}"]
+        for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct in filas:
+            fecha_corta = fecha_hora[5:16].replace("T", " ")  # MM-DD HH:MM
+            emoji = _emoji_pl(ganancia_eur) if ganancia_eur is not None else "⚪"
+            ganancia_str = f"{bot.formato_es(ganancia_eur, signo=True):>11}" if ganancia_eur is not None else f"{'N/D':>11}"
+            lineas_tabla.append(f"{emoji} {fecha_corta:<12}{ticker:<8}{ganancia_str}")
+        tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
+        resumen = f"<b>TOTAL</b> ganancia/perdida realizada: {bot.formato_es(ganancia_total_eur, signo=True)} EUR"
+        return f"{titulo_html}\n{tabla}\n{resumen}"
 
-    print("-" * len(cab))
-    print(f"TOTAL ganancia/perdida realizada: {ganancia_total_eur:.2f} EUR")
+    lineas = [titulo_plano]
+    for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct in filas:
+        fecha_str = fecha_hora[:16].replace("T", " ")
+        ganancia_str = (f", ganancia {bot.formato_es(ganancia_local, signo=True)} {currency} / "
+                        f"{bot.formato_es(ganancia_eur, signo=True)} EUR") if ganancia_local is not None else ""
+        beneficio_pct_str = f" ({bot.formato_es(beneficio_pct, signo=True)}%)" if beneficio_pct is not None else ""
+        lineas.append(f"{fecha_str} {mercado} {ticker}: {bot.formato_es(cantidad, 6)} a {bot.formato_es(precio, 4)} "
+                      f"{currency}{ganancia_str}{beneficio_pct_str}")
+    lineas.append(f"TOTAL ganancia/perdida realizada: {bot.formato_es(ganancia_total_eur, signo=True)} EUR")
+    return "\n".join(lineas)
+
+
+def formatear_actividad(desde, hasta, html=False):
+    """Cuenta cuantas COMPRAS y VENTAS se han ejecutado en el rango de
+    fechas, igual que formatear_actividad() de cartera_alpaca.py."""
+    operaciones = bot.cargar_historial_operaciones()
+    en_rango = [o for o in operaciones if desde <= datetime.fromisoformat(o["fecha_hora"]).date() <= hasta]
+    compras = [o for o in en_rango if o["lado"] == "COMPRA"]
+    ventas = [o for o in en_rango if o["lado"] == "VENTA"]
+
+    acciones_compradas = sum(o["cantidad"] for o in compras)
+    acciones_vendidas = sum(o["cantidad"] for o in ventas)
+
+    titulo = f"📊 <b>ACTIVIDAD</b> ({desde} a {hasta})" if html else f"📊 ACTIVIDAD ({desde} a {hasta})"
+    return (f"{titulo}\n"
+            f"🟢 Compras: {len(compras)} operaciones, {bot.formato_es(acciones_compradas, 4)} unidades\n"
+            f"🔴 Ventas: {len(ventas)} operaciones, {bot.formato_es(acciones_vendidas, 4)} unidades")
 
 
 def main():
@@ -170,9 +233,12 @@ def main():
     ib = bot.IB()
     ib.connect('127.0.0.1', 4002, clientId=CLIENT_ID_CARTERA)
     try:
-        print(f"Cartera IBKR - operaciones cerradas: {desde} a {hasta}")
-        imprimir_posiciones_abiertas(ib)
-        imprimir_operaciones_cerradas(desde, hasta)
+        print(f"Cartera IBKR - operaciones cerradas: {desde} a {hasta}\n")
+        print(formatear_posiciones_abiertas(ib))
+        print()
+        print(formatear_actividad(desde, hasta))
+        print()
+        print(formatear_operaciones_cerradas(desde, hasta))
     finally:
         ib.disconnect()
 

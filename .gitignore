@@ -7,4 +7,6 @@ latido_bot.txt
 bot.pid
 latido_bot_alpaca.txt
 bot_alpaca.pid
+bot_completo.log
+detener_bot.flag
 .env
