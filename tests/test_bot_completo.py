@@ -1295,11 +1295,70 @@ bot.CRYPTO_24_7 = crypto_24_7_original
 
 # --- 9b. crear_contrato: activo CRYPTO -> objeto Crypto, no Stock ---
 activo_btc = {"ticker": "BTC", "exchange": bot.EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
-contrato_btc = bot.crear_contrato(activo_btc)
+
+
+class _IBSinPosicionesCripto:
+    def positions(self):
+        return []
+
+
+bot._exchange_cripto_cache = None  # sin posiciones previas -> usa activo["exchange"] (fallback)
+contrato_btc = bot.crear_contrato(_IBSinPosicionesCripto(), activo_btc)
 check("crear_contrato CRYPTO: devuelve un Crypto (no un Stock)",
       isinstance(contrato_btc, bot.Crypto), f"tipo={type(contrato_btc)}")
 check("crear_contrato CRYPTO: symbol/exchange/currency correctos",
       contrato_btc.symbol == "BTC" and contrato_btc.exchange == bot.EXCHANGE_CRYPTO and contrato_btc.currency == "USD")
+
+# --- 9b-bis. crear_contrato CRYPTO: si YA hay una posicion de cripto real
+#     abierta (con su conId/exchange ya resueltos por IBKR), se descubre y
+#     reutiliza ESE exchange en vez de activo["exchange"] -este es el fix
+#     real de produccion (sept. 2026): ni "PAXOS" ni "ZEROHASH" adivinados a
+#     mano tenian datos en la cuenta real, solo el exchange de la posicion
+#     real de la usuaria los tenia. Ver ACTIVOS_CRYPTO para la historia
+#     completa.
+class _ContratoCriptoResuelto:
+    def __init__(self, exchange):
+        self.symbol = "BTC"
+        self.currency = "USD"
+        self.secType = "CRYPTO"
+        self.exchange = exchange
+
+
+class _PosicionCriptoFalsa:
+    def __init__(self, exchange):
+        self.contract = _ContratoCriptoResuelto(exchange)
+        self.position = 0.01
+
+
+class _IBConPosicionCriptoResuelta:
+    def __init__(self, exchange):
+        self._exchange = exchange
+
+    def positions(self):
+        return [_PosicionCriptoFalsa(self._exchange)]
+
+    def qualifyContracts(self, contrato):
+        pass  # no hace falta: la posicion ya viene con exchange relleno
+
+
+bot._exchange_cripto_cache = None
+ib_con_posicion_real = _IBConPosicionCriptoResuelta("UNEXCHANGE_REAL_DESCONOCIDO")
+activo_eth = {"ticker": "ETH", "exchange": bot.EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
+contrato_eth = bot.crear_contrato(ib_con_posicion_real, activo_eth)
+check("crear_contrato CRYPTO: descubre el exchange a partir de una posicion real ya abierta",
+      contrato_eth.exchange == "UNEXCHANGE_REAL_DESCONOCIDO", f"exchange={contrato_eth.exchange!r}")
+check("crear_contrato CRYPTO: reutiliza ese exchange descubierto para OTRA moneda (ETH) sin posicion propia",
+      contrato_eth.symbol == "ETH" and contrato_eth.exchange == "UNEXCHANGE_REAL_DESCONOCIDO")
+
+# La cache es de PROCESO: una segunda llamada, incluso con una `ib` distinta
+# que ya NO tiene esa posicion, debe seguir devolviendo el exchange
+# descubierto la primera vez (no se vuelve a preguntar a IBKR en cada
+# ticker/ciclo).
+contrato_btc_cacheado = bot.crear_contrato(_IBSinPosicionesCripto(), activo_btc)
+check("crear_contrato CRYPTO: el exchange descubierto se cachea entre llamadas",
+      contrato_btc_cacheado.exchange == "UNEXCHANGE_REAL_DESCONOCIDO",
+      f"exchange={contrato_btc_cacheado.exchange!r}")
+bot._exchange_cripto_cache = None
 
 
 # --- 9c. mercado_de_posicion / contrato_pertenece_a_mercado: cripto y US
@@ -1399,7 +1458,8 @@ class _IBFalsoComprasCripto:
 activos_originales_compras = bot.ACTIVOS
 bot.ACTIVOS = [activo_btc]
 analizar_activo_original = bot.analizar_activo
-bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(activo), "COMPRA")
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None  # sin posiciones previas (positions() -> []), usa activo["exchange"]
 
 ib_falso_compras_cripto = _IBFalsoComprasCripto()
 try:

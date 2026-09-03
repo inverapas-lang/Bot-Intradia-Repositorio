@@ -310,40 +310,54 @@ ACTIVOS_KR = [
     {"ticker": "000270", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Kia
 ]
 
-# --- Lista de valores: criptomonedas (PAXOS, USD) ---
-# IBKR ofrece cripto a traves de DOS proveedores distintos, con contratos/
-# conId DIFERENTES incluso para la misma moneda: "PAXOS" (el original, 4
-# monedas: BTC/ETH/LTC/BCH) y "ZEROHASH" (mas reciente, mas monedas: BTC,
-# ETH, LTC, BCH, LINK, MATIC, SOL...). Cual de los dos usa una cuenta
-# concreta depende de sus suscripciones de datos de mercado (Client Portal
-# -> Configuracion de cuenta -> Suscripciones de datos de mercado).
+# --- Lista de valores: criptomonedas (USD) ---
+# IBKR ofrece cripto a traves de proveedores/exchanges distintos ("PAXOS",
+# "ZEROHASH"...), con contratos/conId DIFERENTES incluso para la misma
+# moneda, y solo uno de ellos tiene datos de mercado activos para una cuenta
+# concreta. NO se hardcodea aqui: no fue posible acertarlo por prueba y
+# error (ver HISTORIA REAL mas abajo), asi que se deja que IBKR resuelva el
+# contrato correcto el mismo, sin indicar ningun exchange -ver
+# crear_contrato(), que para CRYPTO deja exchange="" y usa
+# ib.qualifyContracts() (ya se llama justo despues en analizar_activo) para
+# que sea IBKR quien decida cual es el contrato valido para esta cuenta,
+# exactamente igual que ya se hacia para completar el contrato de una
+# posicion ya abierta en revisar_ventas.
 #
-# HISTORIA REAL de este bug (sept. 2026, cuenta U25302975):
-# 1) Con exchange="PAXOS" (valor original): reqHistoricalData se quedaba
-#    colgado con TimeoutError en TODOS los intentos, sin ningun error de
-#    permisos -> se interpreto (con una captura de pantalla de la pagina de
-#    suscripciones de datos, que mostraba "ZEROHASHE Cryptocurrency") como
-#    que la cuenta estaba en ZEROHASH, no en PAXOS.
-# 2) Se cambio a exchange="ZEROHASH": el TimeoutError PERSISTIO -> se
-#    descubrio (via logging de errores de la API, ver on_error_ib) que la
-#    causa real de (1) nunca fue el exchange, sino whatToShow='TRADES' en
-#    vez de 'AGGTRADES' para contratos CRYPTO (ver pedir_velas()).
-# 3) Con AGGTRADES + exchange="ZEROHASH", la VENTA de la posicion real de
-#    la usuaria (contrato resuelto automaticamente por IBKR via
-#    qualifyContracts a partir de su conId real, ver revisar_ventas) SI
-#    obtuvo precio correctamente. Pero la COMPRA (contrato construido a mano
-#    con exchange="ZEROHASH" desde esta lista) fallo con un error EXPLICITO
-#    y sin ambiguedad: "Error 162: No market data permissions for ZEROHASH
-#    CRYPTO". Conclusion: la cuenta NO tiene datos de ZEROHASH pese al
-#    nombre de la suscripcion en la captura (probablemente el nombre
-#    generico que usa IBKR para toda suscripcion de cripto, no el proveedor
-#    real) -> su posicion real y los datos de mercado disponibles son de
-#    PAXOS. Exchange corregido de vuelta a PAXOS aqui.
-#
-# Si en el futuro se usa otra cuenta y vuelve el mismo sintoma, comprobar
-# PRIMERO el error real en el log (gracias a on_error_ib ya no es un
-# TimeoutError ciego) antes de volver a adivinar el exchange.
-EXCHANGE_CRYPTO = "PAXOS"
+# HISTORIA REAL de este bug (sept. 2026, cuenta U25302975) - se deja
+# documentada entera porque cada paso parecia razonable con la informacion
+# que habia en ese momento, y aun asi todos los intentos de ADIVINAR un
+# exchange concreto fallaron:
+# 1) exchange="PAXOS" (valor original, conId resuelto 479624278):
+#    reqHistoricalData se quedaba colgado con TimeoutError en TODOS los
+#    intentos, sin ningun error de permisos.
+# 2) Una captura de pantalla de "suscripciones de datos" mostraba "ZEROHASHE
+#    Cryptocurrency" -> se interpreto (paso en falso) que la cuenta usaba
+#    ZEROHASH, y se cambio a exchange="ZEROHASH" (conId 541686651). El
+#    TimeoutError PERSISTIO igual.
+# 3) Se añadio logging de errores reales de la API (on_error_ib): la causa
+#    de (1) y (2) nunca fue el exchange, sino whatToShow='TRADES' en vez de
+#    'AGGTRADES' para contratos CRYPTO (ver pedir_velas()).
+# 4) Con AGGTRADES + exchange="ZEROHASH": la VENTA de la posicion real de la
+#    usuaria (contrato de su posicion, resuelto por IBKR via
+#    qualifyContracts a partir de su conId REAL, distinto de 479624278 y de
+#    541686651 -un tercer conId- ver revisar_ventas) SI obtuvo precio
+#    correctamente. Pero la COMPRA (contrato construido a mano con
+#    exchange="ZEROHASH") fallo con "Error 162: No market data permissions
+#    for ZEROHASH CRYPTO" -> se interpreto (otro paso en falso) que la
+#    cuenta debia estar en PAXOS.
+# 5) Se cambio a exchange="PAXOS": la COMPRA volvio a fallar, esta vez con
+#    "Error 162: No market data permissions for PAXOS CRYPTO" (conId
+#    479624278 de nuevo). Es decir: NI "PAXOS" NI "ZEROHASH", tal cual los
+#    resuelve IBKR por defecto para BTC/USD, tienen datos en esta cuenta -
+#    solo el conId especifico de la posicion real de la usuaria (un tercero,
+#    desconocido de antemano) los tiene. No hay forma de adivinar ese conId
+#    a mano de forma fiable.
+# 6) Solucion definitiva: dejar de especificar exchange al construir el
+#    contrato para comprar (igual que ya se hacia, por necesidad, al
+#    vender), y confiar en que ib.qualifyContracts() -que ya se llama justo
+#    despues en analizar_activo()- resuelva el contrato realmente valido
+#    para la cuenta conectada, sea cual sea su conId/exchange real.
+EXCHANGE_CRYPTO = ""  # se deja vacio a proposito, ver historia arriba: NO hardcodear un exchange
 ACTIVOS_CRYPTO = [
     {"ticker": t, "exchange": EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
     for t in ["BTC", "ETH", "LTC", "BCH"]
@@ -752,9 +766,46 @@ def pedir_velas(ib, contrato, duration, barSize):
     return []
 
 
-def crear_contrato(activo):
+# Cache de proceso: el exchange de cripto realmente valido para la cuenta
+# conectada, descubierto UNA vez (ver descubrir_exchange_cripto()) y
+# reutilizado para construir el contrato de CUALQUIER cripto (incluidas las
+# que la cuenta no tiene abiertas todavia), en vez de adivinar un exchange
+# fijo -ver la historia real documentada junto a ACTIVOS_CRYPTO-.
+_exchange_cripto_cache = None
+
+
+def descubrir_exchange_cripto(ib):
+    """Busca entre las posiciones abiertas alguna de CRYPTO ya resuelta por
+    IBKR a partir de su conId real (si su `exchange` viene vacio, como es
+    habitual en ib.positions(), se completa aqui mismo con
+    ib.qualifyContracts(), igual que ya hace revisar_ventas) y devuelve ese
+    exchange. None si la cuenta no tiene ninguna posicion de cripto abierta
+    todavia (primer arranque sin haber comprado nunca nada de cripto) -en
+    ese caso no hay forma de saber que exchange es el correcto sin
+    arriesgarse a adivinar, asi que se deja para el siguiente ciclo (en
+    cuanto haya una compra que confirme el exchange valido, ya sea manual o
+    del propio bot)."""
+    for pos in ib.positions():
+        if getattr(pos.contract, "secType", None) == "CRYPTO" and pos.position > 0:
+            contrato = pos.contract
+            if not contrato.exchange:
+                ib.qualifyContracts(contrato)
+            if contrato.exchange:
+                return contrato.exchange
+    return None
+
+
+def crear_contrato(ib, activo):
     if activo["mercado"] == "CRYPTO":
-        return Crypto(activo["ticker"], activo["exchange"], activo["currency"])
+        global _exchange_cripto_cache
+        if _exchange_cripto_cache is None:
+            _exchange_cripto_cache = descubrir_exchange_cripto(ib)
+            if _exchange_cripto_cache:
+                log(f"CRYPTO: exchange valido para esta cuenta descubierto a partir de una "
+                    f"posicion real: '{_exchange_cripto_cache}'. Se reutiliza para todas las "
+                    f"criptomonedas de ACTIVOS_CRYPTO.")
+        exchange = _exchange_cripto_cache or activo["exchange"]
+        return Crypto(activo["ticker"], exchange, activo["currency"])
     return Stock(activo["ticker"], activo["exchange"], activo["currency"])
 
 
@@ -864,7 +915,7 @@ def orden_rechazada_por_codigo(trade, codigos_error):
 
 
 def analizar_activo(ib, activo):
-    contrato = crear_contrato(activo)
+    contrato = crear_contrato(ib, activo)
     ib.qualifyContracts(contrato)
 
     if not contrato.conId:

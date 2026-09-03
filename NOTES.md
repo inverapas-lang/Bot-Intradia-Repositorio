@@ -400,33 +400,51 @@ secuencia importa para no repetir los mismos pasos en falso si vuelve a pasar:
    contrato de `ib.positions()` llega con `exchange=""` y se completa vía
    `ib.qualifyContracts()` a partir de su conId real — ver más abajo) SÍ obtuvo precio
    correctamente. Pero la **compra** (contrato construido a mano en `ACTIVOS_CRYPTO` con
-   `exchange="ZEROHASH"`) falló con un error explícito y sin ambigüedad: `Error 162: No
-   market data permissions for ZEROHASH CRYPTO`. Conclusión: la cuenta NO tiene datos de
-   ZEROHASH pese al nombre de la suscripción en la captura (probablemente el nombre genérico
-   que usa IBKR para toda suscripción de cripto, no el proveedor real) — su posición real y
-   los datos de mercado disponibles son de **PAXOS**. `EXCHANGE_CRYPTO` corregido de vuelta a
-   `"PAXOS"`.
+   `exchange="ZEROHASH"`, conId resuelto 541686651) falló con un error explícito y sin
+   ambigüedad: `Error 162: No market data permissions for ZEROHASH CRYPTO`. Se interpretó
+   (paso en falso, ver paso 5) que la cuenta debía estar en PAXOS.
+5. Se cambió `EXCHANGE_CRYPTO` a `"PAXOS"` (conId resuelto 479624278): la **compra** volvió a
+   fallar, esta vez con `Error 162: No market data permissions for PAXOS CRYPTO`. Es decir: NI
+   "PAXOS" NI "ZEROHASH", tal cual los resuelve IBKR por defecto para BTC/USD sin más contexto,
+   tienen datos en esta cuenta — y el conId de esos dos intentos (541686651 y 479624278) es
+   DISTINTO del conId real de la posición de la usuaria (confirmado en logs), que es un
+   *tercer* contrato cuyo exchange nunca se llegó a ver por texto. No hay forma fiable de
+   adivinar ese exchange a mano.
+6. **Solución definitiva**: dejar de adivinar el exchange del todo. `EXCHANGE_CRYPTO` se deja
+   en `""` (vacío) y `crear_contrato()` ya no lo usa directamente — en su lugar,
+   `descubrir_exchange_cripto(ib)` busca entre las posiciones abiertas alguna de CRYPTO ya
+   resuelta por IBKR (completando su `exchange` vía `qualifyContracts()` a partir de su conId
+   real si hiciera falta, igual que en el paso 4) y devuelve ese exchange REAL, que se cachea
+   en `_exchange_cripto_cache` (variable de proceso) y se reutiliza para construir el contrato
+   de CUALQUIER cripto de `ACTIVOS_CRYPTO` — incluidas monedas que la cuenta no tiene abiertas
+   todavía (ETH/LTC/BCH), asumiendo que el mismo exchange vale para las 4 (razonable: las
+   suscripciones de datos de cripto de IBKR son por proveedor, no por moneda suelta). Si la
+   cuenta no tiene AÚN ninguna posición de cripto abierta (primer arranque, cero compras
+   nunca), la caché se queda a `None` y se usa el `activo["exchange"]` de siempre (vacío) como
+   última alternativa — en ese caso concreto, la primera compra de cripto puede fallar hasta
+   que exista una posición (manual o del propio bot) que ancle el exchange correcto.
 
 Moraleja para el futuro: si cripto vuelve a dar timeout o error de datos, mirar PRIMERO el
-error real en el log (gracias a `on_error_ib` ya no es un `TimeoutError` ciego) antes de
-adivinar el exchange — la captura de pantalla de "suscripciones de datos" no basta para saber
-el proveedor real, el error 162/321/200 de la propia API sí lo dice sin ambigüedad.
+error real en el log (gracias a `on_error_ib` ya no es un `TimeoutError` ciego) — pero NO
+asumir que ese error apunta al otro proveedor sin más: como se vio en los pasos 4-5, "sin
+datos para ZEROHASH" no implica "datos para PAXOS", puede ser un tercer contrato totalmente
+distinto. La única fuente fiable es el conId de una posición real ya abierta.
 
-**Monedas**: solo `ACTIVOS_CRYPTO` = BTC, ETH, LTC, BCH — las 4 que existen en ambos
-proveedores (Paxos y Zerohash), las más maduras y probadas en la API de IBKR. Se empezó solo
-con estas 4 por prudencia; para añadir más (solo disponibles vía Zerohash, p.ej. SOL, LINK),
-haría falta primero confirmar que la cuenta tiene datos de Zerohash (ver historia de arriba),
-y luego ampliar la lista de tickers en `ACTIVOS_CRYPTO` (mismo `exchange=EXCHANGE_CRYPTO`,
-`currency="USD"`).
+**Monedas**: solo `ACTIVOS_CRYPTO` = BTC, ETH, LTC, BCH. Se empezó solo con estas 4 por
+prudencia (son las que soporta el proveedor original, Paxos, y las más probadas en la API de
+IBKR); para añadir más (monedas solo disponibles vía Zerohash, p.ej. SOL, LINK), basta con
+ampliar la lista de tickers en `ACTIVOS_CRYPTO` (mismo `exchange=EXCHANGE_CRYPTO`,
+`currency="USD"` — el exchange real se descubre solo, ver arriba).
 
 **Contrato de una posición CRYPTO sin `exchange` (error 321/200)**: a diferencia de las
 acciones, el contrato que devuelve `ib.positions()` para una posición CRYPTO llega con el
-campo `exchange` vacío. Rellenarlo a mano con `EXCHANGE_CRYPTO` (primer intento) causó un
-error DISTINTO (`Error 200: No security definition has been found`, porque el conId real de
-la posición no encajaba con el exchange forzado). La solución correcta, ya aplicada en
-`revisar_ventas`, es dejar que IBKR complete el contrato él mismo a partir de su conId
-(`ib.qualifyContracts(contrato)`) cuando `exchange` viene vacío — así no importa si la
-posición es de Paxos o Zerohash, el conId ya lo identifica sin ambigüedad.
+campo `exchange` vacío. Rellenarlo a mano con un exchange adivinado (`EXCHANGE_CRYPTO`) causó
+un error DISTINTO (`Error 200: No security definition has been found`, porque el conId real de
+la posición no encajaba con el exchange forzado). La solución correcta, aplicada en
+`revisar_ventas` y reutilizada por `descubrir_exchange_cripto()`, es dejar que IBKR complete el
+contrato él mismo a partir de su conId (`ib.qualifyContracts(contrato)`) cuando `exchange`
+viene vacío — así no importa qué proveedor use la cuenta, el conId ya lo identifica sin
+ambigüedad.
 
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a
