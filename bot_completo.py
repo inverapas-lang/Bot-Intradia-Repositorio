@@ -2010,6 +2010,26 @@ def esperar_pumpeando(ib, segundos_totales, intervalo_chequeo=30):
             return
 
 
+# Codigos informativos de conexion de IBKR que no indican ningun problema
+# (se emiten en cada conexion/reconexion, "farm connection is OK", etc.) -
+# se ignoran para no ensuciar el log con ruido en cada ciclo.
+CODIGOS_ERROR_IB_INFORMATIVOS = {1100, 1101, 1102, 2103, 2104, 2105, 2106, 2107, 2108, 2119, 2137, 2158}
+
+
+def on_error_ib(reqId, errorCode, errorString, contract=None):
+    """Registra en el log cualquier error/aviso que IBKR devuelva por la API
+    (errorEvent de ib_async), salvo los puramente informativos de conexion.
+    Sin esto, errores reales de IBKR (permisos, suscripcion de datos no
+    activa, contrato no encontrado...) eran invisibles para el bot: solo se
+    veia un TimeoutError generico tras agotar el timeout, sin saber la causa
+    real (bug real de produccion, sept. 2026, diagnostico del timeout de
+    BTC)."""
+    if errorCode in CODIGOS_ERROR_IB_INFORMATIVOS:
+        return
+    contrato_str = f" [{contract.symbol}]" if contract is not None and getattr(contract, "symbol", None) else ""
+    log(f"IBKR API - error {errorCode}{contrato_str}: {errorString}")
+
+
 def main():
     evitar_suspension_windows()
     escribir_pid()
@@ -2019,6 +2039,7 @@ def main():
     ib = IB()
     ib.connect('127.0.0.1', 4002, clientId=1)
     ib.RequestTimeout = 30  # segundos: evita que cualquier peticion se quede colgada sin limite
+    ib.errorEvent += on_error_ib
     modo_texto = avisar_modo_cuenta(ib)
 
     resumenes_enviados_hoy = set()  # claves (mercado, fecha) para no repetir el resumen
@@ -2036,6 +2057,9 @@ def main():
                     try:
                         ib.connect('127.0.0.1', 4002, clientId=1)
                         ib.RequestTimeout = 30
+                        # No hace falta volver a registrar on_error_ib: es el mismo
+                        # objeto `ib`, y el listener de errorEvent sobrevive a
+                        # disconnect()/connect() (solo se re-crearia con IB() nuevo).
                         log(f"Reconexion con IB Gateway completada (intento {intento}/{REINTENTOS_RECONEXION}).")
                         modo_texto = avisar_modo_cuenta(ib)
                         reconectado = True
