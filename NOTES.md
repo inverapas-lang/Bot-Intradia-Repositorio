@@ -42,6 +42,12 @@ desactivar HK/KR para la cuenta real — **no decidido todavía**.
 - **EU** (Euronext/Borsa Italiana, EUR): definido en el código (`ACTIVOS_EU`, 20 valores)
   pero **desactivado** — pendiente de contratar la suscripción de datos de mercado de Europa
   en IBKR.
+- **CRYPTO** (via Paxos, USD): añadido en septiembre 2026 a petición del usuario (ya tenía el
+  permiso de cripto activado en IBKR y había hecho una operación a mano). Horario controlado
+  por `CRYPTO_24_7` (actualmente `True` — el usuario confirmó que su cuenta opera 24/7, nivel
+  "Crypto Plus"; si en algún momento se confirma que en realidad es "Crypto Basic", poner esto
+  en `False` para usar el horario domingo 3:00 AM ET a viernes 4:00 PM ET, ya implementado en
+  `es_horario_operativo_cripto()`). Ver sección dedicada más abajo para el detalle completo.
 
 ## Listas de valores actuales
 
@@ -362,6 +368,78 @@ operación de ida y vuelta se puede comer **~10-13% del valor de la posición so
 comisiones mínimas**, antes de contar ganancias/pérdidas de mercado — operar en HK/KR es
 poco viable con un capital tan pequeño, más allá del problema de los lotes fijos de HK ya
 documentado. Ver conversación de agosto 2026 para el detalle completo del cálculo.
+
+## Criptomonedas (PAXOS, vía IBKR) — añadido septiembre 2026
+
+Petición explícita del usuario: ya tenía el permiso de cripto activado en IBKR y había hecho
+una operación a mano antes de pedir que el bot lo soportara.
+
+**Monedas**: solo `ACTIVOS_CRYPTO` = BTC, ETH, LTC, BCH — las 4 "nativas" de Paxos, las más
+maduras y probadas en la API de IBKR. IBKR ha añadido más monedas recientemente vía otro
+proveedor (zerohash: LINK, MATIC, SOL, AAVE, UNI, PAXG...), pero se empezó solo con estas 4
+por prudencia. Para añadir más, basta con ampliar la lista de tickers en `ACTIVOS_CRYPTO`
+(mismo `exchange="PAXOS"`, `currency="USD"`).
+
+**Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
+- **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a
+  viernes 4:00 PM ET (cerrado la mayor parte del fin de semana).
+- **Crypto Plus**: 24/7, fines de semana incluidos.
+
+El usuario no sabía cuál tenía y pidió asumir la que permite 24/7 → `CRYPTO_24_7 = True`.
+`es_horario_operativo_cripto()` implementa también el horario "Basic" completo (funciones
+`proxima_apertura_cripto()`, chequeo viernes/sábado/domingo) por si algún día se confirma que
+la cuenta es en realidad "Basic" — solo hay que poner `CRYPTO_24_7 = False`.
+
+**Por qué no se pudo tratar como "un mercado más" sin más cambios**: la cripto vía Paxos
+cotiza en **USD**, la misma divisa que las acciones de US — pero todo el código existente
+(`CURRENCY_A_MERCADO`, agrupación de posiciones en `revisar_ventas`, filtrado en
+`generar_resumen_cierre_mercado`, elección de tarifa en `estimar_comision`) distinguía
+mercados **por divisa**. Sin corregir esto, las posiciones de cripto se habrían mezclado con
+las de US en todos los sitios que agrupan por divisa. Se resolvió con dos helpers nuevos que
+miran primero `contract.secType`:
+- `mercado_de_posicion(pos)` — para un objeto `Position` de `ib.positions()`.
+- `contrato_pertenece_a_mercado(contrato, mercado)` — para un `Contract` suelto (usado al
+  filtrar `ib.reqExecutions()` en el resumen de cierre).
+
+**Construcción de órdenes — mucho más simple que en acciones**: a diferencia de las acciones
+(donde una cantidad fraccionaria vía API es rechazada con el error 10243, obligando a todo el
+mecanismo de `cashQty` + Plan A/B/C, ver sección dedicada más arriba), en cripto las órdenes
+**LMT admiten `totalQuantity` fraccionario de forma nativa y directa** (confirmado en la
+documentación oficial de IBKR: LMT usa quantity/totalQuantity, solo las órdenes MKT de cripto
+usan cashQty — y aquí no se usan órdenes MKT para cripto, todo es LMT). Por eso
+`crear_orden_limitada_cripto()` es una función mínima sin ningún fallback, y `revisar_compras`/
+`revisar_ventas` tienen una rama dedicada y aislada para `mercado == "CRYPTO"` (con un
+`continue` al final) en vez de intentar encajar la lógica de cripto dentro de la cadena
+Plan A/B/C de acciones, que no le aplica en absoluto.
+
+**Comisión**: 0.18% del valor operado (la tarifa más alta del rango 0.12%-0.18% que cita IBKR,
+por prudencia), mínimo 1.75 USD, con tope del 1% del valor operado (protege a las operaciones
+pequeñas: con el capital actual, ~40-45 $ por operación, el tope del 1% —unos 0.40-0.45 $—
+gana casi siempre al mínimo de 1.75 $, así que la comisión real suele ser bastante más baja
+que el mínimo citado por IBKR). `estimar_comision_cripto(valor_operacion)` implementa esto por
+separado de `estimar_comision()` (que sigue siendo solo para acciones).
+
+**Sin ventana de "venta forzada"**: `en_ventana_venta_forzada("CRYPTO")` siempre da `False`
+porque `"CRYPTO"` no está en `CIERRE_POR_MERCADO` (no tiene un único cierre diario del que
+calcular minutos-hasta-cierre) — las ventas de cripto van siempre por la lógica normal de MACD
+5min, nunca por venta forzada de última hora. Es un comportamiento correcto y esperado, no un
+hueco a rellenar: no tiene sentido un concepto de "última hora antes del cierre" en un mercado
+continuo.
+
+**Hueco conocido, aceptado por ahora**: no hay un resumen de cierre automático para cripto
+(`generar_resumen_cierre_mercado` se sigue llamando solo para US/HK/KR en `main()`, disparado
+por `justo_cerro_mercado()`, que requiere una entrada en `CIERRE_POR_MERCADO` que cripto no
+tiene por no tener un cierre diario). Para consultar posiciones/operaciones de cripto, usar
+`cartera_ibkr.py` (ya corregido para distinguir cripto de US igual que el bot principal).
+
+**Bucle principal (`main()`)**: con `CRYPTO_24_7 = True`, `es_horario_operativo("CRYPTO")`
+siempre es `True`, así que `hay_mercado_abierto` en `main()` nunca cae a `False` — el bot deja
+de dormir horas fuera del horario de US/HK/KR y pasa a ciclar continuamente
+(`INTERVALO_SEGUNDOS` = 4 min) las 24 horas, aunque solo actúe sobre cripto en esos huecos
+(las acciones se siguen filtrando por su propio `es_horario_operativo` de siempre). Si algún
+día se pone `CRYPTO_24_7 = False`, `segundos_hasta_pre_apertura()` ya tiene en cuenta la
+próxima apertura semanal de cripto (`proxima_apertura_cripto()`) para no sobre-dormir el fin
+de semana completo cuando cripto reabre el domingo antes que ningún mercado de acciones.
 
 ## Bugs importantes encontrados y corregidos (orden cronológico)
 

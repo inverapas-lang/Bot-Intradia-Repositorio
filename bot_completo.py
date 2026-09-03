@@ -53,7 +53,7 @@ from collections import defaultdict
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from ib_async import IB, Stock, MarketOrder, LimitOrder, ExecutionFilter
+from ib_async import IB, Stock, Crypto, MarketOrder, LimitOrder, ExecutionFilter
 
 # --- Horarios por mercado ---
 ZONA_NY = ZoneInfo("America/New_York")
@@ -119,6 +119,32 @@ APERTURA_POR_MERCADO = {
 MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR = 15  # con todos los mercados cerrados, despertar 15 min antes de la mas proxima
 
 CURRENCY_A_MERCADO = {"USD": "US", "HKD": "HK", "KRW": "KR", "EUR": "EU"}
+# NOTA: la cripto (PAXOS) tambien cotiza en USD, asi que esta tabla NO sirve
+# para distinguirla de US -ver mercado_de_posicion()/contrato_pertenece_a_mercado(),
+# que comprueban primero secType == "CRYPTO" antes de mirar la divisa-.
+
+# --- Criptomonedas (PAXOS, via IBKR) ---
+# Horario "Crypto Basic" (nivel por defecto en la mayoria de cuentas nuevas):
+# opera de domingo 3:00 AM ET a viernes 4:00 PM ET (cerrado la mayor parte
+# del fin de semana). Si tu cuenta tiene el nivel "Crypto Plus" (24/7,
+# fines de semana incluidos), pon esto a True.
+# Confirmado por el usuario (sept. 2026): asumir Crypto Plus (24/7). Si en
+# algun momento se comprueba que la cuenta es en realidad "Crypto Basic",
+# poner esto a False.
+CRYPTO_24_7 = True
+HORA_CIERRE_CRYPTO_VIERNES = dt_time(16, 0)   # viernes 16:00 ET
+HORA_APERTURA_CRYPTO_DOMINGO = dt_time(3, 0)  # domingo 3:00 ET
+
+# Comision de IBKR en cripto (via Paxos): 0.12%-0.18% del valor operado (se
+# usa la tasa mas alta citada, 0.18%, por prudencia), minimo 1.75 USD, con
+# tope del 1% del valor operado (protege a las operaciones pequeñas de que
+# el minimo fijo se coma un % desproporcionado). Fuente: pagina oficial de
+# precios de IBKR (ver ALPACA_NOTES.md... perdon, NOTES.md, seccion cripto).
+COMISION_CRIPTO_PCT = 0.18 / 100
+COMISION_CRIPTO_MINIMA_USD = 1.75
+COMISION_CRIPTO_MAX_PCT = 1.0 / 100
+VALOR_MINIMO_OPERACION_CRIPTO_USD = 5.0  # margen de seguridad razonable, ajustable
+DECIMALES_FRACCION_CRIPTO = 6  # mas precision que acciones (DECIMALES_FRACCION=4): BTC/ETH suelen necesitarla
 
 # --- Configuracion general ---
 IMPORTE_EUROS = 1000
@@ -135,7 +161,7 @@ LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera (en USD equivalente
 # IBKR solo admite comprar fracciones de accion en el mercado US (y solo para
 # una parte de los valores, los que tengan ese permiso habilitado). En HK y
 # KR las acciones se compran siempre en unidades/lotes enteros.
-FRACCIONABLE_POR_MERCADO = {"US": True, "EU": False, "HK": False, "KR": False}
+FRACCIONABLE_POR_MERCADO = {"US": True, "EU": False, "HK": False, "KR": False, "CRYPTO": True}
 DECIMALES_FRACCION = 4  # precision al calcular la cantidad fraccionaria a comprar
 VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0  # por debajo de esto, IBKR rechaza la orden
 
@@ -248,6 +274,17 @@ ACTIVOS_KR = [
     {"ticker": "000270", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Kia
 ]
 
+# --- Lista de valores: criptomonedas (PAXOS, USD) ---
+# Solo las 4 monedas "nativas" de Paxos en IBKR (las mas maduras y probadas
+# en la API); IBKR ha añadido mas recientemente otras via un proveedor
+# distinto (zerohash: LINK, MATIC, SOL...), pero se empieza solo con estas 4
+# por prudencia -ampliar la lista si hace falta, una vez confirmado que
+# funcionan bien en real-.
+ACTIVOS_CRYPTO = [
+    {"ticker": t, "exchange": "PAXOS", "currency": "USD", "mercado": "CRYPTO"}
+    for t in ["BTC", "ETH", "LTC", "BCH"]
+]
+
 # HK excluido (agosto 2026): con el capital actual (~300 EUR, limite de exposicion 15% => ~45
 # USD por posicion), ningun valor de ACTIVOS_HK cabe en 1 lote minimo (lotes fijos de 100-2000
 # acciones) y ademas la comision minima de IBKR por orden en HK (~2.25 USD) se comeria ~10% del
@@ -255,7 +292,7 @@ ACTIVOS_KR = [
 # Las posiciones de HK que ya se tengan abiertas se siguen vendiendo con normalidad (revisar_ventas
 # no depende de esta lista); solo se deja de ESCANEAR HK en busca de nuevas señales de compra.
 # EU sigue excluido: pendiente de suscripcion de datos de mercado.
-ACTIVOS = ACTIVOS_US + ACTIVOS_KR
+ACTIVOS = ACTIVOS_US + ACTIVOS_KR + ACTIVOS_CRYPTO
 
 TEMPORALIDADES = [
     {"nombre": "1 minuto",   "barSize": "1 min",   "duration": "1 D",  "tipo": "corta"},
@@ -372,7 +409,29 @@ def es_horario_operativo(mercado):
         if ahora.weekday() >= 5:
             return False
         return HORA_INICIO_KR <= ahora.time() < HORA_CIERRE_KR
+    elif mercado == "CRYPTO":
+        return es_horario_operativo_cripto()
     return False
+
+
+def es_horario_operativo_cripto():
+    """Horario de cripto en IBKR (via Paxos). Por defecto asume el nivel
+    "Crypto Basic" (domingo 3:00 AM ET a viernes 4:00 PM ET, cerrado el
+    resto del fin de semana) -el nivel por defecto en la mayoria de cuentas
+    nuevas-. Si tu cuenta tiene el nivel "Crypto Plus" (24/7, fines de
+    semana incluidos), pon CRYPTO_24_7 = True mas arriba en el archivo."""
+    if CRYPTO_24_7:
+        return True
+    ahora = datetime.now(ZONA_NY)
+    dia = ahora.weekday()  # lunes=0 ... domingo=6
+    hora = ahora.time()
+    if dia == 4 and hora >= HORA_CIERRE_CRYPTO_VIERNES:  # viernes tras el cierre
+        return False
+    if dia == 5:  # sabado: siempre cerrado en Crypto Basic
+        return False
+    if dia == 6 and hora < HORA_APERTURA_CRYPTO_DOMINGO:  # domingo antes de la apertura
+        return False
+    return True
 
 
 def en_postmercado_us():
@@ -450,6 +509,21 @@ def proxima_apertura(mercado):
     return candidato
 
 
+def proxima_apertura_cripto():
+    """Proxima apertura SEMANAL de cripto (horario "Crypto Basic"): el
+    domingo a las 3:00 AM ET. A diferencia de proxima_apertura() (mercados
+    con apertura diaria), esta solo se abre una vez por semana -no se usa
+    si CRYPTO_24_7 = True, en ese caso el mercado nunca se considera
+    "cerrado" y no hace falta calcular una proxima apertura."""
+    ahora = datetime.now(ZONA_NY)
+    candidato = ahora.replace(hour=HORA_APERTURA_CRYPTO_DOMINGO.hour,
+                              minute=HORA_APERTURA_CRYPTO_DOMINGO.minute,
+                              second=0, microsecond=0)
+    while candidato.weekday() != 6 or candidato <= ahora:  # 6 = domingo
+        candidato += timedelta(days=1)
+    return candidato
+
+
 def segundos_hasta_pre_apertura():
     """Con todos los mercados cerrados, calcula cuantos segundos hay que
     esperar hasta MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR minutos antes de
@@ -462,6 +536,14 @@ def segundos_hasta_pre_apertura():
         ahora_mercado = datetime.now(zona_mercado)
         segundos = (apertura - ahora_mercado).total_seconds()
         esperas.append(segundos)
+
+    if not CRYPTO_24_7:
+        # Sin esto, con todos los mercados de acciones cerrados durante el
+        # fin de semana, el bot calcularia la espera hasta la apertura de US
+        # el lunes y se perderia toda la ventana de cripto que reabre antes,
+        # el domingo a las 3:00 AM ET (horario "Crypto Basic").
+        apertura_cripto = proxima_apertura_cripto()
+        esperas.append((apertura_cripto - ahora).total_seconds())
 
     segundos_hasta_mas_proxima = min(esperas)
     segundos_despertar = segundos_hasta_mas_proxima - (MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR * 60)
@@ -548,6 +630,8 @@ def pedir_velas(ib, contrato, duration, barSize):
 
 
 def crear_contrato(activo):
+    if activo["mercado"] == "CRYPTO":
+        return Crypto(activo["ticker"], activo["exchange"], activo["currency"])
     return Stock(activo["ticker"], activo["exchange"], activo["currency"])
 
 
@@ -621,6 +705,29 @@ def crear_orden_limitada_cash(accion, importe_efectivo, precio_limite, fuera_hor
     if fuera_horario_regular:
         orden.outsideRth = True
     return orden
+
+
+def crear_orden_limitada_cripto(accion, cantidad, precio_limite):
+    """Orden LIMITADA para criptomonedas (PAXOS). A diferencia de las
+    acciones -donde una cantidad fraccionaria puesta directamente via API
+    es rechazada con el error 10243, y hay que recurrir al truco del importe
+    en efectivo (cashQty)-, en cripto las ordenes LMT SI admiten
+    `totalQuantity` fraccionario de forma directa y nativa (confirmado en la
+    documentacion oficial de IBKR: las ordenes LMT de cripto usan
+    quantity/totalQuantity; solo las ordenes MKT de cripto usan cashQty, y
+    aqui no se usan ordenes a mercado para cripto). No hace falta ningun
+    Plan B/C como con las acciones."""
+    return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite))
+
+
+def estimar_comision_cripto(valor_operacion):
+    """Comision de IBKR en cripto: 0.18% del valor operado, minimo 1.75 USD,
+    con tope del 1% del valor operado (evita que el minimo fijo se coma un
+    % desproporcionado en operaciones pequeñas)."""
+    if valor_operacion <= 0:
+        return 0.0
+    comision = max(valor_operacion * COMISION_CRIPTO_PCT, COMISION_CRIPTO_MINIMA_USD)
+    return min(comision, valor_operacion * COMISION_CRIPTO_MAX_PCT)
 
 
 def orden_rechazada_por_codigo(trade, codigos_error):
@@ -906,6 +1013,29 @@ def verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad_antes, pr
     return cantidad_ahora
 
 
+def mercado_de_posicion(pos):
+    """Como CURRENCY_A_MERCADO no puede distinguir cripto (tambien en USD)
+    de acciones US, se comprueba primero el tipo de contrato (secType).
+    getattr con default None: los contratos de acciones normales (Stock)
+    siempre tienen secType='STK', pero se usa getattr por robustez ante
+    cualquier objeto que no lo tenga (p.ej. dobles de prueba)."""
+    if getattr(pos.contract, "secType", None) == "CRYPTO":
+        return "CRYPTO"
+    return CURRENCY_A_MERCADO.get(pos.contract.currency, "?")
+
+
+def contrato_pertenece_a_mercado(contrato, mercado):
+    """Version de mercado_de_posicion() para un Contract suelto (no un
+    Position), usada al filtrar ejecuciones/posiciones por mercado en
+    generar_resumen_cierre_mercado()."""
+    es_cripto = getattr(contrato, "secType", None) == "CRYPTO"
+    if mercado == "CRYPTO":
+        return es_cripto
+    if es_cripto:
+        return False  # nunca colar cripto en el resumen de otro mercado (misma divisa, USD)
+    return CURRENCY_A_MERCADO.get(contrato.currency) == mercado
+
+
 def revisar_ventas(ib):
     ib.reqPositions()
     ib.sleep(1)  # da tiempo a que la respuesta llegue antes de leer ib.positions()
@@ -916,7 +1046,7 @@ def revisar_ventas(ib):
         return
 
     posiciones_con_mercado = [
-        (CURRENCY_A_MERCADO.get(pos.contract.currency, "?"), pos)
+        (mercado_de_posicion(pos), pos)
         for pos in posiciones if pos.position > 0
     ]
     posiciones_con_mercado.sort(key=lambda x: x[0])
@@ -934,8 +1064,10 @@ def revisar_ventas(ib):
         # "Error 10349... Cancelled", y el bot llegaba a registrar
         # enganosamente "estado: PreSubmitted" como si la orden siguiera
         # viva). Se sigue mostrando el beneficio/perdida como informacion,
-        # pero sin intentar operar.
-        if mercado in CIERRE_POR_MERCADO and not es_horario_operativo(mercado):
+        # pero sin intentar operar. CRYPTO no esta en CIERRE_POR_MERCADO (no
+        # tiene un unico cierre diario) pero tambien necesita este chequeo
+        # con su propio horario (es_horario_operativo_cripto()).
+        if (mercado in CIERRE_POR_MERCADO or mercado == "CRYPTO") and not es_horario_operativo(mercado):
             if mercado not in mercados_cerrados_avisados:
                 log(f"VENTAS: mercado {mercado} fuera de horario operativo, no se intenta vender "
                     f"ninguna posicion de este mercado en este ciclo.")
@@ -975,8 +1107,12 @@ def revisar_ventas(ib):
             # y se suman.
             valor_compra = cantidad * coste_medio
             valor_venta = cantidad * precio_actual
-            comision_compra = estimar_comision(valor_compra, contrato.currency, cantidad)
-            comision_venta = estimar_comision(valor_venta, contrato.currency, cantidad)
+            if mercado == "CRYPTO":
+                comision_compra = estimar_comision_cripto(valor_compra)
+                comision_venta = estimar_comision_cripto(valor_venta)
+            else:
+                comision_compra = estimar_comision(valor_compra, contrato.currency, cantidad)
+                comision_venta = estimar_comision(valor_venta, contrato.currency, cantidad)
             comision_total = comision_compra + comision_venta
             comision_total_pct = comision_total / valor_compra * 100
             beneficio_pct = beneficio_pct_bruto - comision_total_pct
@@ -985,6 +1121,45 @@ def revisar_ventas(ib):
             # todas las lineas de log de esta operacion.
             info_posicion = (f"{cantidad:g} acciones, precio medio {coste_medio:.4f} {contrato.currency}, "
                               f"comision estimada {comision_total:.2f} {contrato.currency}")
+
+            if mercado == "CRYPTO":
+                # Cripto no tiene "cierre diario" -> nunca hay venta forzada
+                # (en_ventana_venta_forzada siempre da False al no estar en
+                # CIERRE_POR_MERCADO), asi que va directa a la logica normal
+                # de MACD, con su propia construccion de orden (LMT +
+                # totalQuantity fraccionario nativo, sin cashQty ni Plan B/C
+                # -ver crear_orden_limitada_cripto()-).
+                if beneficio_pct < UMBRAL_BENEFICIO_PCT:
+                    log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                        f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
+                    continue
+
+                bajista_cripto = macd_5min_bajista(ib, contrato)
+                if bajista_cripto is None:
+                    log(f"VENTAS: {contrato.symbol} - {info_posicion} - datos insuficientes para MACD 5min, se mantiene por precaucion.")
+                    continue
+
+                if not bajista_cripto:
+                    log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                        f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
+                    continue
+
+                log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden limitada).")
+                precio_limite_cripto = calcular_precio_limite_venta(precio_actual, contrato.currency)
+                orden = crear_orden_limitada_cripto('SELL', cantidad, precio_limite_cripto)
+                trade = ib.placeOrder(contrato, orden)
+                estado = esperar_estado_final_orden(ib, trade)
+                log(f"VENTAS: {contrato.symbol} - orden limitada a {precio_limite_cripto} USD, estado: {estado}")
+                if estado == 'Filled':
+                    precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_limite_cripto
+                    cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad
+                    registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
+                                                   precio_ejecucion, comision_total, contrato.currency,
+                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                else:
+                    verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
+                continue
 
             if (mercado != "?" and en_ventana_venta_forzada(mercado)
                     and UMBRAL_BENEFICIO_PCT <= beneficio_pct <= BENEFICIO_MAX_VENTA_FORZADA_PCT):
@@ -1309,6 +1484,50 @@ def revisar_compras(ib):
                 margen_disponible_moneda = 0
 
             importe_a_usar = min(presupuesto_operacion, margen_disponible_moneda)
+
+            if activo["mercado"] == "CRYPTO":
+                # Cripto siempre admite fracciones nativas via LMT (ver
+                # crear_orden_limitada_cripto()): sin cashQty, sin Plan B/C,
+                # sin distincion pre/postmercado (opera de forma continua).
+                if importe_a_usar < VALOR_MINIMO_OPERACION_CRIPTO_USD:
+                    log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
+                        f"({importe_a_usar:.2f} USD) no llega al minimo de "
+                        f"{VALOR_MINIMO_OPERACION_CRIPTO_USD:.2f} USD por operacion, se omite.")
+                    continue
+
+                cantidad_cripto = round(importe_a_usar / precio_actual, DECIMALES_FRACCION_CRIPTO)
+                if cantidad_cripto <= 0:
+                    log(f"COMPRAS: {ticker} - senal de COMPRA pero el importe calculado ({importe_a_usar:.2f} "
+                        f"USD) no llega a una cantidad valida al precio actual ({precio_actual} USD), se omite.")
+                    continue
+
+                log(f"COMPRAS: {ticker} (CRYPTO) - senal de COMPRA, comprando ~{cantidad_cripto:g} unidades "
+                    f"a ~{precio_actual} USD (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
+                    f"limite: {limite_por_valor_usd:.2f} USD).")
+                cantidad_antes_compra_cripto = next(
+                    (p.position for p in posiciones_actuales if p.contract.symbol == ticker and p.position > 0), 0.0)
+
+                orden = crear_orden_limitada_cripto('BUY', cantidad_cripto, precio_actual)
+                trade = ib.placeOrder(contrato, orden)
+                estado = esperar_estado_final_orden(ib, trade)
+                log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
+
+                compra_confirmada_cripto = estado == 'Filled'
+                if not compra_confirmada_cripto:
+                    cantidad_tras_compra_cripto = verificar_posicion_tras_orden_no_confirmada(
+                        ib, contrato, cantidad_antes_compra_cripto, f"COMPRAS: {ticker}")
+                    compra_confirmada_cripto = cantidad_tras_compra_cripto > cantidad_antes_compra_cripto + 1e-6
+
+                if compra_confirmada_cripto:
+                    precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
+                    cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad_cripto
+                    comision_ejecucion = estimar_comision_cripto(cantidad_ejecutada * precio_ejecucion)
+                    registrar_operacion_historial(activo["mercado"], ticker, "COMPRA", cantidad_ejecutada,
+                                                   precio_ejecucion, comision_ejecucion, currency)
+                    if cantidad_antes_compra_cripto <= 1e-6:
+                        registrar_apertura_de_posicion(activo["mercado"], ticker)
+                continue
+
             fraccionable = FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False)
 
             # Visto en produccion (agosto 2026): las fracciones de accion NO
@@ -1475,15 +1694,13 @@ def generar_resumen_cierre_mercado(ib, mercado):
     hoy (abierta desde, cerrada a las, beneficio % aprox., ganancia), para
     los valores del mercado indicado. Los importes se muestran en moneda
     local del mercado y tambien su equivalente en EUR."""
-    monedas_del_mercado = [c for c, m in CURRENCY_A_MERCADO.items() if m == mercado]
-
     def clave_orden(symbol):
-        """Orden numerico si el simbolo son solo digitos (HK/Corea), alfabetico si no (US)."""
+        """Orden numerico si el simbolo son solo digitos (HK/Corea), alfabetico si no (US/CRYPTO)."""
         return (0, int(symbol)) if symbol.isdigit() else (1, symbol)
 
     posiciones = sorted(
         [p for p in ib.positions()
-         if p.position > 0 and p.contract.currency in monedas_del_mercado],
+         if p.position > 0 and contrato_pertenece_a_mercado(p.contract, mercado)],
         key=lambda p: clave_orden(p.contract.symbol)
     )
 
@@ -1505,7 +1722,7 @@ def generar_resumen_cierre_mercado(ib, mercado):
     compras_por_simbolo = defaultdict(list)
     ventas_por_simbolo = defaultdict(list)
     for e in ejecuciones:
-        if e.contract.currency not in monedas_del_mercado:
+        if not contrato_pertenece_a_mercado(e.contract, mercado):
             continue
         if e.execution.side == 'BOT':
             compras_por_simbolo[e.contract.symbol].append(e)
@@ -1542,7 +1759,10 @@ def generar_resumen_cierre_mercado(ib, mercado):
             abierta_desde = min((e.execution.time for e in compras), default=None)
             abierta_desde_str = abierta_desde.strftime("%Y-%m-%d %H:%M") if abierta_desde else "?"
 
-        comision_estimada = estimar_comision(pos.position * pos.avgCost, pos.contract.currency, pos.position)
+        if mercado == "CRYPTO":
+            comision_estimada = estimar_comision_cripto(pos.position * pos.avgCost)
+        else:
+            comision_estimada = estimar_comision(pos.position * pos.avgCost, pos.contract.currency, pos.position)
         coste_medio_con_comision = pos.avgCost + (comision_estimada / pos.position)
         total_invertido = pos.position * coste_medio_con_comision
         total_invertido_eur = valor_en_eur(total_invertido, pos.contract.currency)
@@ -1650,8 +1870,12 @@ def generar_resumen_cierre_mercado(ib, mercado):
         # propio minimo real de IBKR).
         ganancia_bruta = valor_base - total_invertido
         currency_op = ventas_hoy[0].contract.currency
-        comision_compra = estimar_comision(total_invertido, currency_op, cantidad_vendida)
-        comision_venta = estimar_comision(valor_base, currency_op, cantidad_vendida)
+        if mercado == "CRYPTO":
+            comision_compra = estimar_comision_cripto(total_invertido)
+            comision_venta = estimar_comision_cripto(valor_base)
+        else:
+            comision_compra = estimar_comision(total_invertido, currency_op, cantidad_vendida)
+            comision_venta = estimar_comision(valor_base, currency_op, cantidad_vendida)
         comision_estimada = comision_compra + comision_venta
         ganancia = ganancia_bruta - comision_estimada
         beneficio_pct = (ganancia / total_invertido * 100) if total_invertido else 0.0
@@ -1821,13 +2045,14 @@ def main():
 
             hay_mercado_abierto = (es_horario_operativo("US")
                                     or es_horario_operativo("HK") or es_horario_operativo("KR")
+                                    or es_horario_operativo("CRYPTO")
                                     or en_alguna_ventana_pre_apertura())
 
             if not hay_mercado_abierto:
                 segundos_espera = segundos_hasta_pre_apertura()
                 segundos_espera = max(segundos_espera, 60)  # suelo minimo: nunca esperar casi 0
                 minutos_espera = segundos_espera / 60
-                log(f"Fuera de horario operativo en todos los mercados (US, HK, KR). "
+                log(f"Fuera de horario operativo en todos los mercados (US, HK, KR, CRYPTO). "
                     f"Esperando {minutos_espera:.0f} minutos hasta {MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR} "
                     f"min antes de la proxima apertura...")
                 esperar_pumpeando(ib, segundos_espera)

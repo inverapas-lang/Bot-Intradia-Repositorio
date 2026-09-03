@@ -1219,6 +1219,223 @@ if ib_falso_venta_premercado.ordenes_colocadas:
 
 
 # ---------------------------------------------------------------------------
+# 9. Criptomonedas (PAXOS, via IBKR)
+# ---------------------------------------------------------------------------
+
+# --- 9a. es_horario_operativo_cripto / es_horario_operativo("CRYPTO") ---
+crypto_24_7_original = bot.CRYPTO_24_7
+
+bot.CRYPTO_24_7 = True
+check("es_horario_operativo CRYPTO con CRYPTO_24_7=True: sabado -> abierto (24/7)",
+      con_reloj_fijo(sabado_us, bot.es_horario_operativo, "CRYPTO") is True)
+
+bot.CRYPTO_24_7 = False
+viernes_15_59 = datetime(2026, 8, 14, 15, 59, tzinfo=bot.ZONA_NY)  # viernes, justo antes del cierre
+check("es_horario_operativo CRYPTO (Basic): viernes 15:59 ET -> abierto",
+      con_reloj_fijo(viernes_15_59, bot.es_horario_operativo, "CRYPTO") is True)
+
+viernes_16_00 = datetime(2026, 8, 14, 16, 0, tzinfo=bot.ZONA_NY)  # viernes, justo el cierre
+check("es_horario_operativo CRYPTO (Basic): viernes 16:00 ET -> cerrado",
+      con_reloj_fijo(viernes_16_00, bot.es_horario_operativo, "CRYPTO") is False)
+
+sabado_cripto = datetime(2026, 8, 15, 12, 0, tzinfo=bot.ZONA_NY)  # sabado a mediodia
+check("es_horario_operativo CRYPTO (Basic): sabado -> cerrado",
+      con_reloj_fijo(sabado_cripto, bot.es_horario_operativo, "CRYPTO") is False)
+
+domingo_2_59 = datetime(2026, 8, 16, 2, 59, tzinfo=bot.ZONA_NY)  # domingo, justo antes de abrir
+check("es_horario_operativo CRYPTO (Basic): domingo 2:59 ET -> cerrado",
+      con_reloj_fijo(domingo_2_59, bot.es_horario_operativo, "CRYPTO") is False)
+
+domingo_3_00 = datetime(2026, 8, 16, 3, 0, tzinfo=bot.ZONA_NY)  # domingo, justo la apertura
+check("es_horario_operativo CRYPTO (Basic): domingo 3:00 ET -> abierto",
+      con_reloj_fijo(domingo_3_00, bot.es_horario_operativo, "CRYPTO") is True)
+
+lunes_cripto = datetime(2026, 8, 17, 10, 0, tzinfo=bot.ZONA_NY)  # lunes normal
+check("es_horario_operativo CRYPTO (Basic): lunes 10:00 ET -> abierto",
+      con_reloj_fijo(lunes_cripto, bot.es_horario_operativo, "CRYPTO") is True)
+
+bot.CRYPTO_24_7 = crypto_24_7_original
+
+
+# --- 9b. crear_contrato: activo CRYPTO -> objeto Crypto, no Stock ---
+activo_btc = {"ticker": "BTC", "exchange": "PAXOS", "currency": "USD", "mercado": "CRYPTO"}
+contrato_btc = bot.crear_contrato(activo_btc)
+check("crear_contrato CRYPTO: devuelve un Crypto (no un Stock)",
+      isinstance(contrato_btc, bot.Crypto), f"tipo={type(contrato_btc)}")
+check("crear_contrato CRYPTO: symbol/exchange/currency correctos",
+      contrato_btc.symbol == "BTC" and contrato_btc.exchange == "PAXOS" and contrato_btc.currency == "USD")
+
+
+# --- 9c. mercado_de_posicion / contrato_pertenece_a_mercado: cripto y US
+#     acciones comparten divisa (USD), hay que distinguirlos por secType ---
+class _ContratoConSecType:
+    def __init__(self, symbol, currency, secType):
+        self.symbol = symbol
+        self.currency = currency
+        self.secType = secType
+
+
+class _PosicionConSecType:
+    def __init__(self, symbol, currency, secType, position=1, avgCost=100):
+        self.contract = _ContratoConSecType(symbol, currency, secType)
+        self.position = position
+        self.avgCost = avgCost
+
+
+pos_btc = _PosicionConSecType("BTC", "USD", "CRYPTO")
+pos_aapl = _PosicionConSecType("AAPL", "USD", "STK")
+check("mercado_de_posicion: BTC (secType=CRYPTO, USD) -> 'CRYPTO', no 'US'",
+      bot.mercado_de_posicion(pos_btc) == "CRYPTO")
+check("mercado_de_posicion: AAPL (secType=STK, USD) -> 'US'",
+      bot.mercado_de_posicion(pos_aapl) == "US")
+
+check("contrato_pertenece_a_mercado: BTC pertenece a 'CRYPTO'",
+      bot.contrato_pertenece_a_mercado(pos_btc.contract, "CRYPTO") is True)
+check("contrato_pertenece_a_mercado: BTC NO pertenece a 'US' (aunque comparta divisa USD)",
+      bot.contrato_pertenece_a_mercado(pos_btc.contract, "US") is False)
+check("contrato_pertenece_a_mercado: AAPL pertenece a 'US'",
+      bot.contrato_pertenece_a_mercado(pos_aapl.contract, "US") is True)
+check("contrato_pertenece_a_mercado: AAPL NO pertenece a 'CRYPTO'",
+      bot.contrato_pertenece_a_mercado(pos_aapl.contract, "CRYPTO") is False)
+
+# Un contrato sin atributo secType (p.ej. un doble de prueba antiguo) no debe
+# romper nada: getattr con default lo trata como "no es cripto".
+posicion_sin_sectype = _Posicion("XYZ", 1, 100)
+resultado_sin_sectype = bot.mercado_de_posicion(posicion_sin_sectype)
+check("mercado_de_posicion: contrato SIN atributo secType no revienta, se trata como no-cripto",
+      resultado_sin_sectype == "US", f"resultado={resultado_sin_sectype}")
+
+
+# --- 9d. estimar_comision_cripto: 0.18%, minimo 1.75 USD, tope 1% ---
+# Operacion grande: 0.18% domina sobre el minimo (y no llega al tope del 1%)
+check("estimar_comision_cripto: operacion grande, aplica el 0.18%",
+      abs(bot.estimar_comision_cripto(10_000) - 18.0) < 1e-9,
+      f"obtenido={bot.estimar_comision_cripto(10_000)}")
+
+# Operacion pequeña: 0.18% no llega al minimo (1.75 USD), pero el tope del 1%
+# del valor operado es AUN MENOR que el minimo -> se aplica el tope del 1%,
+# no el minimo (protege operaciones pequeñas de pagar de mas).
+comision_pequena = bot.estimar_comision_cripto(40.0)
+check("estimar_comision_cripto: operacion de 40 USD, el tope del 1% (0.40) gana al minimo (1.75)",
+      abs(comision_pequena - 0.40) < 1e-9, f"obtenido={comision_pequena}")
+
+# Operacion en el rango donde SI se aplica el minimo (el 0.18% no llega a
+# 1.75, pero el 1% del valor si supera 1.75 -> gana el minimo)
+comision_media = bot.estimar_comision_cripto(500.0)
+check("estimar_comision_cripto: operacion de 500 USD, se aplica el minimo de 1.75 USD",
+      abs(comision_media - 1.75) < 1e-9, f"obtenido={comision_media}")
+
+check("estimar_comision_cripto: valor 0 -> comision 0 (no revienta por division por cero)",
+      bot.estimar_comision_cripto(0) == 0.0)
+
+
+# --- 9e. revisar_compras con un activo CRYPTO: usa LimitOrder con
+#     totalQuantity fraccionario NATIVO (sin cashQty, sin Plan B/C) ---
+class _IBFalsoComprasCripto:
+    def __init__(self):
+        self.ordenes_colocadas = []
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return []
+
+    def sleep(self, segundos):
+        pass
+
+    def accountSummary(self):
+        return [types.SimpleNamespace(tag='NetLiquidation', currency='USD', value='300.0')]
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(50000.0)]  # precio simulado de BTC
+
+    def reqContractDetails(self, contrato):
+        return []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled", filled=None, avgFillPrice=None),
+                                      isDone=lambda: True, log=[])
+
+
+activos_originales_compras = bot.ACTIVOS
+bot.ACTIVOS = [activo_btc]
+analizar_activo_original = bot.analizar_activo
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(activo), "COMPRA")
+
+ib_falso_compras_cripto = _IBFalsoComprasCripto()
+try:
+    bot.revisar_compras(ib_falso_compras_cripto)
+finally:
+    bot.ACTIVOS = activos_originales_compras
+    bot.analizar_activo = analizar_activo_original
+
+check("revisar_compras CRYPTO: coloca exactamente una orden",
+      len(ib_falso_compras_cripto.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_compras_cripto.ordenes_colocadas}")
+if ib_falso_compras_cripto.ordenes_colocadas:
+    orden_cripto = ib_falso_compras_cripto.ordenes_colocadas[0]
+    check("revisar_compras CRYPTO: la orden es LIMITADA (no a mercado)",
+          orden_cripto.orderType == "LMT", f"orderType={orden_cripto.orderType}")
+    check("revisar_compras CRYPTO: usa totalQuantity fraccionario (no cashQty)",
+          orden_cripto.totalQuantity > 0, f"totalQuantity={orden_cripto.totalQuantity}")
+    check("revisar_compras CRYPTO: la cantidad es fraccionaria (no redondeada a entero)",
+          bot.es_cantidad_fraccionaria(orden_cripto.totalQuantity),
+          f"totalQuantity={orden_cripto.totalQuantity}")
+
+
+# --- 9f. revisar_ventas con una posicion CRYPTO: usa LimitOrder con
+#     totalQuantity fraccionario nativo, sin pasar por la logica de venta
+#     forzada (que no aplica a cripto, no tiene "cierre diario") ---
+class _IBFalsoVentasCripto:
+    def __init__(self, posiciones):
+        self.ordenes_colocadas = []
+        self._posiciones = posiciones
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(55000.0)]  # +10% sobre el coste medio de 50000
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled", filled=None, avgFillPrice=None),
+                                      isDone=lambda: True, log=[])
+
+
+pos_venta_btc = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCost=50000.0)
+macd_bajista_original_cripto = bot.macd_5min_bajista
+bot.macd_5min_bajista = lambda ib, contrato: True  # forzar señal de venta
+
+ib_falso_ventas_cripto = _IBFalsoVentasCripto([pos_venta_btc])
+try:
+    bot.revisar_ventas(ib_falso_ventas_cripto)
+finally:
+    bot.macd_5min_bajista = macd_bajista_original_cripto
+
+check("revisar_ventas CRYPTO: coloca exactamente una orden",
+      len(ib_falso_ventas_cripto.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_ventas_cripto.ordenes_colocadas}")
+if ib_falso_ventas_cripto.ordenes_colocadas:
+    orden_venta_cripto = ib_falso_ventas_cripto.ordenes_colocadas[0]
+    check("revisar_ventas CRYPTO: la orden es LIMITADA (no a mercado)",
+          orden_venta_cripto.orderType == "LMT", f"orderType={orden_venta_cripto.orderType}")
+    check("revisar_ventas CRYPTO: usa totalQuantity fraccionario nativo (no cashQty)",
+          abs(orden_venta_cripto.totalQuantity - 0.01) < 1e-9,
+          f"totalQuantity={orden_venta_cripto.totalQuantity}")
+    check("revisar_ventas CRYPTO: accion de venta (SELL)",
+          orden_venta_cripto.action == "SELL", f"action={orden_venta_cripto.action}")
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()

@@ -2,9 +2,11 @@
 cartera_ibkr.py - consulta A DEMANDA del estado de la cartera de IBKR
 (bot_completo.py), sin tocar el bot que este corriendo en ese momento:
 
-  - Posiciones ABIERTAS en todos los mercados activos (US/HK/KR): cantidad,
-    precio medio, total invertido (con comision estimada), precio actual,
-    beneficio/perdida no realizado en moneda local y en EUR, y en %.
+  - Posiciones ABIERTAS en todos los mercados activos (US/HK/KR/CRYPTO):
+    cantidad, precio medio, total invertido (con comision estimada), precio
+    actual, beneficio/perdida no realizado en moneda local y en EUR, y en %.
+    Distingue cripto de US aunque ambos coticen en USD (via
+    bot.mercado_de_posicion(), que mira el secType del contrato).
   - Posiciones CERRADAS en un rango de fechas (hoy por defecto): se leen del
     historial persistente que bot_completo.py va guardando en
     "historial_operaciones_ibkr.json" cada vez que una venta se ejecuta con
@@ -59,7 +61,7 @@ def imprimir_posiciones_abiertas(ib):
     ib.sleep(1)
     posiciones = sorted(
         [p for p in ib.positions() if p.position > 0],
-        key=lambda p: (bot.CURRENCY_A_MERCADO.get(p.contract.currency, "?"), p.contract.symbol)
+        key=lambda p: (bot.mercado_de_posicion(p), p.contract.symbol)
     )
 
     print("\n=== POSICIONES ABIERTAS ===")
@@ -76,11 +78,14 @@ def imprimir_posiciones_abiertas(ib):
 
     for pos in posiciones:
         contrato = pos.contract
-        mercado = bot.CURRENCY_A_MERCADO.get(contrato.currency, "?")
+        mercado = bot.mercado_de_posicion(pos)
         cantidad = pos.position
         coste_medio = pos.avgCost
 
-        comision_estimada = bot.estimar_comision(cantidad * coste_medio, contrato.currency, cantidad)
+        if mercado == "CRYPTO":
+            comision_estimada = bot.estimar_comision_cripto(cantidad * coste_medio)
+        else:
+            comision_estimada = bot.estimar_comision(cantidad * coste_medio, contrato.currency, cantidad)
         coste_medio_con_comision = coste_medio + (comision_estimada / cantidad)
         invertido = cantidad * coste_medio_con_comision
         invertido_eur = bot.valor_en_eur(invertido, contrato.currency)
