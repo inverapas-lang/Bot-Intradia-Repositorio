@@ -1099,11 +1099,18 @@ def revisar_ventas(ib):
         # Bug real de produccion (sept. 2026): para posiciones CRYPTO, el
         # contrato que devuelve ib.positions() viene con el campo `exchange`
         # vacio (a diferencia de las acciones), y reqHistoricalData lo
-        # rechaza con el error 321 "Please enter exchange". Se rellena aqui
-        # explicitamente con el mismo exchange que usa el bot para crear
-        # contratos de cripto.
+        # rechaza con el error 321 "Please enter exchange". La primera
+        # correccion (rellenarlo a mano con EXCHANGE_CRYPTO) resulto ser
+        # incorrecta: el contrato YA trae un conId real (el de la posicion
+        # concreta que tiene el usuario), y forzar un `exchange` que no
+        # corresponde a ese conId da el error 200 "No security definition
+        # has been found for the request" (visto en produccion). La forma
+        # segura de completar el contrato es dejar que IBKR lo resuelva el
+        # mismo a partir de su propio conId, sin adivinar el nombre del
+        # exchange (evita el problema de fondo PAXOS-vs-ZEROHASH: el conId
+        # ya identifica sin ambiguedad el proveedor real de esa posicion).
         if mercado == "CRYPTO" and not contrato.exchange:
-            contrato.exchange = EXCHANGE_CRYPTO
+            ib.qualifyContracts(contrato)
 
         try:
             # Salvaguarda explicita: nunca vender mas acciones de las que

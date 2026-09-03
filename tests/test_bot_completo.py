@@ -1439,6 +1439,13 @@ class _IBFalsoVentasCripto:
     def sleep(self, segundos):
         pass
 
+    def qualifyContracts(self, contrato):
+        # Simula que IBKR resuelve el exchange real a partir del conId de la
+        # posicion (asi es como revisar_ventas completa un contrato CRYPTO
+        # que llega con exchange="" - ver bug real de produccion, error 200,
+        # sept. 2026).
+        contrato.exchange = bot.EXCHANGE_CRYPTO
+
     def reqHistoricalData(self, contrato, **kwargs):
         return [_Vela(55000.0)]  # +10% sobre el coste medio de 50000
 
