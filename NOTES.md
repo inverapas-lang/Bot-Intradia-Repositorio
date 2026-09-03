@@ -394,6 +394,14 @@ con estas 4 por prudencia; para añadir más (p.ej. SOL, LINK, solo disponibles 
 basta con ampliar la lista de tickers en `ACTIVOS_CRYPTO` (mismo `exchange=EXCHANGE_CRYPTO`,
 `currency="USD"`).
 
+**Segundo bug relacionado, mismo sintoma (sept. 2026)**: arreglado el exchange, BTC seguia
+dando `TimeoutError` en los 3 intentos en produccion. Causa real: `reqHistoricalData` exige
+`whatToShow='AGGTRADES'` para contratos `secType='CRYPTO'` — el resto de mercados (US/HK/KR)
+usa `'TRADES'`, y ese valor simplemente no funciona para cripto (de nuevo, sin un error de
+permisos claro, solo timeout). `pedir_velas()` ahora elige `what_to_show` segun
+`contrato.secType`. Moraleja para el futuro: si cripto vuelve a dar timeout, revisar primero
+que el exchange (`EXCHANGE_CRYPTO`) y el `whatToShow` sigan siendo validos para la cuenta.
+
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a
   viernes 4:00 PM ET (cerrado la mayor parte del fin de semana).

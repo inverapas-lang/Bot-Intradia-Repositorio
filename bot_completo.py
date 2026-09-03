@@ -607,11 +607,19 @@ def pedir_velas(ib, contrato, duration, barSize):
 
     intentos = 1 if disyuntor_activo else INTENTOS_MAXIMOS
 
+    # Para contratos CRYPTO, IBKR exige whatToShow='AGGTRADES' en
+    # reqHistoricalData; 'TRADES' (el que usan acciones/US/HK/KR) no esta
+    # soportado para CRYPTO y no da un error claro, sino que se queda
+    # colgado hasta agotar el timeout en todos los intentos (bug real visto
+    # en produccion, sept. 2026 - el mismo sintoma que el problema de
+    # exchange PAXOS/ZEROHASH, pero con causa distinta).
+    what_to_show = 'AGGTRADES' if getattr(contrato, 'secType', None) == 'CRYPTO' else 'TRADES'
+
     for intento in range(1, intentos + 1):
         try:
             velas = ib.reqHistoricalData(
                 contrato, endDateTime='', durationStr=duration,
-                barSizeSetting=barSize, whatToShow='TRADES',
+                barSizeSetting=barSize, whatToShow=what_to_show,
                 useRTH=False, formatDate=1,
             )
         except Exception as e:

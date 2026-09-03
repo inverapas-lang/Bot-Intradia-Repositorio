@@ -437,6 +437,42 @@ check("pedir_velas: una excepcion en el primer intento no aborta, reintenta y co
 
 
 # ---------------------------------------------------------------------------
+# 7a-bis. whatToShow correcto segun el tipo de contrato: 'AGGTRADES' para
+#         CRYPTO (bug real de produccion, sept. 2026: con 'TRADES' -tambien
+#         usado para acciones- reqHistoricalData se quedaba colgado con
+#         TimeoutError para BTC, sin dar un error de permisos claro),
+#         'TRADES' para el resto (acciones US/HK/KR, sin cambios).
+# ---------------------------------------------------------------------------
+class _IBCapturaWhatToShow:
+    def __init__(self):
+        self.what_to_show_recibido = None
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        self.what_to_show_recibido = kwargs.get("whatToShow")
+        return [_Vela(100)]
+
+    def sleep(self, segundos):
+        pass
+
+
+class _ContratoCryptoFalso(_ContratoFalso):
+    secType = "CRYPTO"
+
+
+ib_captura_crypto = _IBCapturaWhatToShow()
+bot.pedir_velas(ib_captura_crypto, _ContratoCryptoFalso("BTC"), "1 D", "5 mins")
+check("pedir_velas: contrato CRYPTO pide whatToShow='AGGTRADES'",
+      ib_captura_crypto.what_to_show_recibido == "AGGTRADES",
+      f"whatToShow={ib_captura_crypto.what_to_show_recibido}")
+
+ib_captura_accion = _IBCapturaWhatToShow()
+bot.pedir_velas(ib_captura_accion, _ContratoFalso("AAPL"), "1 D", "5 mins")
+check("pedir_velas: contrato de accion (sin secType CRYPTO) sigue pidiendo whatToShow='TRADES'",
+      ib_captura_accion.what_to_show_recibido == "TRADES",
+      f"whatToShow={ib_captura_accion.what_to_show_recibido}")
+
+
+# ---------------------------------------------------------------------------
 # 7b. Cortacircuitos: tras muchos valores SEGUIDOS sin ningun dato (senal de
 #     que TWS/IB Gateway perdio la conexion con los market data farms), deja
 #     de reintentar 3 veces con espera de 15s por cada valor -> solo 1
