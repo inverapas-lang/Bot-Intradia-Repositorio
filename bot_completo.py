@@ -360,7 +360,7 @@ ACTIVOS_KR = [
 EXCHANGE_CRYPTO = ""  # se deja vacio a proposito, ver historia arriba: NO hardcodear un exchange
 ACTIVOS_CRYPTO = [
     {"ticker": t, "exchange": EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
-    for t in ["BTC", "ETH", "LTC", "BCH"]
+    for t in ["BTC", "ETH", "LTC", "BCH", "SOL", "LINK"]
 ]
 
 # HK excluido (agosto 2026): con el capital actual (~300 EUR, limite de exposicion 15% => ~45

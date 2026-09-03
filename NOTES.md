@@ -430,11 +430,12 @@ asumir que ese error apunta al otro proveedor sin más: como se vio en los pasos
 datos para ZEROHASH" no implica "datos para PAXOS", puede ser un tercer contrato totalmente
 distinto. La única fuente fiable es el conId de una posición real ya abierta.
 
-**Monedas**: solo `ACTIVOS_CRYPTO` = BTC, ETH, LTC, BCH. Se empezó solo con estas 4 por
-prudencia (son las que soporta el proveedor original, Paxos, y las más probadas en la API de
-IBKR); para añadir más (monedas solo disponibles vía Zerohash, p.ej. SOL, LINK), basta con
-ampliar la lista de tickers en `ACTIVOS_CRYPTO` (mismo `exchange=EXCHANGE_CRYPTO`,
-`currency="USD"` — el exchange real se descubre solo, ver arriba).
+**Monedas**: `ACTIVOS_CRYPTO` = BTC, ETH, LTC, BCH, SOL, LINK. Se empezó solo con las 4
+primeras por prudencia (son las que soporta el proveedor original, Paxos, y las más probadas
+en la API de IBKR); SOL y LINK se añadieron después a petición explícita del usuario (sept.
+2026), ya con el mecanismo de descubrimiento de exchange en marcha (ver arriba) — no hizo
+falta ningún cambio adicional, solo ampliar la lista de tickers (mismo
+`exchange=EXCHANGE_CRYPTO`, `currency="USD"`).
 
 **Contrato de una posición CRYPTO sin `exchange` (error 321/200)**: a diferencia de las
 acciones, el contrato que devuelve `ib.positions()` para una posición CRYPTO llega con el
