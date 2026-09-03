@@ -369,16 +369,30 @@ comisiones mínimas**, antes de contar ganancias/pérdidas de mercado — operar
 poco viable con un capital tan pequeño, más allá del problema de los lotes fijos de HK ya
 documentado. Ver conversación de agosto 2026 para el detalle completo del cálculo.
 
-## Criptomonedas (PAXOS, vía IBKR) — añadido septiembre 2026
+## Criptomonedas (PAXOS/ZEROHASH, vía IBKR) — añadido septiembre 2026
 
 Petición explícita del usuario: ya tenía el permiso de cripto activado en IBKR y había hecho
 una operación a mano antes de pedir que el bot lo soportara.
 
-**Monedas**: solo `ACTIVOS_CRYPTO` = BTC, ETH, LTC, BCH — las 4 "nativas" de Paxos, las más
-maduras y probadas en la API de IBKR. IBKR ha añadido más monedas recientemente vía otro
-proveedor (zerohash: LINK, MATIC, SOL, AAVE, UNI, PAXG...), pero se empezó solo con estas 4
-por prudencia. Para añadir más, basta con ampliar la lista de tickers en `ACTIVOS_CRYPTO`
-(mismo `exchange="PAXOS"`, `currency="USD"`).
+**IMPORTANTE — dos proveedores distintos con conId diferente para la misma moneda**: IBKR
+ofrece cripto a través de dos exchanges/proveedores distintos: `"PAXOS"` (el original, 4
+monedas: BTC/ETH/LTC/BCH) y `"ZEROHASH"` (más reciente, más monedas: BTC, ETH, LTC, BCH,
+LINK, MATIC, SOL...). Cuál usa una cuenta concreta depende de sus suscripciones de datos de
+mercado (Client Portal → Configuración de cuenta → Suscripciones de datos de mercado). **Bug
+real visto en producción (sept. 2026)**: con `exchange="PAXOS"` hardcodeado en una cuenta
+suscrita solo a "ZEROHASHE Cryptocurrency" (no a Paxos), `reqHistoricalData` se quedaba
+colgado hasta agotar el timeout en los 3 intentos para BTC —sin ningún error claro de
+permisos, solo un `TimeoutError` genérico— mientras que las acciones US funcionaban con
+normalidad en el mismo ciclo. Confirmado con una captura de pantalla del usuario que su
+cuenta usa ZEROHASH. Corregido introduciendo la constante `EXCHANGE_CRYPTO = "ZEROHASH"`
+(justo encima de `ACTIVOS_CRYPTO`) y usándola en vez de un string hardcodeado. Si en el
+futuro se detecta que la cuenta cambia de proveedor, basta con cambiar ese único valor.
+
+**Monedas**: solo `ACTIVOS_CRYPTO` = BTC, ETH, LTC, BCH — las 4 que existen en ambos
+proveedores (Paxos y Zerohash), las más maduras y probadas en la API de IBKR. Se empezó solo
+con estas 4 por prudencia; para añadir más (p.ej. SOL, LINK, solo disponibles vía Zerohash),
+basta con ampliar la lista de tickers en `ACTIVOS_CRYPTO` (mismo `exchange=EXCHANGE_CRYPTO`,
+`currency="USD"`).
 
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a

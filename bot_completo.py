@@ -119,11 +119,11 @@ APERTURA_POR_MERCADO = {
 MINUTOS_ANTES_DE_APERTURA_PARA_DESPERTAR = 15  # con todos los mercados cerrados, despertar 15 min antes de la mas proxima
 
 CURRENCY_A_MERCADO = {"USD": "US", "HKD": "HK", "KRW": "KR", "EUR": "EU"}
-# NOTA: la cripto (PAXOS) tambien cotiza en USD, asi que esta tabla NO sirve
+# NOTA: la cripto (PAXOS/ZEROHASH) tambien cotiza en USD, asi que esta tabla NO sirve
 # para distinguirla de US -ver mercado_de_posicion()/contrato_pertenece_a_mercado(),
 # que comprueban primero secType == "CRYPTO" antes de mirar la divisa-.
 
-# --- Criptomonedas (PAXOS, via IBKR) ---
+# --- Criptomonedas (PAXOS/ZEROHASH, via IBKR) ---
 # Horario "Crypto Basic" (nivel por defecto en la mayoria de cuentas nuevas):
 # opera de domingo 3:00 AM ET a viernes 4:00 PM ET (cerrado la mayor parte
 # del fin de semana). Si tu cuenta tiene el nivel "Crypto Plus" (24/7,
@@ -274,14 +274,24 @@ ACTIVOS_KR = [
     {"ticker": "000270", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Kia
 ]
 
-# --- Lista de valores: criptomonedas (PAXOS, USD) ---
-# Solo las 4 monedas "nativas" de Paxos en IBKR (las mas maduras y probadas
-# en la API); IBKR ha añadido mas recientemente otras via un proveedor
-# distinto (zerohash: LINK, MATIC, SOL...), pero se empieza solo con estas 4
-# por prudencia -ampliar la lista si hace falta, una vez confirmado que
-# funcionan bien en real-.
+# --- Lista de valores: criptomonedas (ZEROHASH, USD) ---
+# IBKR ofrece cripto a traves de DOS proveedores distintos, con contratos/
+# conId DIFERENTES incluso para la misma moneda: "PAXOS" (el original, 4
+# monedas: BTC/ETH/LTC/BCH) y "ZEROHASH" (mas reciente, mas monedas: BTC,
+# ETH, LTC, BCH, LINK, MATIC, SOL...). Cual de los dos usa una cuenta
+# concreta depende de sus suscripciones de datos de mercado (Client Portal
+# -> Configuracion de cuenta -> Suscripciones de datos de mercado). BUG REAL
+# visto en produccion (sept. 2026): con `exchange="PAXOS"` en una cuenta
+# suscrita solo a "ZEROHASHE Cryptocurrency" (no a Paxos), reqHistoricalData
+# se quedaba colgado hasta agotar el timeout en TODOS los intentos -sin
+# ningun error claro de permisos, solo un TimeoutError generico-, porque
+# simplemente no hay flujo de datos para ese exchange en esa cuenta.
+# Confirmado con el usuario que su cuenta esta en ZEROHASH -> exchange
+# corregido aqui. Si en el futuro se usa otra cuenta con Paxos, cambiar el
+# valor de EXCHANGE_CRYPTO mas abajo.
+EXCHANGE_CRYPTO = "ZEROHASH"
 ACTIVOS_CRYPTO = [
-    {"ticker": t, "exchange": "PAXOS", "currency": "USD", "mercado": "CRYPTO"}
+    {"ticker": t, "exchange": EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
     for t in ["BTC", "ETH", "LTC", "BCH"]
 ]
 
@@ -708,7 +718,7 @@ def crear_orden_limitada_cash(accion, importe_efectivo, precio_limite, fuera_hor
 
 
 def crear_orden_limitada_cripto(accion, cantidad, precio_limite):
-    """Orden LIMITADA para criptomonedas (PAXOS). A diferencia de las
+    """Orden LIMITADA para criptomonedas (PAXOS/ZEROHASH, ver EXCHANGE_CRYPTO). A diferencia de las
     acciones -donde una cantidad fraccionaria puesta directamente via API
     es rechazada con el error 10243, y hay que recurrir al truco del importe
     en efectivo (cashQty)-, en cripto las ordenes LMT SI admiten

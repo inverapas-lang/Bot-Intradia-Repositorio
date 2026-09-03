@@ -1219,7 +1219,7 @@ if ib_falso_venta_premercado.ordenes_colocadas:
 
 
 # ---------------------------------------------------------------------------
-# 9. Criptomonedas (PAXOS, via IBKR)
+# 9. Criptomonedas (PAXOS/ZEROHASH, via IBKR)
 # ---------------------------------------------------------------------------
 
 # --- 9a. es_horario_operativo_cripto / es_horario_operativo("CRYPTO") ---
@@ -1258,12 +1258,12 @@ bot.CRYPTO_24_7 = crypto_24_7_original
 
 
 # --- 9b. crear_contrato: activo CRYPTO -> objeto Crypto, no Stock ---
-activo_btc = {"ticker": "BTC", "exchange": "PAXOS", "currency": "USD", "mercado": "CRYPTO"}
+activo_btc = {"ticker": "BTC", "exchange": bot.EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
 contrato_btc = bot.crear_contrato(activo_btc)
 check("crear_contrato CRYPTO: devuelve un Crypto (no un Stock)",
       isinstance(contrato_btc, bot.Crypto), f"tipo={type(contrato_btc)}")
 check("crear_contrato CRYPTO: symbol/exchange/currency correctos",
-      contrato_btc.symbol == "BTC" and contrato_btc.exchange == "PAXOS" and contrato_btc.currency == "USD")
+      contrato_btc.symbol == "BTC" and contrato_btc.exchange == bot.EXCHANGE_CRYPTO and contrato_btc.currency == "USD")
 
 
 # --- 9c. mercado_de_posicion / contrato_pertenece_a_mercado: cripto y US
