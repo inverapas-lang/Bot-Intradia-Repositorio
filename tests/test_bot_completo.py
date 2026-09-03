@@ -1305,10 +1305,11 @@ check("crear_contrato CRYPTO: symbol/exchange/currency correctos",
 # --- 9c. mercado_de_posicion / contrato_pertenece_a_mercado: cripto y US
 #     acciones comparten divisa (USD), hay que distinguirlos por secType ---
 class _ContratoConSecType:
-    def __init__(self, symbol, currency, secType):
+    def __init__(self, symbol, currency, secType, exchange=""):
         self.symbol = symbol
         self.currency = currency
         self.secType = secType
+        self.exchange = exchange
 
 
 class _PosicionConSecType:
@@ -1469,6 +1470,15 @@ if ib_falso_ventas_cripto.ordenes_colocadas:
           f"totalQuantity={orden_venta_cripto.totalQuantity}")
     check("revisar_ventas CRYPTO: accion de venta (SELL)",
           orden_venta_cripto.action == "SELL", f"action={orden_venta_cripto.action}")
+
+# Bug real de produccion (sept. 2026): el contrato de una posicion CRYPTO
+# que llega de ib.positions() viene con exchange="" (a diferencia de las
+# acciones), y reqHistoricalData lo rechazaba con el error 321 "Please enter
+# exchange". revisar_ventas debe rellenarlo con EXCHANGE_CRYPTO antes de
+# pedir datos.
+check("revisar_ventas CRYPTO: rellena el exchange vacio del contrato antes de pedir datos",
+      pos_venta_btc.contract.exchange == bot.EXCHANGE_CRYPTO,
+      f"exchange={pos_venta_btc.contract.exchange!r}")
 
 
 # ---------------------------------------------------------------------------

@@ -1096,6 +1096,15 @@ def revisar_ventas(ib):
         cantidad = pos.position
         coste_medio = pos.avgCost
 
+        # Bug real de produccion (sept. 2026): para posiciones CRYPTO, el
+        # contrato que devuelve ib.positions() viene con el campo `exchange`
+        # vacio (a diferencia de las acciones), y reqHistoricalData lo
+        # rechaza con el error 321 "Please enter exchange". Se rellena aqui
+        # explicitamente con el mismo exchange que usa el bot para crear
+        # contratos de cripto.
+        if mercado == "CRYPTO" and not contrato.exchange:
+            contrato.exchange = EXCHANGE_CRYPTO
+
         try:
             # Salvaguarda explicita: nunca vender mas acciones de las que
             # realmente hay en cartera (sin apalancamiento, sin venta en corto).
