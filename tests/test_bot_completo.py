@@ -1621,6 +1621,77 @@ check("revisar_ventas CRYPTO: rellena el exchange vacio del contrato antes de pe
 
 
 # ---------------------------------------------------------------------------
+# 9d. UMBRAL_BENEFICIO_CRYPTO_PCT: cripto usa un umbral mas bajo (0.3%) que
+#     acciones (0.5%, sigue en UMBRAL_BENEFICIO_PCT sin cambios) - peticion
+#     del usuario, sept. 2026. El caso interesante es un beneficio NETO
+#     entre ambos umbrales (0.3%-0.5%): con el umbral de acciones NO se
+#     venderia, con el de cripto SI.
+# ---------------------------------------------------------------------------
+check("UMBRAL_BENEFICIO_CRYPTO_PCT es 0.3 (mas bajo que el de acciones, 0.5)",
+      bot.UMBRAL_BENEFICIO_CRYPTO_PCT == 0.3 and bot.UMBRAL_BENEFICIO_PCT == 0.5,
+      f"cripto={bot.UMBRAL_BENEFICIO_CRYPTO_PCT}, acciones={bot.UMBRAL_BENEFICIO_PCT}")
+
+
+class _IBFalsoVentasCriptoUmbral(_IBFalsoVentasCripto):
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(50550.0)]  # +1.1% bruto sobre 50000 -> ~0.4% neto tras comision (~0.7%)
+
+
+pos_venta_btc_umbral = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCost=50000.0)
+bot.macd_5min_bajista = lambda ib, contrato: True
+ib_falso_umbral = _IBFalsoVentasCriptoUmbral([pos_venta_btc_umbral])
+try:
+    bot.revisar_ventas(ib_falso_umbral)
+finally:
+    bot.macd_5min_bajista = macd_bajista_original_cripto
+
+check("revisar_ventas CRYPTO: con beneficio neto ~0.4% (entre 0.3% y 0.5%) SI vende, "
+      "gracias al umbral mas bajo de cripto",
+      len(ib_falso_umbral.ordenes_colocadas) == 1, f"ordenes={ib_falso_umbral.ordenes_colocadas}")
+
+
+# ---------------------------------------------------------------------------
+# 9e. Parametro `mercados` de revisar_compras/revisar_ventas: permite
+#     revisar SOLO un subconjunto de mercados (usado por main() para que
+#     CRYPTO corra en su propia cadencia de 1 min, independiente de
+#     US/HK/KR a 4 min - ver CRYPTO_INTERVALO_SEGUNDOS).
+# ---------------------------------------------------------------------------
+activos_mixtos_filtro = [
+    {"ticker": "AAPL", "exchange": "SMART", "currency": "USD", "mercado": "US"},
+    activo_btc,
+]
+activos_originales_filtro = bot.ACTIVOS
+bot.ACTIVOS = activos_mixtos_filtro
+analizar_activo_original_filtro = bot.analizar_activo
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None
+
+ib_falso_compras_filtro = _IBFalsoComprasCripto()
+try:
+    bot.revisar_compras(ib_falso_compras_filtro, mercados={"CRYPTO"})
+finally:
+    bot.ACTIVOS = activos_originales_filtro
+    bot.analizar_activo = analizar_activo_original_filtro
+
+check("revisar_compras con mercados={'CRYPTO'}: solo opera BTC, ignora AAPL (mercado US)",
+      len(ib_falso_compras_filtro.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_compras_filtro.ordenes_colocadas}")
+
+pos_venta_aapl_filtro = _Posicion("AAPL", 5, 190.0)
+pos_venta_btc_filtro = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCost=50000.0)
+bot.macd_5min_bajista = lambda ib, contrato: True
+ib_falso_ventas_filtro = _IBFalsoVentasCripto([pos_venta_aapl_filtro, pos_venta_btc_filtro])
+try:
+    bot.revisar_ventas(ib_falso_ventas_filtro, mercados={"CRYPTO"})
+finally:
+    bot.macd_5min_bajista = macd_bajista_original_cripto
+
+check("revisar_ventas con mercados={'CRYPTO'}: solo opera BTC, ignora AAPL (mercado US)",
+      len(ib_falso_ventas_filtro.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_ventas_filtro.ordenes_colocadas}")
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()

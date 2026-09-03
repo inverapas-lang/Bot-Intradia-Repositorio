@@ -189,8 +189,17 @@ TIPO_CAMBIO_EUR_USD = 1.14   # Actualiza estos valores cuando quieras, a mano
 TIPO_CAMBIO_USD_HKD = 7.80   # 1 USD = 7.80 HKD (aprox, el HKD esta fijado al USD)
 TIPO_CAMBIO_USD_KRW = 1480   # 1 USD = 1480 KRW (aprox)
 UMBRAL_BENEFICIO_PCT = 0.5  # % minimo de beneficio para activar la vigilancia de venta
+UMBRAL_BENEFICIO_CRYPTO_PCT = 0.3  # cripto: umbral mas bajo que acciones (peticion del usuario, sept.
+                                    # 2026) - ya es NETO de comision (beneficio_pct la resta antes de
+                                    # compararlo), y cripto es 24/7 y mas rapida: esperar al 0.5% de
+                                    # acciones puede dejar escapar subidas que luego revierten.
 MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2  # % por debajo del precio actual al vender con orden limitada
-INTERVALO_SEGUNDOS = 4 * 60  # 4 minutos
+INTERVALO_SEGUNDOS = 4 * 60  # 4 minutos: US/HK/KR
+CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto (peticion del usuario, sept. 2026):
+                                 # 24/7 y mas rapida que acciones, un ciclo cada 4 min puede dejar
+                                 # escapar movimientos cortos. Corre en su propia cadencia dentro
+                                 # de main(), independiente del ciclo de US/HK/KR (ver ciclo_completo()
+                                 # con el parametro `mercados`).
 LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera (en USD equivalente) por valor
 
 # --- Fracciones de accion ---
@@ -1210,7 +1219,12 @@ def contrato_pertenece_a_mercado(contrato, mercado):
     return CURRENCY_A_MERCADO.get(contrato.currency) == mercado
 
 
-def revisar_ventas(ib):
+def revisar_ventas(ib, mercados=None):
+    """Si `mercados` es None (por defecto), revisa TODOS los mercados con
+    posiciones abiertas, igual que siempre. Si se pasa un conjunto (p.ej.
+    {"CRYPTO"}), solo revisa posiciones de esos mercados -usado para poder
+    correr cripto en su propia cadencia mas rapida, independiente de
+    US/HK/KR (ver CRYPTO_INTERVALO_SEGUNDOS y ciclo_completo())."""
     ib.reqPositions()
     ib.sleep(1)  # da tiempo a que la respuesta llegue antes de leer ib.positions()
     posiciones = ib.positions()
@@ -1223,6 +1237,10 @@ def revisar_ventas(ib):
         (mercado_de_posicion(pos), pos)
         for pos in posiciones if pos.position > 0
     ]
+    if mercados is not None:
+        posiciones_con_mercado = [(m, p) for m, p in posiciones_con_mercado if m in mercados]
+        if not posiciones_con_mercado:
+            return
     posiciones_con_mercado.sort(key=lambda x: x[0])
 
     mercado_actual = None
@@ -1319,7 +1337,7 @@ def revisar_ventas(ib):
                 # de MACD, con su propia construccion de orden (LMT +
                 # totalQuantity fraccionario nativo, sin cashQty ni Plan B/C
                 # -ver crear_orden_limitada_cripto()-).
-                if beneficio_pct < UMBRAL_BENEFICIO_PCT:
+                if beneficio_pct < UMBRAL_BENEFICIO_CRYPTO_PCT:
                     log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
                         f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
                     continue
@@ -1548,7 +1566,8 @@ def obtener_incremento_lote(ib, contrato):
     return 1, 1
 
 
-def revisar_compras(ib):
+def revisar_compras(ib, mercados=None):
+    """Ver revisar_ventas() para el significado de `mercados`."""
     valor_total_cartera_usd = obtener_valor_total_cartera_usd(ib)
     if valor_total_cartera_usd is None:
         log("COMPRAS: no se pudo obtener el valor total de la cartera, se omite este ciclo de compras.")
@@ -1570,6 +1589,8 @@ def revisar_compras(ib):
                 f"{contadores['senales']} señales de compra, {contadores['errores']} errores.")
 
     for activo in ACTIVOS:
+        if mercados is not None and activo["mercado"] not in mercados:
+            continue
         if activo["mercado"] != mercado_actual:
             imprimir_resumen_mercado()
             log(f"\n########## COMPRAS - MERCADO {activo['mercado']} ##########")
@@ -2204,11 +2225,17 @@ def avisar_modo_cuenta(ib):
     return modo_texto
 
 
-def ciclo_completo(ib, modo_texto="?"):
+def ciclo_completo(ib, modo_texto="?", mercados=None):
+    """Ver revisar_ventas()/revisar_compras() para el significado de
+    `mercados`. Cripto corre en su propia cadencia (CRYPTO_INTERVALO_SEGUNDOS,
+    mas rapida) independiente de US/HK/KR (INTERVALO_SEGUNDOS) -ver main()-,
+    asi que este ciclo se llama dos veces por vuelta del bucle principal,
+    cada una con un subconjunto de mercados distinto cuando corresponda."""
+    etiqueta = f" ({'/'.join(sorted(mercados))})" if mercados is not None else ""
     log("=" * 60)
-    log(f"Iniciando nuevo ciclo de revision. [{modo_texto}]")
-    revisar_ventas(ib)
-    revisar_compras(ib)
+    log(f"Iniciando nuevo ciclo de revision{etiqueta}. [{modo_texto}]")
+    revisar_ventas(ib, mercados=mercados)
+    revisar_compras(ib, mercados=mercados)
     log("Ciclo completado.")
 
 
@@ -2317,6 +2344,10 @@ def main():
     modo_texto = avisar_modo_cuenta(ib)
 
     resumenes_enviados_hoy = set()  # claves (mercado, fecha) para no repetir el resumen
+    # Proximo instante (time.monotonic()) en el que toca revisar cada grupo
+    # de mercados; 0.0 fuerza a que ambos corran en la primera vuelta.
+    proxima_revision_cripto = 0.0
+    proxima_revision_otros = 0.0
 
     try:
         while True:
@@ -2372,10 +2403,10 @@ def main():
                     log(f"RESUMEN CRYPTO: error al generar el resumen: {type(e).__name__}: {e}")
                 resumenes_enviados_hoy.add(("CRYPTO", hoy))
 
-            hay_mercado_abierto = (es_horario_operativo("US")
-                                    or es_horario_operativo("HK") or es_horario_operativo("KR")
-                                    or es_horario_operativo("CRYPTO")
-                                    or en_alguna_ventana_pre_apertura())
+            cripto_abierta = es_horario_operativo("CRYPTO")
+            otros_abiertos = (es_horario_operativo("US") or es_horario_operativo("HK")
+                               or es_horario_operativo("KR") or en_alguna_ventana_pre_apertura())
+            hay_mercado_abierto = cripto_abierta or otros_abiertos
 
             if not hay_mercado_abierto:
                 segundos_espera = segundos_hasta_pre_apertura()
@@ -2387,22 +2418,55 @@ def main():
                 esperar_pumpeando(ib, segundos_espera)
                 continue
 
-            inicio_ciclo = time.monotonic()
-            try:
-                ciclo_completo(ib, modo_texto)
-            except Exception as e:
-                log(f"ERROR en el ciclo: {type(e).__name__}: {e}")
-            duracion_ciclo = time.monotonic() - inicio_ciclo
+            # Cripto (24/7, CRYPTO_INTERVALO_SEGUNDOS = 1 min) y US/HK/KR
+            # (INTERVALO_SEGUNDOS = 4 min) corren en su propia cadencia,
+            # cada una independiente de la otra -cripto es mas rapida y no
+            # tiene sentido frenarla al ritmo de acciones, ni tiene sentido
+            # acelerar acciones al ritmo de cripto (mas peticiones de datos
+            # de las que hacen falta). Cada una se ejecuta solo si ya toca
+            # (ahora >= proxima_revision_*) Y su mercado esta abierto ahora
+            # mismo.
+            ahora_mono = time.monotonic()
 
-            if duracion_ciclo > INTERVALO_SEGUNDOS:
-                log(f"AVISO: el ciclo ha tardado {duracion_ciclo:.0f}s, mas que el intervalo "
-                    f"configurado ({INTERVALO_SEGUNDOS}s). Se pasa a la siguiente revision sin esperar; "
-                    f"considera subir INTERVALO_SEGUNDOS o reducir el numero de valores/temporalidades.")
-                segundos_espera_siguiente = 0
-            else:
-                segundos_espera_siguiente = INTERVALO_SEGUNDOS - duracion_ciclo
-                log(f"Ciclo completado en {duracion_ciclo:.0f}s. Esperando "
-                    f"{segundos_espera_siguiente:.0f}s hasta la siguiente revision...")
+            if cripto_abierta and ahora_mono >= proxima_revision_cripto:
+                inicio_cripto = time.monotonic()
+                try:
+                    ciclo_completo(ib, modo_texto, mercados={"CRYPTO"})
+                except Exception as e:
+                    log(f"ERROR en el ciclo CRYPTO: {type(e).__name__}: {e}")
+                duracion_cripto = time.monotonic() - inicio_cripto
+                if duracion_cripto > CRYPTO_INTERVALO_SEGUNDOS:
+                    log(f"AVISO: el ciclo CRYPTO ha tardado {duracion_cripto:.0f}s, mas que su "
+                        f"intervalo configurado ({CRYPTO_INTERVALO_SEGUNDOS}s).")
+                proxima_revision_cripto = inicio_cripto + CRYPTO_INTERVALO_SEGUNDOS
+
+            if otros_abiertos and ahora_mono >= proxima_revision_otros:
+                inicio_otros = time.monotonic()
+                try:
+                    ciclo_completo(ib, modo_texto, mercados={"US", "HK", "KR"})
+                except Exception as e:
+                    log(f"ERROR en el ciclo US/HK/KR: {type(e).__name__}: {e}")
+                duracion_otros = time.monotonic() - inicio_otros
+                if duracion_otros > INTERVALO_SEGUNDOS:
+                    log(f"AVISO: el ciclo US/HK/KR ha tardado {duracion_otros:.0f}s, mas que el "
+                        f"intervalo configurado ({INTERVALO_SEGUNDOS}s). Considera subir "
+                        f"INTERVALO_SEGUNDOS o reducir el numero de valores/temporalidades.")
+                proxima_revision_otros = inicio_otros + INTERVALO_SEGUNDOS
+
+            # Espera solo hasta que toque la PROXIMA revision (la que antes,
+            # de las dos), y solo se tiene en cuenta la de un grupo si su
+            # mercado esta abierto ahora -si no, ese grupo no cuenta para
+            # decidir cuanto esperar (evita esperar activamente a una
+            # ventana de cripto cerrada, por ejemplo).
+            candidatos_espera = []
+            if cripto_abierta:
+                candidatos_espera.append(proxima_revision_cripto)
+            if otros_abiertos:
+                candidatos_espera.append(proxima_revision_otros)
+            proxima_revision = min(candidatos_espera) if candidatos_espera else time.monotonic() + INTERVALO_SEGUNDOS
+            segundos_espera_siguiente = max(proxima_revision - time.monotonic(), 1)
+            log(f"Esperando {segundos_espera_siguiente:.0f}s hasta la siguiente revision "
+                f"(cripto cada {CRYPTO_INTERVALO_SEGUNDOS}s, US/HK/KR cada {INTERVALO_SEGUNDOS}s)...")
             esperar_pumpeando(ib, segundos_espera_siguiente)
     except KeyboardInterrupt:
         log("Detenido manualmente por el usuario (Ctrl+C).")

@@ -514,12 +514,36 @@ corregidos para distinguir cripto de US igual que el bot principal).
 
 **Bucle principal (`main()`)**: con `CRYPTO_24_7 = True`, `es_horario_operativo("CRYPTO")`
 siempre es `True`, así que `hay_mercado_abierto` en `main()` nunca cae a `False` — el bot deja
-de dormir horas fuera del horario de US/HK/KR y pasa a ciclar continuamente
-(`INTERVALO_SEGUNDOS` = 4 min) las 24 horas, aunque solo actúe sobre cripto en esos huecos
-(las acciones se siguen filtrando por su propio `es_horario_operativo` de siempre). Si algún
-día se pone `CRYPTO_24_7 = False`, `segundos_hasta_pre_apertura()` ya tiene en cuenta la
-próxima apertura semanal de cripto (`proxima_apertura_cripto()`) para no sobre-dormir el fin
-de semana completo cuando cripto reabre el domingo antes que ningún mercado de acciones.
+de dormir horas fuera del horario de US/HK/KR y pasa a ciclar continuamente las 24 horas,
+aunque solo actúe sobre cripto en esos huecos (las acciones se siguen filtrando por su propio
+`es_horario_operativo` de siempre). Si algún día se pone `CRYPTO_24_7 = False`,
+`segundos_hasta_pre_apertura()` ya tiene en cuenta la próxima apertura semanal de cripto
+(`proxima_apertura_cripto()`) para no sobre-dormir el fin de semana completo cuando cripto
+reabre el domingo antes que ningún mercado de acciones.
+
+**Cadencia propia para cripto: 1 minuto en vez de 4 (añadido sept. 2026, petición del
+usuario)**: cripto es 24/7 y más rápida que las acciones, así que un ciclo cada 4 minutos
+(`INTERVALO_SEGUNDOS`, el intervalo de US/HK/KR) puede dejar escapar movimientos cortos.
+`revisar_ventas()`, `revisar_compras()` y `ciclo_completo()` aceptan ahora un parámetro
+`mercados` opcional (un conjunto de mercados a revisar; `None` = todos, comportamiento de
+siempre) para poder revisar SOLO cripto o SOLO US/HK/KR en una llamada. `main()` mantiene dos
+"próximas revisiones" (`proxima_revision_cripto`, `proxima_revision_otros`, en
+`time.monotonic()`) y en cada vuelta del bucle dispara cada grupo de forma independiente en
+cuanto le toca Y su mercado está abierto — cripto cada `CRYPTO_INTERVALO_SEGUNDOS` (60s),
+US/HK/KR cada `INTERVALO_SEGUNDOS` (4 min) sin cambios. La espera entre vueltas del bucle
+(`esperar_pumpeando`) se calcula como el tiempo hasta la MÁS PRÓXIMA de las dos revisiones
+pendientes (ignorando la de un grupo si su mercado está cerrado ahora mismo, para no esperar
+activamente a una ventana que no va a abrir). No hizo falta tocar `analizar_activo()`: sigue
+pidiendo las 7 temporalidades completas en cada llamada (también en el ciclo rápido de 1 min);
+a esta escala (6 criptos) no se acerca a los límites de "pacing" de IBKR para
+`reqHistoricalData`, así que no se optimizó pidiendo menos.
+
+**Umbral de beneficio más bajo para cripto (añadido sept. 2026, petición del usuario)**:
+`UMBRAL_BENEFICIO_CRYPTO_PCT = 0.3` (nueva constante, separada de `UMBRAL_BENEFICIO_PCT = 0.5`
+que sigue aplicando a acciones sin cambios), usada en la rama CRYPTO de `revisar_ventas()` en
+vez del umbral general. El umbral ya se compara NETO de comisión (`beneficio_pct` ya resta la
+comisión estimada antes de comparar), así que un 0.3% neto sigue siendo ganancia real, no solo
+cubrir gastos — no hizo falta ningún ajuste adicional en el cálculo de comisión.
 
 ## Control por Telegram del bot de IBKR (`telegram_bot_ibkr.py`) — añadido septiembre 2026
 
