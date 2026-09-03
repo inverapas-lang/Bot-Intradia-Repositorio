@@ -378,29 +378,55 @@ una operación a mano antes de pedir que el bot lo soportara.
 ofrece cripto a través de dos exchanges/proveedores distintos: `"PAXOS"` (el original, 4
 monedas: BTC/ETH/LTC/BCH) y `"ZEROHASH"` (más reciente, más monedas: BTC, ETH, LTC, BCH,
 LINK, MATIC, SOL...). Cuál usa una cuenta concreta depende de sus suscripciones de datos de
-mercado (Client Portal → Configuración de cuenta → Suscripciones de datos de mercado). **Bug
-real visto en producción (sept. 2026)**: con `exchange="PAXOS"` hardcodeado en una cuenta
-suscrita solo a "ZEROHASHE Cryptocurrency" (no a Paxos), `reqHistoricalData` se quedaba
-colgado hasta agotar el timeout en los 3 intentos para BTC —sin ningún error claro de
-permisos, solo un `TimeoutError` genérico— mientras que las acciones US funcionaban con
-normalidad en el mismo ciclo. Confirmado con una captura de pantalla del usuario que su
-cuenta usa ZEROHASH. Corregido introduciendo la constante `EXCHANGE_CRYPTO = "ZEROHASH"`
-(justo encima de `ACTIVOS_CRYPTO`) y usándola en vez de un string hardcodeado. Si en el
-futuro se detecta que la cuenta cambia de proveedor, basta con cambiar ese único valor.
+mercado (Client Portal → Configuración de cuenta → Suscripciones de datos de mercado).
+
+**Historia real de la depuración de este bug en producción (sept. 2026, cuenta U25302975)** —
+se deja documentada entera porque cada paso descarto una hipotesis con evidencia real y la
+secuencia importa para no repetir los mismos pasos en falso si vuelve a pasar:
+1. Con `exchange="PAXOS"` (valor original): `reqHistoricalData` se quedaba colgado con
+   `TimeoutError` en los 3 intentos para BTC, sin ningún error de permisos, mientras que
+   las acciones US funcionaban con normalidad en el mismo ciclo.
+2. Una captura de pantalla de la página de suscripciones de datos de la usuaria mostraba
+   "ZEROHASHE Cryptocurrency" → se interpretó (incorrectamente, ver paso 4) que la cuenta
+   usaba ZEROHASH, y se cambió `EXCHANGE_CRYPTO` a `"ZEROHASH"`.
+3. El `TimeoutError` PERSISTIÓ igual tras el cambio de exchange. Se añadió `on_error_ib()`
+   (enganchado a `ib.errorEvent`) para dejar de operar a ciegas: sin este logging, cualquier
+   error real de la API de IBKR era invisible, solo se veía el timeout genérico. Con el
+   logging se descubrió la verdadera causa del timeout original: `reqHistoricalData` exige
+   `whatToShow='AGGTRADES'` para contratos `secType='CRYPTO'` (el resto de mercados usa
+   `'TRADES'`, que simplemente no funciona para cripto). `pedir_velas()` ahora elige
+   `what_to_show` según `contrato.secType`.
+4. Con AGGTRADES + exchange="ZEROHASH": la **venta** de la posición real de la usuaria (el
+   contrato de `ib.positions()` llega con `exchange=""` y se completa vía
+   `ib.qualifyContracts()` a partir de su conId real — ver más abajo) SÍ obtuvo precio
+   correctamente. Pero la **compra** (contrato construido a mano en `ACTIVOS_CRYPTO` con
+   `exchange="ZEROHASH"`) falló con un error explícito y sin ambigüedad: `Error 162: No
+   market data permissions for ZEROHASH CRYPTO`. Conclusión: la cuenta NO tiene datos de
+   ZEROHASH pese al nombre de la suscripción en la captura (probablemente el nombre genérico
+   que usa IBKR para toda suscripción de cripto, no el proveedor real) — su posición real y
+   los datos de mercado disponibles son de **PAXOS**. `EXCHANGE_CRYPTO` corregido de vuelta a
+   `"PAXOS"`.
+
+Moraleja para el futuro: si cripto vuelve a dar timeout o error de datos, mirar PRIMERO el
+error real en el log (gracias a `on_error_ib` ya no es un `TimeoutError` ciego) antes de
+adivinar el exchange — la captura de pantalla de "suscripciones de datos" no basta para saber
+el proveedor real, el error 162/321/200 de la propia API sí lo dice sin ambigüedad.
 
 **Monedas**: solo `ACTIVOS_CRYPTO` = BTC, ETH, LTC, BCH — las 4 que existen en ambos
 proveedores (Paxos y Zerohash), las más maduras y probadas en la API de IBKR. Se empezó solo
-con estas 4 por prudencia; para añadir más (p.ej. SOL, LINK, solo disponibles vía Zerohash),
-basta con ampliar la lista de tickers en `ACTIVOS_CRYPTO` (mismo `exchange=EXCHANGE_CRYPTO`,
+con estas 4 por prudencia; para añadir más (solo disponibles vía Zerohash, p.ej. SOL, LINK),
+haría falta primero confirmar que la cuenta tiene datos de Zerohash (ver historia de arriba),
+y luego ampliar la lista de tickers en `ACTIVOS_CRYPTO` (mismo `exchange=EXCHANGE_CRYPTO`,
 `currency="USD"`).
 
-**Segundo bug relacionado, mismo sintoma (sept. 2026)**: arreglado el exchange, BTC seguia
-dando `TimeoutError` en los 3 intentos en produccion. Causa real: `reqHistoricalData` exige
-`whatToShow='AGGTRADES'` para contratos `secType='CRYPTO'` — el resto de mercados (US/HK/KR)
-usa `'TRADES'`, y ese valor simplemente no funciona para cripto (de nuevo, sin un error de
-permisos claro, solo timeout). `pedir_velas()` ahora elige `what_to_show` segun
-`contrato.secType`. Moraleja para el futuro: si cripto vuelve a dar timeout, revisar primero
-que el exchange (`EXCHANGE_CRYPTO`) y el `whatToShow` sigan siendo validos para la cuenta.
+**Contrato de una posición CRYPTO sin `exchange` (error 321/200)**: a diferencia de las
+acciones, el contrato que devuelve `ib.positions()` para una posición CRYPTO llega con el
+campo `exchange` vacío. Rellenarlo a mano con `EXCHANGE_CRYPTO` (primer intento) causó un
+error DISTINTO (`Error 200: No security definition has been found`, porque el conId real de
+la posición no encajaba con el exchange forzado). La solución correcta, ya aplicada en
+`revisar_ventas`, es dejar que IBKR complete el contrato él mismo a partir de su conId
+(`ib.qualifyContracts(contrato)`) cuando `exchange` viene vacío — así no importa si la
+posición es de Paxos o Zerohash, el conId ya lo identifica sin ambigüedad.
 
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a

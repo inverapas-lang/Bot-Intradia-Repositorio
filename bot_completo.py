@@ -274,22 +274,40 @@ ACTIVOS_KR = [
     {"ticker": "000270", "exchange": "KRX", "currency": "KRW", "mercado": "KR"},  # Kia
 ]
 
-# --- Lista de valores: criptomonedas (ZEROHASH, USD) ---
+# --- Lista de valores: criptomonedas (PAXOS, USD) ---
 # IBKR ofrece cripto a traves de DOS proveedores distintos, con contratos/
 # conId DIFERENTES incluso para la misma moneda: "PAXOS" (el original, 4
 # monedas: BTC/ETH/LTC/BCH) y "ZEROHASH" (mas reciente, mas monedas: BTC,
 # ETH, LTC, BCH, LINK, MATIC, SOL...). Cual de los dos usa una cuenta
 # concreta depende de sus suscripciones de datos de mercado (Client Portal
-# -> Configuracion de cuenta -> Suscripciones de datos de mercado). BUG REAL
-# visto en produccion (sept. 2026): con `exchange="PAXOS"` en una cuenta
-# suscrita solo a "ZEROHASHE Cryptocurrency" (no a Paxos), reqHistoricalData
-# se quedaba colgado hasta agotar el timeout en TODOS los intentos -sin
-# ningun error claro de permisos, solo un TimeoutError generico-, porque
-# simplemente no hay flujo de datos para ese exchange en esa cuenta.
-# Confirmado con el usuario que su cuenta esta en ZEROHASH -> exchange
-# corregido aqui. Si en el futuro se usa otra cuenta con Paxos, cambiar el
-# valor de EXCHANGE_CRYPTO mas abajo.
-EXCHANGE_CRYPTO = "ZEROHASH"
+# -> Configuracion de cuenta -> Suscripciones de datos de mercado).
+#
+# HISTORIA REAL de este bug (sept. 2026, cuenta U25302975):
+# 1) Con exchange="PAXOS" (valor original): reqHistoricalData se quedaba
+#    colgado con TimeoutError en TODOS los intentos, sin ningun error de
+#    permisos -> se interpreto (con una captura de pantalla de la pagina de
+#    suscripciones de datos, que mostraba "ZEROHASHE Cryptocurrency") como
+#    que la cuenta estaba en ZEROHASH, no en PAXOS.
+# 2) Se cambio a exchange="ZEROHASH": el TimeoutError PERSISTIO -> se
+#    descubrio (via logging de errores de la API, ver on_error_ib) que la
+#    causa real de (1) nunca fue el exchange, sino whatToShow='TRADES' en
+#    vez de 'AGGTRADES' para contratos CRYPTO (ver pedir_velas()).
+# 3) Con AGGTRADES + exchange="ZEROHASH", la VENTA de la posicion real de
+#    la usuaria (contrato resuelto automaticamente por IBKR via
+#    qualifyContracts a partir de su conId real, ver revisar_ventas) SI
+#    obtuvo precio correctamente. Pero la COMPRA (contrato construido a mano
+#    con exchange="ZEROHASH" desde esta lista) fallo con un error EXPLICITO
+#    y sin ambiguedad: "Error 162: No market data permissions for ZEROHASH
+#    CRYPTO". Conclusion: la cuenta NO tiene datos de ZEROHASH pese al
+#    nombre de la suscripcion en la captura (probablemente el nombre
+#    generico que usa IBKR para toda suscripcion de cripto, no el proveedor
+#    real) -> su posicion real y los datos de mercado disponibles son de
+#    PAXOS. Exchange corregido de vuelta a PAXOS aqui.
+#
+# Si en el futuro se usa otra cuenta y vuelve el mismo sintoma, comprobar
+# PRIMERO el error real en el log (gracias a on_error_ib ya no es un
+# TimeoutError ciego) antes de volver a adivinar el exchange.
+EXCHANGE_CRYPTO = "PAXOS"
 ACTIVOS_CRYPTO = [
     {"ticker": t, "exchange": EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
     for t in ["BTC", "ETH", "LTC", "BCH"]
