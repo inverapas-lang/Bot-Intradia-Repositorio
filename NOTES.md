@@ -519,6 +519,19 @@ comprueba en `revisar_compras()` ANTES de intentar la orden: si la exposición a
 nueva compra superaría el límite, se omite con un aviso claro en vez de dejar que IBKR la
 rechace repetidamente cada ciclo.
 
+**`/cartera` y `/hoy` de Telegram fallaban para BTC con `Error 366: "No historical data query
+found"` (bug real de producción, sept. 2026)**: el arreglo de "contrato CRYPTO con `exchange`
+vacío" (ver más abajo, aplicado a `revisar_ventas()` en `bot_completo.py`) NUNCA se replicó en
+`cartera_ibkr.py::formatear_posiciones_abiertas()` — que abre su PROPIA conexión de solo
+lectura (`clientId=9`) y llama a `ib.positions()` de forma independiente, así que sufre
+exactamente el mismo problema del contrato sin `exchange` que el bot principal, pero en un sitio
+de código distinto que no se había tocado. Arreglado replicando el mismo parche (`if mercado ==
+"CRYPTO" and not contrato.exchange: ib.qualifyContracts(contrato)`) también ahí. Moraleja: un
+fix aplicado en un sitio no protege automáticamente a otro código que toca el mismo dato por su
+cuenta — `cartera_ibkr.py` y `telegram_bot_ibkr.py` no pasan por `revisar_ventas()`, así que no
+se benefician de sus arreglos a menos que se apliquen explícitamente ahí también. Se creó
+`tests/test_cartera_ibkr.py` (antes sin ningún test) para cubrir este caso.
+
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a
   viernes 4:00 PM ET (cerrado la mayor parte del fin de semana).

@@ -94,6 +94,15 @@ def formatear_posiciones_abiertas(ib, html=False):
         cantidad = pos.position
         coste_medio = pos.avgCost
 
+        # Igual que revisar_ventas() en bot_completo.py: el contrato de una
+        # posicion CRYPTO llega de ib.positions() con el campo `exchange`
+        # vacio, y reqHistoricalData lo rechaza/se queda sin datos sin este
+        # relleno (bug real de produccion, sept. 2026 - visto aqui en
+        # /cartera y /hoy de telegram_bot_ibkr.py, que usan su propia
+        # conexion de solo lectura y no pasan por revisar_ventas).
+        if mercado == "CRYPTO" and not contrato.exchange:
+            ib.qualifyContracts(contrato)
+
         if mercado == "CRYPTO":
             comision_estimada = bot.estimar_comision_cripto(cantidad * coste_medio)
         else:
