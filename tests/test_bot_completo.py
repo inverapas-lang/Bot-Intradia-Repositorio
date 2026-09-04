@@ -1578,6 +1578,16 @@ check("estimar_comision_cripto: valor 0 -> comision 0 (no revienta por division 
       bot.estimar_comision_cripto(0) == 0.0)
 
 
+# --- crear_orden_limitada_cripto: tif='GTC' explicito (bug real de
+#     produccion, sept. 2026: LimitOrder() deja tif='' por defecto, y el
+#     exchange real de cripto de la cuenta -ZEROHASHE- lo rechazaba con
+#     "Error 10052: Invalid time in force"; ninguna compra ni venta de
+#     cripto llegaba a colocarse hasta fijar un tif valido a mano) ---
+orden_cripto_tif = bot.crear_orden_limitada_cripto('BUY', 0.001, 50000.0)
+check("crear_orden_limitada_cripto: tif='GTC' (no vacio, valido para el exchange de cripto)",
+      orden_cripto_tif.tif == "GTC", f"tif={orden_cripto_tif.tif!r}")
+
+
 # --- 9e. revisar_compras con un activo CRYPTO: usa LimitOrder con
 #     totalQuantity fraccionario NATIVO (sin cashQty, sin Plan B/C) ---
 class _IBFalsoComprasCripto:

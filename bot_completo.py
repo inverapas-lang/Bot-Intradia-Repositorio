@@ -912,8 +912,18 @@ def crear_orden_limitada_cripto(accion, cantidad, precio_limite):
     documentacion oficial de IBKR: las ordenes LMT de cripto usan
     quantity/totalQuantity; solo las ordenes MKT de cripto usan cashQty, y
     aqui no se usan ordenes a mercado para cripto). No hace falta ningun
-    Plan B/C como con las acciones."""
-    return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite))
+    Plan B/C como con las acciones.
+
+    Bug real de produccion (sept. 2026): LimitOrder() de ib_async deja
+    `tif` vacio ('') por defecto. Para acciones esto funciona (IBKR lo
+    trata como 'DAY' implicito), pero el exchange de cripto de esta cuenta
+    (ZEROHASHE) lo RECHAZA explicitamente con el error 10052 "Invalid time
+    in force" -ninguna compra ni venta de cripto llegaba a colocarse-. Se
+    fija `tif='GTC'` explicitamente (valido en cripto segun la
+    documentacion de IBKR: LMT admite DAY/GTC/IOC); GTC en vez de DAY
+    porque cripto es 24/7 y no tiene un "fin de dia de sesion" real al que
+    referenciar un DAY."""
+    return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite, tif='GTC'))
 
 
 def estimar_comision_cripto(valor_operacion):

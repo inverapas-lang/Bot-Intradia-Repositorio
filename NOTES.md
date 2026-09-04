@@ -445,7 +445,22 @@ la posición no encajaba con el exchange forzado). La solución correcta, aplica
 `revisar_ventas` y reutilizada por `descubrir_exchange_cripto()`, es dejar que IBKR complete el
 contrato él mismo a partir de su conId (`ib.qualifyContracts(contrato)`) cuando `exchange`
 viene vacío — así no importa qué proveedor use la cuenta, el conId ya lo identifica sin
-ambigüedad.
+ambigüedad. El exchange descubierto en la cuenta real resultó ser `"ZEROHASHE"` (con "E" al
+final — un carácter distinto de `"ZEROHASH"`, la primera hipótesis probada).
+
+**Ninguna orden de cripto se llegaba a colocar: `Error 10052, Invalid time in force` (bug real
+de producción, sept. 2026)**: con el exchange ya descubierto correctamente, TODAS las compras
+(y, se puede deducir, las ventas reales — nunca se había confirmado un `Filled` real de cripto
+hasta este punto) fallaban con este error nada más enviarlas. Causa: `LimitOrder()` de
+`ib_async` deja el campo `tif` (time-in-force) vacío (`''`) por defecto si no se especifica.
+Para acciones esto no da ningún problema (IBKR lo trata como `'DAY'` implícito), pero el
+exchange de cripto real de esta cuenta (`ZEROHASHE`) lo rechaza explícitamente. Arreglado
+fijando `tif='GTC'` a mano en `crear_orden_limitada_cripto()` — se eligió GTC en vez de DAY
+porque cripto es 24/7 y no tiene un "fin de día de sesión" real al que referenciar un `DAY`
+(documentación de IBKR: las órdenes LMT de cripto admiten DAY/GTC/IOC). Moraleja: al añadir
+soporte para un tipo de activo nuevo, no basta con confirmar que el CONTRATO se resuelve bien
+(conId, exchange) — los valores por defecto de la ORDEN (tif y similares) que "simplemente
+funcionan" para un tipo de activo pueden no ser válidos para otro.
 
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a
