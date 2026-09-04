@@ -74,7 +74,9 @@ desactivar HK/KR para la cuenta real — **no decidido todavía**.
 | `IMPORTE_EUROS` | 1000 | Presupuesto tope por operación (US/EU/KR), en la práctica casi nunca es el límite real (lo es el 15%). |
 | `IMPORTE_EUROS_HK` | 3500 | Igual pero para HK (lotes fijos más grandes). |
 | `LIMITE_EXPOSICION_PCT` | 15% | Máximo del valor total de cartera por posición. |
-| `UMBRAL_BENEFICIO_PCT` | 0.5% | Beneficio neto mínimo para empezar a vigilar la venta. |
+| `LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT` | 25% | Máximo del valor total de cartera en TODA la cripto junta (margen bajo el 30% real que exige IBKR). |
+| `UMBRAL_BENEFICIO_PCT` | 0.5% | Beneficio neto mínimo para empezar a vigilar la venta (acciones). |
+| `UMBRAL_BENEFICIO_CRYPTO_PCT` | 0.3% | Igual pero para cripto (más bajo: 24/7 y más rápida). |
 | `MINUTOS_SIN_COMPRAR_ANTES_CIERRE` | 90 | Ventana antes del cierre en la que no se compra (salvo promediar a la baja). |
 | `MINUTOS_VENTA_FORZADA_ANTES_CIERRE` | 15 | Ventana antes del cierre en la que se vende si el beneficio está entre 0.5% y `BENEFICIO_MAX_VENTA_FORZADA_PCT`. |
 | `BENEFICIO_MAX_VENTA_FORZADA_PCT` | 2.0% | Techo de la venta forzada. |
@@ -500,6 +502,22 @@ pudo consultar, se deja tal cual (mismo comportamiento que antes, sin regresión
 "Invalid order" es un error tan genérico que puede señalar CUALQUIER campo de la orden — no
 asumir que el primer campo sospechoso (cantidad) es el único culpable solo porque encaja con la
 primera hipótesis.
+
+**Límite de exposición TOTAL en cripto: 30% del equity de la cuenta (límite real de IBKR, no un
+bug, sept. 2026)**: con precio y cantidad ya arreglados, una compra de BCH fue rechazada con
+`Error 201: "...would cause your crypto account(s) to exceed the lesser of: 30% of your total
+account equity... and USD 3 million"`. Esto es una política propia de IBKR (probablemente
+regulatoria, un límite de riesgo para cuentas retail en cripto), independiente de
+`LIMITE_EXPOSICION_PCT` (que limita cada VALOR individual al 15%, pero no pone techo al
+conjunto de toda la cripto — con 6 criptomonedas a un 15% cada una, la exposición total podría
+llegar en teoría al 90% de la cartera). Se añadió `LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT = 25`
+(con margen de seguridad bajo el 30% real, para no ir pegado al límite exacto y encadenar
+rechazos) y `calcular_exposicion_total_cripto_usd(posiciones)` (suma el valor a COSTE —
+`avgCost * cantidad`, no al precio actual, para no tener que pedir el precio de cada
+criptomoneda solo para esta comprobación — de TODAS las posiciones de cripto abiertas). Se
+comprueba en `revisar_compras()` ANTES de intentar la orden: si la exposición actual más la
+nueva compra superaría el límite, se omite con un aviso claro en vez de dejar que IBKR la
+rechace repetidamente cada ciclo.
 
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a

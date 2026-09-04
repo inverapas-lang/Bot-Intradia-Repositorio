@@ -1659,6 +1659,43 @@ if ib_falso_compras_cripto.ordenes_colocadas:
           f"totalQuantity={orden_cripto.totalQuantity}")
 
 
+# ---------------------------------------------------------------------------
+# 9e-bis. Limite de exposicion TOTAL en cripto (bug/limite real de
+#     produccion, sept. 2026): IBKR rechaza cualquier compra de cripto que
+#     haga que el CONJUNTO de posiciones de cripto supere el 30% del equity
+#     de la cuenta ("Error 201: ... would cause your crypto account(s) to
+#     exceed..."), independiente de LIMITE_EXPOSICION_PCT (que es por valor
+#     individual). El bot debe detectarlo el mismo y omitir la compra ANTES
+#     de intentarla, con margen de seguridad (25%, no el 30% real de IBKR).
+# ---------------------------------------------------------------------------
+check("calcular_exposicion_total_cripto_usd: suma solo posiciones CRYPTO, ignora acciones (misma USD)",
+      abs(bot.calcular_exposicion_total_cripto_usd(
+          [_PosicionConSecType("BTC", "USD", "CRYPTO", position=0.001, avgCost=50000.0),
+           _Posicion("AAPL", 10, 190.0)]) - 50.0) < 1e-9)
+
+
+class _IBFalsoComprasCriptoCercaDelLimite(_IBFalsoComprasCripto):
+    def positions(self):
+        # NetLiquidation=300 (ver accountSummary), limite del 25% = 75 USD;
+        # esta posicion YA vale 70 USD -> casi no queda margen.
+        return [_PosicionConSecType("ETH", "USD", "CRYPTO", position=0.02, avgCost=3500.0)]
+
+
+bot.ACTIVOS = [activo_btc]
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None
+ib_falso_cerca_del_limite = _IBFalsoComprasCriptoCercaDelLimite()
+try:
+    bot.revisar_compras(ib_falso_cerca_del_limite)
+finally:
+    bot.ACTIVOS = activos_originales_compras
+    bot.analizar_activo = analizar_activo_original
+
+check("revisar_compras CRYPTO: NO compra si superaria el limite de exposicion TOTAL en cripto (25%)",
+      len(ib_falso_cerca_del_limite.ordenes_colocadas) == 0,
+      f"ordenes={ib_falso_cerca_del_limite.ordenes_colocadas}")
+
+
 # --- redondear_a_incremento / redondear_precio_a_tick / obtener_detalles_cripto:
 #     bug real de produccion (sept. 2026), en DOS partes - LTC/BCH/SOL/LINK
 #     daban "Error 202: Order Canceled - reason: Invalid order":

@@ -206,6 +206,18 @@ CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto (peticion del usua
                                  # con el parametro `mercados`).
 LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera (en USD equivalente) por valor
 
+# Bug/limite real de produccion (sept. 2026): IBKR rechaza cualquier compra de
+# cripto que haga que el conjunto de posiciones de cripto supere el 30% del
+# equity total de la cuenta (o 3 millones USD, lo que sea menor) - "Error 201:
+# Order rejected - ... would cause your crypto account(s) to exceed the
+# lesser of: 30% of your total account equity...". Esto es un LIMITE PROPIO
+# de IBKR (politica de riesgo/regulatoria de la cuenta, no un bug de este
+# codigo) y es independiente de LIMITE_EXPOSICION_PCT (que es por VALOR
+# individual, no por el conjunto de toda la cripto). Se deja un margen de
+# seguridad (25% en vez del 30% real) para no ir pegado al limite exacto de
+# IBKR y encadenar rechazos en cada intento.
+LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT = 25
+
 # --- Fracciones de accion ---
 # IBKR solo admite comprar fracciones de accion en el mercado US (y solo para
 # una parte de los valores, los que tengan ese permiso habilitado). En HK y
@@ -1627,6 +1639,19 @@ def obtener_valor_posicion_actual_usd(posiciones, ticker, precio_actual, currenc
     return 0.0
 
 
+def calcular_exposicion_total_cripto_usd(posiciones):
+    """Suma el valor en USD de TODAS las posiciones de CRYPTO abiertas, a
+    COSTE (avgCost * cantidad), no al precio actual -aproximacion razonable
+    para comprobar el limite de exposicion total de IBKR (ver
+    LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT) sin tener que pedir el precio actual
+    de cada criptomoneda por separado solo para esta comprobacion."""
+    total = 0.0
+    for pos in posiciones:
+        if pos.position > 0 and mercado_de_posicion(pos) == "CRYPTO":
+            total += valor_en_usd(pos.position * pos.avgCost, pos.contract.currency)
+    return total
+
+
 def tick_size_krx(precio):
     """Devuelve el incremento de precio minimo (tick) que exige KRX segun
     el rango de precio del valor. Tabla oficial de Korea Exchange."""
@@ -1889,6 +1914,23 @@ def revisar_compras(ib, mercados=None):
                 # Cripto siempre admite fracciones nativas via LMT (ver
                 # crear_orden_limitada_cripto()): sin cashQty, sin Plan B/C,
                 # sin distincion pre/postmercado (opera de forma continua).
+
+                # Limite propio de IBKR (no de este codigo, ver
+                # LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT): el CONJUNTO de todas
+                # las posiciones de cripto no puede superar el 30% del
+                # equity de la cuenta. Se comprueba ANTES de intentar la
+                # orden (con margen de seguridad del 25%), para no
+                # encadenar rechazos "Error 201: ... would cause your
+                # crypto account(s) to exceed..." en cada ciclo.
+                exposicion_cripto_actual_usd = calcular_exposicion_total_cripto_usd(posiciones_actuales)
+                limite_cripto_total_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT / 100)
+                if exposicion_cripto_actual_usd + importe_a_usar > limite_cripto_total_usd:
+                    log(f"COMPRAS: {ticker} - senal de COMPRA pero comprar {importe_a_usar:.2f} USD mas "
+                        f"superaria el limite de exposicion TOTAL en cripto ({LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT}% "
+                        f"de la cartera = {limite_cripto_total_usd:.2f} USD; ya invertido en cripto: "
+                        f"{exposicion_cripto_actual_usd:.2f} USD) -limite real de IBKR: 30% del equity-, se omite.")
+                    continue
+
                 if importe_a_usar < VALOR_MINIMO_OPERACION_CRIPTO_USD:
                     log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
                         f"({importe_a_usar:.2f} USD) no llega al minimo de "
