@@ -1470,6 +1470,8 @@ def revisar_ventas(ib, mercados=None):
                 log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
                     f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden limitada).")
                 precio_limite_cripto = calcular_precio_limite_venta(precio_actual, contrato.currency)
+                _, _, tick_cripto_venta = obtener_detalles_cripto(ib, contrato)
+                precio_limite_cripto = redondear_precio_a_tick(precio_limite_cripto, tick_cripto_venta)
                 orden = crear_orden_limitada_cripto('SELL', cantidad, precio_limite_cripto)
                 trade = ib.placeOrder(contrato, orden)
                 estado = esperar_estado_final_orden(ib, trade)
@@ -1681,32 +1683,40 @@ def obtener_incremento_lote(ib, contrato):
     return 1, 1
 
 
-def obtener_incremento_lote_cripto(ib, contrato):
+def obtener_detalles_cripto(ib, contrato):
     """Version de obtener_incremento_lote() para CRYPTO: a diferencia de las
-    acciones (lotes siempre enteros), en cripto minSize/sizeIncrement son
-    FRACCIONARIOS (p.ej. 0.00001 BTC, 0.001 LTC...) y no se pueden redondear
-    a enteros. Devuelve (minSize, sizeIncrement) como floats tal cual los
-    da IBKR; (0.0, 0.0) si no se pudo consultar -en ese caso, quien llame
-    debe decidir un fallback (ver su uso en revisar_compras).
+    acciones (lotes siempre enteros), en cripto minSize/sizeIncrement/minTick
+    son FRACCIONARIOS (p.ej. 0.00001 BTC, 0.001 LTC...) y no se pueden
+    redondear a enteros. Devuelve (minSize, sizeIncrement, minTick) como
+    floats tal cual los da IBKR; 0.0 en cualquiera de los tres si no se pudo
+    consultar -en ese caso, quien llame debe decidir un fallback (ver su uso
+    en revisar_compras/revisar_ventas).
 
-    Bug real de produccion (sept. 2026): sin esto, se redondeaba la
-    cantidad a comprar a un numero fijo de decimales (DECIMALES_FRACCION_CRIPTO)
-    igual para todas las criptomonedas, sin tener en cuenta que cada una
-    tiene su propio incremento minimo valido en el exchange real de la
-    cuenta -para LTC/BCH/SOL/LINK, IBKR rechazaba la orden con
-    "Error 202: Order Canceled - reason: Invalid order" (no es un error de
-    permisos ni de exchange, simplemente la cantidad pedida no era un
-    multiplo valido del incremento que admite ese contrato en concreto)."""
+    Bug real de produccion (sept. 2026), en dos partes:
+    1) La CANTIDAD a comprar se redondeaba a un numero fijo de decimales
+       (DECIMALES_FRACCION_CRIPTO) igual para todas las criptomonedas, sin
+       respetar el incremento minimo real de cada una -para
+       LTC/BCH/SOL/LINK, IBKR rechazaba la orden con "Error 202: Order
+       Canceled - reason: Invalid order". Se probo a redondear la cantidad
+       a `sizeIncrement`, pero el error PERSISTIO igual tras ese cambio.
+    2) La causa real resulto ser el PRECIO, no la cantidad: `precio_actual`
+       (el cierre de la ultima vela, con la precision que sea que traiga el
+       feed de datos) se pasaba tal cual como precio limite, sin redondear
+       al "tick" de precio valido para ese contrato -que si estaba mal,
+       tambien da el mismo "Error 202: Invalid order", indistinguible del
+       problema de cantidad sin mirar el campo minTick-. Se redondea ahora
+       tambien el precio a minTick (ver redondear_precio_a_tick())."""
     try:
         detalles = ib.reqContractDetails(contrato)
         if detalles:
             cd = detalles[0]
             min_size = float(getattr(cd, 'minSize', 0) or 0)
             incremento = float(getattr(cd, 'sizeIncrement', 0) or 0)
-            return min_size, incremento
+            min_tick = float(getattr(cd, 'minTick', 0) or 0)
+            return min_size, incremento, min_tick
     except Exception:
         pass
-    return 0.0, 0.0
+    return 0.0, 0.0, 0.0
 
 
 def redondear_a_incremento(cantidad, incremento):
@@ -1714,13 +1724,26 @@ def redondear_a_incremento(cantidad, incremento):
     `incremento` (nunca hacia arriba: no se debe comprar mas de lo que el
     presupuesto calculado permite). Si `incremento` es 0 o invalido,
     devuelve `cantidad` sin tocar -no se pudo consultar el incremento real,
-    ver obtener_incremento_lote_cripto()-."""
+    ver obtener_detalles_cripto()-."""
     if incremento <= 0:
         return cantidad
     # round() limpia el ruido de coma flotante que suele dejar la division
     # (p.ej. 0.7999999999999999 en vez de 0.8) antes de multiplicar nada.
     pasos = math.floor(round(cantidad / incremento, 10))
     return round(pasos * incremento, 10)
+
+
+def redondear_precio_a_tick(precio, tick):
+    """Redondea `precio` al multiplo valido MAS CERCANO de `tick` (a
+    diferencia de redondear_a_incremento, aqui no importa la direccion: lo
+    unico que exige el exchange es que el precio caiga en un escalon
+    valido, no proteger un presupuesto). Si `tick` es 0 o invalido, devuelve
+    `precio` sin tocar -no se pudo consultar el tick real, ver
+    obtener_detalles_cripto()-."""
+    if tick <= 0:
+        return precio
+    pasos = round(precio / tick)
+    return round(pasos * tick, 10)
 
 
 def revisar_compras(ib, mercados=None):
@@ -1873,8 +1896,9 @@ def revisar_compras(ib, mercados=None):
                     continue
 
                 cantidad_cripto = round(importe_a_usar / precio_actual, DECIMALES_FRACCION_CRIPTO)
-                min_size_cripto, incremento_cripto = obtener_incremento_lote_cripto(ib, contrato)
+                min_size_cripto, incremento_cripto, tick_cripto = obtener_detalles_cripto(ib, contrato)
                 cantidad_cripto = redondear_a_incremento(cantidad_cripto, incremento_cripto)
+                precio_compra_cripto = redondear_precio_a_tick(precio_actual, tick_cripto)
                 if cantidad_cripto <= 0 or (min_size_cripto > 0 and cantidad_cripto < min_size_cripto):
                     log(f"COMPRAS: {ticker} - senal de COMPRA pero el importe calculado ({importe_a_usar:.2f} "
                         f"USD) no llega a una cantidad valida al precio actual ({precio_actual} USD) "
@@ -1882,12 +1906,12 @@ def revisar_compras(ib, mercados=None):
                     continue
 
                 log(f"COMPRAS: {ticker} (CRYPTO) - senal de COMPRA, comprando ~{cantidad_cripto:g} unidades "
-                    f"a ~{precio_actual} USD (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
+                    f"a ~{precio_compra_cripto:g} USD (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
                     f"limite: {limite_por_valor_usd:.2f} USD).")
                 cantidad_antes_compra_cripto = next(
                     (p.position for p in posiciones_actuales if p.contract.symbol == ticker and p.position > 0), 0.0)
 
-                orden = crear_orden_limitada_cripto('BUY', cantidad_cripto, precio_actual)
+                orden = crear_orden_limitada_cripto('BUY', cantidad_cripto, precio_compra_cripto)
                 trade = ib.placeOrder(contrato, orden)
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
@@ -1899,7 +1923,7 @@ def revisar_compras(ib, mercados=None):
                     compra_confirmada_cripto = cantidad_tras_compra_cripto > cantidad_antes_compra_cripto + 1e-6
 
                 if compra_confirmada_cripto:
-                    precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
+                    precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_compra_cripto
                     cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad_cripto
                     comision_ejecucion = estimar_comision_cripto(cantidad_ejecutada * precio_ejecucion)
                     registrar_operacion_historial(activo["mercado"], ticker, "COMPRA", cantidad_ejecutada,

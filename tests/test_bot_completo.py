@@ -1659,13 +1659,17 @@ if ib_falso_compras_cripto.ordenes_colocadas:
           f"totalQuantity={orden_cripto.totalQuantity}")
 
 
-# --- redondear_a_incremento / obtener_incremento_lote_cripto: bug real de
-#     produccion (sept. 2026) - LTC/BCH/SOL/LINK daban "Error 202: Order
-#     Canceled - reason: Invalid order" porque la cantidad calculada (redondeada
-#     siempre a 6 decimales, igual para todas las monedas) no era un multiplo
-#     valido del incremento minimo que exige el exchange para esa moneda en
-#     concreto. BTC no lo sufria por pura coincidencia con su propio
-#     incremento, no porque el codigo lo tuviera en cuenta.
+# --- redondear_a_incremento / redondear_precio_a_tick / obtener_detalles_cripto:
+#     bug real de produccion (sept. 2026), en DOS partes - LTC/BCH/SOL/LINK
+#     daban "Error 202: Order Canceled - reason: Invalid order":
+#     1) la CANTIDAD (redondeada siempre a 6 decimales, igual para todas las
+#        monedas) no era un multiplo valido del incremento minimo real de
+#        cada una -se probo a arreglar esto, pero el error PERSISTIO-.
+#     2) la causa real era el PRECIO: `precio_actual` se pasaba tal cual
+#        como precio limite, sin redondear al "tick" de precio valido para
+#        ese contrato. BTC no sufria ninguno de los dos por pura
+#        coincidencia con sus propios valores, no porque el codigo los
+#        tuviera en cuenta.
 check("redondear_a_incremento: redondea HACIA ABAJO al multiplo valido mas cercano",
       abs(bot.redondear_a_incremento(0.795272, 0.01) - 0.79) < 1e-9,
       f"resultado={bot.redondear_a_incremento(0.795272, 0.01)}")
@@ -1674,37 +1678,45 @@ check("redondear_a_incremento: por debajo de un incremento -> 0 (no una cantidad
 check("redondear_a_incremento: incremento 0 o invalido -> no toca la cantidad (fallback)",
       bot.redondear_a_incremento(0.795272, 0) == 0.795272)
 
+check("redondear_precio_a_tick: redondea al multiplo MAS CERCANO (no siempre hacia abajo)",
+      abs(bot.redondear_precio_a_tick(51.343, 0.01) - 51.34) < 1e-9,
+      f"resultado={bot.redondear_precio_a_tick(51.343, 0.01)}")
+check("redondear_precio_a_tick: tick 0 o invalido -> no toca el precio (fallback)",
+      bot.redondear_precio_a_tick(51.343, 0) == 51.343)
+
 
 class _IBFalsoContractDetailsCripto:
-    def __init__(self, min_size, incremento):
+    def __init__(self, min_size, incremento, min_tick=0.0):
         self.min_size = min_size
         self.incremento = incremento
+        self.min_tick = min_tick
 
     def reqContractDetails(self, contrato):
-        return [types.SimpleNamespace(minSize=self.min_size, sizeIncrement=self.incremento)]
+        return [types.SimpleNamespace(minSize=self.min_size, sizeIncrement=self.incremento, minTick=self.min_tick)]
 
 
-min_size_ltc, incremento_ltc = bot.obtener_incremento_lote_cripto(
-    _IBFalsoContractDetailsCripto(0.01, 0.01), activo_btc)
-check("obtener_incremento_lote_cripto: devuelve minSize/sizeIncrement como floats (sin redondear a entero)",
-      min_size_ltc == 0.01 and incremento_ltc == 0.01,
-      f"min_size={min_size_ltc}, incremento={incremento_ltc}")
+min_size_ltc, incremento_ltc, tick_ltc = bot.obtener_detalles_cripto(
+    _IBFalsoContractDetailsCripto(0.01, 0.01, 0.01), activo_btc)
+check("obtener_detalles_cripto: devuelve minSize/sizeIncrement/minTick como floats (sin redondear a entero)",
+      min_size_ltc == 0.01 and incremento_ltc == 0.01 and tick_ltc == 0.01,
+      f"min_size={min_size_ltc}, incremento={incremento_ltc}, tick={tick_ltc}")
 
-min_size_sin_datos, incremento_sin_datos = bot.obtener_incremento_lote_cripto(
+min_size_sin_datos, incremento_sin_datos, tick_sin_datos = bot.obtener_detalles_cripto(
     _IBFalsoComprasCripto(), activo_btc)  # reqContractDetails -> [] en este fake
-check("obtener_incremento_lote_cripto: sin datos de IBKR -> (0.0, 0.0), no revienta",
-      min_size_sin_datos == 0.0 and incremento_sin_datos == 0.0)
+check("obtener_detalles_cripto: sin datos de IBKR -> (0.0, 0.0, 0.0), no revienta",
+      min_size_sin_datos == 0.0 and incremento_sin_datos == 0.0 and tick_sin_datos == 0.0)
 
 
-# --- Extremo a extremo: revisar_compras CRYPTO respeta el incremento real
-#     del exchange (no solo el redondeo fijo a 6 decimales) ---
+# --- Extremo a extremo: revisar_compras CRYPTO respeta el incremento y el
+#     tick reales del exchange (no solo el redondeo fijo a 6 decimales de
+#     antes, y no el precio de la vela tal cual) ---
 class _IBFalsoComprasCriptoConIncremento(_IBFalsoComprasCripto):
     def reqContractDetails(self, contrato):
-        return [types.SimpleNamespace(minSize=0.01, sizeIncrement=0.01)]
+        return [types.SimpleNamespace(minSize=0.01, sizeIncrement=0.01, minTick=0.01)]
 
     def reqHistoricalData(self, contrato, **kwargs):
-        return [_Vela(51.29)]  # precio bajo, tipo LTC (con BTC a 50000 el importe de prueba
-                                # ni siquiera llega a 0.01 unidades, no sirve para este caso)
+        return [_Vela(51.293)]  # precio bajo con ruido de decimales, tipo LTC (con BTC a 50000
+                                 # el importe de prueba ni siquiera llega a 0.01 unidades)
 
 
 bot.ACTIVOS = [activo_btc]
@@ -1717,17 +1729,23 @@ finally:
     bot.ACTIVOS = activos_originales_compras
     bot.analizar_activo = analizar_activo_original
 
-check("revisar_compras CRYPTO: con sizeIncrement=0.01, coloca exactamente una orden",
+check("revisar_compras CRYPTO: con sizeIncrement/minTick=0.01, coloca exactamente una orden",
       len(ib_falso_incremento.ordenes_colocadas) == 1,
       f"ordenes={ib_falso_incremento.ordenes_colocadas}")
 if ib_falso_incremento.ordenes_colocadas:
-    cantidad_final = ib_falso_incremento.ordenes_colocadas[0].totalQuantity
-    # Multiplo valido de 0.01: (cantidad * 100) debe ser un entero (con
-    # margen para ruido de coma flotante).
+    orden_incremento = ib_falso_incremento.ordenes_colocadas[0]
+    cantidad_final = orden_incremento.totalQuantity
+    precio_final = orden_incremento.lmtPrice
+    # Multiplo valido de 0.01: (valor * 100) debe ser un entero (con margen
+    # para ruido de coma flotante).
     check("revisar_compras CRYPTO: la cantidad final es multiplo del incremento real (0.01), "
           "no el redondeo fijo a 6 decimales de antes",
           abs(round(cantidad_final * 100) - cantidad_final * 100) < 1e-6,
           f"totalQuantity={cantidad_final}")
+    check("revisar_compras CRYPTO: el precio limite final es multiplo del tick real (0.01), "
+          "no el precio de la vela (51.293) tal cual",
+          abs(round(precio_final * 100) - precio_final * 100) < 1e-6,
+          f"lmtPrice={precio_final}")
 
 
 # --- 9f. revisar_ventas con una posicion CRYPTO: usa LimitOrder con

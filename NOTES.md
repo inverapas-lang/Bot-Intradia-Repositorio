@@ -473,20 +473,33 @@ pueden no ser válidos para otro, Y ADEMÁS la documentación general de IBKR so
 error real de la cuenta (aquí, el 201) es la única fuente fiable, otra vez.
 
 **Con el `tif` ya arreglado, LTC/BCH/SOL/LINK seguían sin comprarse: `Error 202, Order Canceled
-- reason: Invalid order` (bug real de producción, sept. 2026)**: BTC sí compraba bien, pero el
-resto de monedas no — la diferencia no era el exchange ni el `tif`, sino la CANTIDAD pedida.
-`revisar_compras()` redondeaba siempre a un número fijo de decimales
-(`DECIMALES_FRACCION_CRIPTO = 6`) igual para todas las criptomonedas, sin tener en cuenta que
-cada una tiene su propio incremento mínimo válido en el exchange real de la cuenta (p.ej. BTC
-puede admitir incrementos de 0.00001, pero LTC/BCH/SOL/LINK otros distintos) — BTC funcionaba
-por pura coincidencia con su propio incremento, no porque el código lo tuviera en cuenta.
-Arreglado con `obtener_incremento_lote_cripto(ib, contrato)` (variante de la ya existente
-`obtener_incremento_lote()`, usada para lotes de HK, pero SIN redondear a enteros — en cripto
-`minSize`/`sizeIncrement` son fraccionarios) + `redondear_a_incremento()`, que redondea la
-cantidad calculada HACIA ABAJO al múltiplo válido más cercano del incremento real que devuelve
-`ib.reqContractDetails()` para ese contrato en concreto, antes de construir la orden. Si el
-incremento no se pudo consultar, se deja la cantidad tal cual (mismo comportamiento que antes,
-sin regresión).
+- reason: Invalid order` (bug real de producción, sept. 2026, en DOS partes)**: BTC sí compraba
+bien, pero el resto de monedas no.
+
+1. Primer sospechoso: la CANTIDAD pedida. `revisar_compras()` redondeaba siempre a un número
+   fijo de decimales (`DECIMALES_FRACCION_CRIPTO = 6`) igual para todas las criptomonedas, sin
+   tener en cuenta que cada una tiene su propio incremento mínimo válido en el exchange real de
+   la cuenta. Se arregló con `obtener_detalles_cripto(ib, contrato)` (variante de la ya
+   existente `obtener_incremento_lote()`, usada para lotes de HK, pero SIN redondear a
+   enteros — en cripto `minSize`/`sizeIncrement` son fraccionarios) + `redondear_a_incremento()`,
+   que redondea la cantidad calculada HACIA ABAJO al múltiplo válido más cercano. **El error
+   PERSISTIÓ igual tras este cambio** — la cantidad no era (o no era solo) el problema.
+2. Causa real: el PRECIO. `precio_actual` (el cierre de la última vela, con la precisión que
+   traiga el feed de datos) se pasaba tal cual como precio límite de la orden, sin redondear al
+   "tick" de precio válido de ese contrato — y eso da exactamente el mismo "Error 202: Invalid
+   order", indistinguible del problema de cantidad sin mirar el campo `minTick`. BTC no sufría
+   ninguno de los dos problemas por pura coincidencia con sus propios valores de incremento y
+   tick, no porque el código los tuviera en cuenta.
+
+`obtener_detalles_cripto()` ahora devuelve tres valores — `(minSize, sizeIncrement, minTick)` —
+en una sola llamada a `ib.reqContractDetails()`, y se añadió `redondear_precio_a_tick()`
+(redondea al múltiplo MÁS CERCANO, a diferencia de `redondear_a_incremento()` que redondea
+hacia abajo: para el precio no hay que proteger un presupuesto, solo caer en un escalón
+válido). Se aplica tanto al precio de COMPRA como al de VENTA de cripto. Si algún valor no se
+pudo consultar, se deja tal cual (mismo comportamiento que antes, sin regresión). Moraleja:
+"Invalid order" es un error tan genérico que puede señalar CUALQUIER campo de la orden — no
+asumir que el primer campo sospechoso (cantidad) es el único culpable solo porque encaja con la
+primera hipótesis.
 
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a
