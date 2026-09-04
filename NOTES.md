@@ -658,6 +658,36 @@ locales de esa máquina, no tendría sentido correrlo en otro sitio). Para que a
 tener que acordarse, se puede añadir como Tarea Programada de Windows al iniciar sesión (igual
 que se sugiere para `vigilante_externo.ps1`).
 
+## Tipo de cambio EUR/USD en tiempo real (añadido sept. 2026, petición del usuario)
+
+Petición explícita: "que el par EUR/USD que utiliza el bot sea el vigente en el momento" —
+antes `TIPO_CAMBIO_EUR_USD` era un valor fijo (1.14) que había que actualizar a mano. Se aclaró
+primero un matiz importante: el tamaño REAL de cada operación (el que de verdad se envía a
+IBKR) nunca ha dependido de este valor — se calcula siempre en USD nativo a partir del valor de
+la cuenta y `LIMITE_EXPOSICION_PCT`, sin pasar por EUR en ningún momento. `TIPO_CAMBIO_EUR_USD`
+solo afecta a (a) el techo de seguridad `IMPORTE_EUROS` (que en la práctica casi nunca llega a
+aplicar, ver tabla de arriba) y (b) las conversiones para MOSTRAR importes en EUR en
+Telegram/`cartera_ibkr.py`. Aun así, tenía sentido que ese valor fuera el real de mercado en
+vez de uno fijo desactualizado.
+
+**Implementación**: `actualizar_tipo_cambio_eur_usd(ib)` pide el precio de un contrato de forex
+(`Forex('EURUSD')`, `secType='CASH'`) vía `pedir_velas()`, y actualiza la variable global
+`TIPO_CAMBIO_EUR_USD` con el último cierre. Throttlada a lo sumo cada
+`INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS` (30 min) para poder llamarla sin miedo en cada
+vuelta del bucle principal (`main()`, justo antes de comprobar los resúmenes de cierre) sin
+pedir datos de más — un tipo de cambio no varía lo bastante rápido como para necesitar más
+frecuencia. Si falla (sin permisos de datos de forex, sin conexión, etc.) se deja el valor
+anterior tal cual y solo se registra un aviso en el log, sin lanzar ninguna excepción.
+
+**`pedir_velas()` necesitó un tercer caso de `whatToShow`**: los contratos de forex
+(`secType='CASH'`) no tienen "TRADES" como las acciones ni "AGGTRADES" como cripto — se piden
+con `whatToShow='MIDPOINT'` (el precio medio entre bid y ask, el estándar para FX). La función
+ahora elige entre `'AGGTRADES'`/`'MIDPOINT'`/`'TRADES'` según `contrato.secType`.
+
+`TIPO_CAMBIO_USD_HKD` y `TIPO_CAMBIO_USD_KRW` siguen fijos a mano (no se ha pedido lo mismo
+para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el mismo
+(`Forex('USDHKD')`/`Forex('USDKRW')` + la misma función de refresco, generalizada).
+
 ## Bugs importantes encontrados y corregidos (orden cronológico)
 
 1. **Cuelgues por desconexión en esperas largas**: `time.sleep()` congelaba el bucle de

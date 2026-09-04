@@ -54,7 +54,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
-from ib_async import IB, Stock, Crypto, MarketOrder, LimitOrder, ExecutionFilter
+from ib_async import IB, Stock, Crypto, Forex, MarketOrder, LimitOrder, ExecutionFilter
 
 # --- Notificaciones a Telegram (opcional, igual que en bot_alpaca.py) ---
 # Si no se configuran estas dos variables, notificar_telegram() simplemente no
@@ -185,9 +185,12 @@ DECIMALES_FRACCION_CRIPTO = 6  # mas precision que acciones (DECIMALES_FRACCION=
 # --- Configuracion general ---
 IMPORTE_EUROS = 1000
 IMPORTE_EUROS_HK = 3500  # HK opera en lotes fijos (a veces 500+ acciones): presupuesto mayor para poder cubrirlos
-TIPO_CAMBIO_EUR_USD = 1.14   # Actualiza estos valores cuando quieras, a mano
-TIPO_CAMBIO_USD_HKD = 7.80   # 1 USD = 7.80 HKD (aprox, el HKD esta fijado al USD)
-TIPO_CAMBIO_USD_KRW = 1480   # 1 USD = 1480 KRW (aprox)
+TIPO_CAMBIO_EUR_USD = 1.14   # Valor de arranque; se refresca solo con el precio real de mercado
+                              # (Forex EUR.USD via IBKR) cada INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS,
+                              # ver actualizar_tipo_cambio_eur_usd() - peticion del usuario, sept. 2026:
+                              # antes era un valor fijo que habia que actualizar a mano.
+TIPO_CAMBIO_USD_HKD = 7.80   # 1 USD = 7.80 HKD (aprox, el HKD esta fijado al USD) - sigue fijo a mano
+TIPO_CAMBIO_USD_KRW = 1480   # 1 USD = 1480 KRW (aprox) - sigue fijo a mano
 UMBRAL_BENEFICIO_PCT = 0.5  # % minimo de beneficio para activar la vigilancia de venta
 UMBRAL_BENEFICIO_CRYPTO_PCT = 0.3  # cripto: umbral mas bajo que acciones (peticion del usuario, sept.
                                     # 2026) - ya es NETO de comision (beneficio_pct la resta antes de
@@ -753,8 +756,17 @@ def pedir_velas(ib, contrato, duration, barSize):
     # soportado para CRYPTO y no da un error claro, sino que se queda
     # colgado hasta agotar el timeout en todos los intentos (bug real visto
     # en produccion, sept. 2026 - el mismo sintoma que el problema de
-    # exchange PAXOS/ZEROHASH, pero con causa distinta).
-    what_to_show = 'AGGTRADES' if getattr(contrato, 'secType', None) == 'CRYPTO' else 'TRADES'
+    # exchange PAXOS/ZEROHASH, pero con causa distinta). Los contratos de
+    # forex (secType='CASH', p.ej. EUR.USD para el tipo de cambio real, ver
+    # actualizar_tipo_cambio_eur_usd()) tampoco tienen "TRADES" -se piden
+    # con 'MIDPOINT', el precio medio entre bid/ask, el estandar para FX-.
+    secType_contrato = getattr(contrato, 'secType', None)
+    if secType_contrato == 'CRYPTO':
+        what_to_show = 'AGGTRADES'
+    elif secType_contrato == 'CASH':
+        what_to_show = 'MIDPOINT'
+    else:
+        what_to_show = 'TRADES'
 
     for intento in range(1, intentos + 1):
         try:
@@ -1043,6 +1055,47 @@ def macd_5min_bajista(ib, contrato):
     cierres = pd.Series([v.close for v in velas])
     macd, linea_senal, _ = calcular_macd(cierres)
     return bool(macd.iloc[-1] < linea_senal.iloc[-1])
+
+
+CONTRATO_EUR_USD = Forex('EURUSD')  # contrato de forex para el tipo de cambio real (ver mas abajo)
+INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS = 30 * 60  # 30 min: de sobra para un tipo de cambio
+                                                          # que no varia bruscamente de un momento a otro
+_ultima_actualizacion_tipo_cambio = 0.0
+
+
+def actualizar_tipo_cambio_eur_usd(ib):
+    """Refresca TIPO_CAMBIO_EUR_USD con el precio real de mercado (Forex
+    EUR.USD via IBKR, precio MIDPOINT: el punto medio entre bid y ask,
+    estandar para FX) en vez de dejarlo fijo a un valor que hay que
+    actualizar a mano (peticion del usuario, sept. 2026). Throttlada a lo
+    sumo cada INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS -se puede llamar
+    en cada vuelta del bucle principal sin miedo a pedir datos de mas-.
+
+    Si falla (sin permisos de datos de forex, sin conexion, etc.) se deja
+    el valor anterior tal cual y solo se registra un aviso: esto NUNCA
+    afecta al dinero real operado (el tamaño de cada operacion se calcula
+    siempre en USD nativo desde el valor de la cuenta, ver
+    LIMITE_EXPOSICION_PCT) -solo afecta a las conversiones para MOSTRAR
+    importes en EUR (Telegram, cartera_ibkr.py) y al techo de seguridad
+    IMPORTE_EUROS, que en la practica casi nunca llega a aplicar."""
+    global TIPO_CAMBIO_EUR_USD, _ultima_actualizacion_tipo_cambio
+    ahora = time.monotonic()
+    if ahora - _ultima_actualizacion_tipo_cambio < INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS:
+        return
+    _ultima_actualizacion_tipo_cambio = ahora
+    try:
+        if not CONTRATO_EUR_USD.conId:
+            ib.qualifyContracts(CONTRATO_EUR_USD)
+        velas = pedir_velas(ib, CONTRATO_EUR_USD, '1 D', '5 mins')
+        if velas:
+            TIPO_CAMBIO_EUR_USD = velas[-1].close
+            log(f"Tipo de cambio EUR/USD actualizado al precio real de mercado: {TIPO_CAMBIO_EUR_USD:.4f}")
+        else:
+            log(f"No se pudo obtener el tipo de cambio EUR/USD real, se mantiene el valor "
+                f"anterior ({TIPO_CAMBIO_EUR_USD:.4f}).")
+    except Exception as e:
+        log(f"Error al actualizar el tipo de cambio EUR/USD, se mantiene el valor anterior "
+            f"({TIPO_CAMBIO_EUR_USD:.4f}): {type(e).__name__}: {e}")
 
 
 def valor_en_usd(valor, currency):
@@ -2442,6 +2495,8 @@ def main():
                     log(f"Esperando {INTERVALO_SEGUNDOS // 60} minutos hasta la siguiente revision...")
                     esperar_pumpeando(ib, INTERVALO_SEGUNDOS)
                     continue
+
+            actualizar_tipo_cambio_eur_usd(ib)  # throttlado internamente, seguro llamar cada vuelta
 
             hoy = datetime.now().date()
             for mercado in ("US", "HK", "KR"):

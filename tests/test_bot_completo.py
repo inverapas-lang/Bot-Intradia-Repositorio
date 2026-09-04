@@ -6,6 +6,7 @@ prueban calculos matematicos y de horarios con datos simulados.
 import os
 import sys
 import tempfile
+import time
 import types
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -540,6 +541,10 @@ class _ContratoCryptoFalso(_ContratoFalso):
     secType = "CRYPTO"
 
 
+class _ContratoForexFalso(_ContratoFalso):
+    secType = "CASH"
+
+
 ib_captura_crypto = _IBCapturaWhatToShow()
 bot.pedir_velas(ib_captura_crypto, _ContratoCryptoFalso("BTC"), "1 D", "5 mins")
 check("pedir_velas: contrato CRYPTO pide whatToShow='AGGTRADES'",
@@ -551,6 +556,12 @@ bot.pedir_velas(ib_captura_accion, _ContratoFalso("AAPL"), "1 D", "5 mins")
 check("pedir_velas: contrato de accion (sin secType CRYPTO) sigue pidiendo whatToShow='TRADES'",
       ib_captura_accion.what_to_show_recibido == "TRADES",
       f"whatToShow={ib_captura_accion.what_to_show_recibido}")
+
+ib_captura_forex = _IBCapturaWhatToShow()
+bot.pedir_velas(ib_captura_forex, _ContratoForexFalso("EUR.USD"), "1 D", "5 mins")
+check("pedir_velas: contrato de forex (secType='CASH') pide whatToShow='MIDPOINT'",
+      ib_captura_forex.what_to_show_recibido == "MIDPOINT",
+      f"whatToShow={ib_captura_forex.what_to_show_recibido}")
 
 
 # ---------------------------------------------------------------------------
@@ -1780,6 +1791,73 @@ finally:
 check("revisar_ventas con mercados={'CRYPTO'}: solo opera BTC, ignora AAPL (mercado US)",
       len(ib_falso_ventas_filtro.ordenes_colocadas) == 1,
       f"ordenes={ib_falso_ventas_filtro.ordenes_colocadas}")
+
+
+# ---------------------------------------------------------------------------
+# 17. actualizar_tipo_cambio_eur_usd: refresca TIPO_CAMBIO_EUR_USD con el
+#     precio real de mercado (Forex EUR.USD), en vez de dejarlo fijo a mano
+#     - peticion del usuario, sept. 2026. Throttlada: no debe pedir datos
+#     en cada llamada, solo cada INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS.
+# ---------------------------------------------------------------------------
+class _IBFalsoTipoCambio:
+    def __init__(self, precio):
+        self.precio = precio
+        self.llamadas_reqHistoricalData = 0
+        self.contrato_qualificado = None
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 12345
+        self.contrato_qualificado = contrato
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        self.llamadas_reqHistoricalData += 1
+        return [_Vela(self.precio)]
+
+    def sleep(self, segundos):
+        pass
+
+
+tipo_cambio_original = bot.TIPO_CAMBIO_EUR_USD
+ultima_actualizacion_original = bot._ultima_actualizacion_tipo_cambio
+bot.CONTRATO_EUR_USD.conId = None  # fuerza a que qualifyContracts se llame en esta prueba
+
+# Nota: time.monotonic() NO empieza necesariamente en 0 -en un contenedor
+# recien arrancado puede ser un numero pequeño-, asi que para simular "hace
+# mas de INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS" hay que restar desde
+# el "ahora" real, no asumir que 0.0 ya esta suficientemente en el pasado.
+_hace_rato = time.monotonic() - bot.INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS - 1
+try:
+    bot._ultima_actualizacion_tipo_cambio = _hace_rato  # fuerza que la primera llamada SI actualice
+    ib_falso_cambio = _IBFalsoTipoCambio(1.2345)
+    bot.actualizar_tipo_cambio_eur_usd(ib_falso_cambio)
+    check("actualizar_tipo_cambio_eur_usd: actualiza TIPO_CAMBIO_EUR_USD con el precio real",
+          bot.TIPO_CAMBIO_EUR_USD == 1.2345, f"TIPO_CAMBIO_EUR_USD={bot.TIPO_CAMBIO_EUR_USD}")
+    check("actualizar_tipo_cambio_eur_usd: pide velas de un contrato de forex (EUR.USD)",
+          ib_falso_cambio.llamadas_reqHistoricalData == 1)
+
+    # Llamada inmediata siguiente: throttlada, NO debe volver a pedir datos
+    # ni cambiar el valor, aunque el precio simulado sea distinto.
+    ib_falso_cambio_2 = _IBFalsoTipoCambio(9.9999)
+    bot.actualizar_tipo_cambio_eur_usd(ib_falso_cambio_2)
+    check("actualizar_tipo_cambio_eur_usd: una segunda llamada inmediata esta throttlada (no pide datos)",
+          ib_falso_cambio_2.llamadas_reqHistoricalData == 0)
+    check("actualizar_tipo_cambio_eur_usd: el valor no cambia mientras este throttlado",
+          bot.TIPO_CAMBIO_EUR_USD == 1.2345, f"TIPO_CAMBIO_EUR_USD={bot.TIPO_CAMBIO_EUR_USD}")
+
+    # Si falla (sin velas), se mantiene el valor anterior sin excepcion.
+    bot._ultima_actualizacion_tipo_cambio = time.monotonic() - bot.INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS - 1
+
+    class _IBFalsoTipoCambioSinDatos(_IBFalsoTipoCambio):
+        def reqHistoricalData(self, contrato, **kwargs):
+            self.llamadas_reqHistoricalData += 1
+            return []
+
+    bot.actualizar_tipo_cambio_eur_usd(_IBFalsoTipoCambioSinDatos(1.5))
+    check("actualizar_tipo_cambio_eur_usd: si no hay velas, mantiene el valor anterior sin excepcion",
+          bot.TIPO_CAMBIO_EUR_USD == 1.2345, f"TIPO_CAMBIO_EUR_USD={bot.TIPO_CAMBIO_EUR_USD}")
+finally:
+    bot.TIPO_CAMBIO_EUR_USD = tipo_cambio_original
+    bot._ultima_actualizacion_tipo_cambio = ultima_actualizacion_original
 
 
 # ---------------------------------------------------------------------------
