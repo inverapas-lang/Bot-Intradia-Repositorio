@@ -545,6 +545,21 @@ vez del umbral general. El umbral ya se compara NETO de comisión (`beneficio_pc
 comisión estimada antes de comparar), así que un 0.3% neto sigue siendo ganancia real, no solo
 cubrir gastos — no hizo falta ningún ajuste adicional en el cálculo de comisión.
 
+**Atajo de compra propio de cripto: velas de 1/3/10/20 min (añadido sept. 2026, petición del
+usuario)**: además del atajo general de 4 temporalidades cortas (1/5/15/30 min, ver
+`NOMBRES_4_CORTAS`/`cuatro_cortas_alcistas`), cripto comprueba TAMBIÉN estas otras 4
+temporalidades propias — si las 4 salen alcistas, compra directamente, **independientemente**
+de lo que diga el análisis general de 7 temporalidades (es un atajo adicional, no un
+reemplazo: `decision = "COMPRA"` si `cuatro_cortas_alcistas OR atajo_cripto`). IBKR no tenía
+definidas velas de 3/10/20 min en `TEMPORALIDADES` (esa lista es compartida con acciones), así
+que se añadió `TEMPORALIDADES_CRIPTO_ATAJO_EXTRA` (solo 3/10/20 min — la de 1 min NO está ahí:
+se reutiliza el resultado ya calculado en `detalle["1 minuto"]` del análisis general, mismo
+barSize y mismo cálculo de MACD, para no pedirla dos veces a IBKR) y la función
+`atajo_cripto_alcista(ib, contrato, un_minuto_alcista)`, con corte temprano: si el 1 minuto
+reutilizado ya es `None` o `False`, no hace falta pedir las otras 3 (las 4 tienen que ser
+alcistas). Se llama desde `analizar_activo()` solo cuando `activo["mercado"] == "CRYPTO"` —
+para acciones ni se comprueba.
+
 ## Control por Telegram del bot de IBKR (`telegram_bot_ibkr.py`) — añadido septiembre 2026
 
 Petición explícita del usuario: quería gestionar `bot_completo.py` (real, IBKR) desde el

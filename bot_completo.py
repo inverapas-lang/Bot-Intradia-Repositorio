@@ -395,6 +395,19 @@ TEMPORALIDADES = [
 # se compra sin mirar el resto (vease analizar_activo).
 NOMBRES_4_CORTAS = ["1 minuto", "5 minutos", "15 minutos", "30 minutos"]
 
+# Atajo de compra EXCLUSIVO de cripto (peticion del usuario, sept. 2026):
+# ademas del atajo general de arriba (1/5/15/30 min), cripto comprueba
+# TAMBIEN estas otras temporalidades propias (1/3/10/20 min) - si las 4
+# salen alcistas, compra directamente, igual que el atajo general (ver
+# atajo_cripto_alcista() y su uso en analizar_activo). La de "1 minuto" NO
+# esta aqui: se reutiliza la ya calculada en TEMPORALIDADES/detalle (mismo
+# barSize, mismo calculo), para no pedirla dos veces a IBKR.
+TEMPORALIDADES_CRIPTO_ATAJO_EXTRA = [
+    {"nombre": "3 minutos",  "barSize": "3 mins",  "duration": "1 D"},
+    {"nombre": "10 minutos", "barSize": "10 mins", "duration": "2 D"},
+    {"nombre": "20 minutos", "barSize": "20 mins", "duration": "2 D"},
+]
+
 
 # --- Vigilante de congelacion del proceso ---
 # Se ha visto en produccion que una llamada bloqueante a IBKR (p.ej.
@@ -923,6 +936,33 @@ def orden_rechazada_por_codigo(trade, codigos_error):
     return any(getattr(entry, 'errorCode', None) in codigos_error for entry in getattr(trade, 'log', []))
 
 
+def atajo_cripto_alcista(ib, contrato, un_minuto_alcista):
+    """Atajo de compra EXCLUSIVO de cripto (peticion del usuario, sept.
+    2026): ademas del atajo general de 4 temporalidades cortas (1/5/15/30
+    min, ver cuatro_cortas_alcistas en analizar_activo), cripto comprueba
+    TAMBIEN 1/3/10/20 min - si las 4 salen alcistas, compra directamente.
+
+    `un_minuto_alcista` es el resultado YA calculado para "1 minuto" en el
+    analisis general (mismo barSize, mismo calculo de MACD) - se reutiliza
+    en vez de pedirlo otra vez a IBKR. Si ya es None o False, no hace falta
+    ni mirar las otras 3 (todas tienen que ser alcistas para que cuente).
+
+    Devuelve True/False, o None si faltan datos en alguna temporalidad (no
+    se puede decidir con seguridad)."""
+    if not un_minuto_alcista:
+        return un_minuto_alcista  # None o False, tal cual
+
+    for tf in TEMPORALIDADES_CRIPTO_ATAJO_EXTRA:
+        velas = pedir_velas(ib, contrato, tf["duration"], tf["barSize"])
+        if len(velas) < 35:
+            return None
+        cierres = pd.Series([v.close for v in velas])
+        macd, linea_senal, _ = calcular_macd(cierres)
+        if not bool(macd.iloc[-1] > linea_senal.iloc[-1]):
+            return False
+    return True
+
+
 def analizar_activo(ib, activo):
     contrato = crear_contrato(ib, activo)
     ib.qualifyContracts(contrato)
@@ -957,6 +997,12 @@ def analizar_activo(ib, activo):
         and all(detalle[n] for n in NOMBRES_4_CORTAS)
     )
 
+    # Atajo EXCLUSIVO de cripto: 1/3/10/20 min, independiente del atajo
+    # general de arriba -ver atajo_cripto_alcista().
+    atajo_cripto = None
+    if activo["mercado"] == "CRYPTO":
+        atajo_cripto = atajo_cripto_alcista(ib, contrato, detalle.get("1 minuto"))
+
     faltan_datos = any(detalle[tf['nombre']] is None for tf in TEMPORALIDADES)
     total_false = sum(1 for tf in TEMPORALIDADES if detalle[tf['nombre']] is False)
     cortas_ok = all(detalle[tf['nombre']] for tf in TEMPORALIDADES
@@ -964,7 +1010,7 @@ def analizar_activo(ib, activo):
     largas_ok = all(detalle[tf['nombre']] for tf in TEMPORALIDADES
                      if tf['tipo'] == 'larga' and detalle[tf['nombre']] is not None)
 
-    if cuatro_cortas_alcistas:
+    if cuatro_cortas_alcistas or atajo_cripto:
         decision = "COMPRA"
     elif faltan_datos:
         decision = "SIN_DATOS"

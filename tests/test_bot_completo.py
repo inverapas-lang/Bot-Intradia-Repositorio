@@ -319,6 +319,12 @@ class _IBPorTemporalidad:
     def sleep(self, segundos):
         pass
 
+    def positions(self):
+        # Para activos CRYPTO, crear_contrato() llama a
+        # descubrir_exchange_cripto(ib), que necesita este metodo (sin
+        # posiciones previas -> usa el exchange del propio activo).
+        return []
+
 
 # Las 4 cortas alcistas, pero 1 hora y las largas BAJISTAS: el atajo debe
 # ganar y dar COMPRA, aunque con la logica antigua (sin atajo) esto habria
@@ -345,6 +351,81 @@ _, decision_sin_atajo = bot.analizar_activo(_IBPorTemporalidad(series_sin_atajo)
 check("analizar_activo: si UNA de las 4 cortas esta bajista (y 3 de 7 en contra "
       "en total) -> el atajo no se activa y tampoco compra por la regla vieja",
       decision_sin_atajo == "SIN_SENAL", f"decision={decision_sin_atajo}")
+
+
+# ---------------------------------------------------------------------------
+# 6c. Atajo EXCLUSIVO de cripto (1/3/10/20 min, peticion del usuario, sept.
+#     2026): independiente del atajo general (1/5/15/30 min) - debe poder
+#     dar COMPRA aunque el analisis normal de 7 temporalidades NO lo haria.
+# ---------------------------------------------------------------------------
+activo_cripto_prueba = {"ticker": "BTC", "exchange": bot.EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
+bot._exchange_cripto_cache = None
+
+# 5/15/30min, 1h, dia y semana BAJISTAS (el analisis normal daria SIN_SENAL,
+# como en el test anterior con activo_prueba), pero 1/3/10/20 min (el atajo
+# de cripto) TODAS alcistas -> debe dar COMPRA de todos modos.
+series_atajo_cripto = {
+    "1 min": SERIE_ALCISTA, "5 mins": SERIE_BAJISTA, "15 mins": SERIE_BAJISTA, "30 mins": SERIE_BAJISTA,
+    "1 hour": SERIE_BAJISTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
+    "3 mins": SERIE_ALCISTA, "10 mins": SERIE_ALCISTA, "20 mins": SERIE_ALCISTA,
+}
+_, decision_atajo_cripto = bot.analizar_activo(_IBPorTemporalidad(series_atajo_cripto), activo_cripto_prueba)
+check("analizar_activo CRYPTO: atajo propio (1/3/10/20 min) todas alcistas -> COMPRA, "
+      "aunque el analisis de 7 temporalidades por si solo daria SIN_SENAL",
+      decision_atajo_cripto == "COMPRA", f"decision={decision_atajo_cripto}")
+
+# Igual que arriba, pero con 10 min BAJISTA: el atajo de cripto no debe
+# activarse (hacen falta las 4), y sin el atajo general tampoco activo, la
+# decision cae en la misma SIN_SENAL de siempre.
+series_sin_atajo_cripto = dict(series_atajo_cripto, **{"10 mins": SERIE_BAJISTA})
+bot._exchange_cripto_cache = None
+_, decision_sin_atajo_cripto = bot.analizar_activo(_IBPorTemporalidad(series_sin_atajo_cripto), activo_cripto_prueba)
+check("analizar_activo CRYPTO: si UNA de las 4 del atajo propio esta bajista (10 min), "
+      "no se activa -> SIN_SENAL",
+      decision_sin_atajo_cripto == "SIN_SENAL", f"decision={decision_sin_atajo_cripto}")
+
+# El atajo de cripto NUNCA se comprueba para acciones (activo_prueba, US):
+# reutiliza el mismo series_atajo_cripto (que SI tiene 3/10/20 min alcistas)
+# pero al ser mercado US no debe importar -> misma SIN_SENAL de antes.
+_, decision_no_cripto = bot.analizar_activo(_IBPorTemporalidad(series_atajo_cripto), activo_prueba)
+check("analizar_activo: el atajo de 1/3/10/20 min NUNCA se aplica a acciones (mercado US)",
+      decision_no_cripto == "SIN_SENAL", f"decision={decision_no_cripto}")
+
+
+# --- atajo_cripto_alcista() aislado: reutiliza el resultado de 1 minuto en
+#     vez de pedirlo otra vez, y no llama a IBKR si ya viene None o False ---
+class _IBContadorLlamadas:
+    def __init__(self, series_por_barsize):
+        self.series_por_barsize = series_por_barsize
+        self.llamadas = []
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        self.llamadas.append(kwargs["barSizeSetting"])
+        return [_Vela(p) for p in self.series_por_barsize[kwargs["barSizeSetting"]]]
+
+
+ib_contador = _IBContadorLlamadas({})
+check("atajo_cripto_alcista: con un_minuto_alcista=None, no llama a IBKR y devuelve None",
+      bot.atajo_cripto_alcista(ib_contador, None, None) is None and ib_contador.llamadas == [],
+      f"llamadas={ib_contador.llamadas}")
+
+ib_contador_2 = _IBContadorLlamadas({})
+check("atajo_cripto_alcista: con un_minuto_alcista=False, no llama a IBKR y devuelve False",
+      bot.atajo_cripto_alcista(ib_contador_2, None, False) is False and ib_contador_2.llamadas == [],
+      f"llamadas={ib_contador_2.llamadas}")
+
+ib_todas_alcistas = _IBContadorLlamadas({"3 mins": SERIE_ALCISTA, "10 mins": SERIE_ALCISTA, "20 mins": SERIE_ALCISTA})
+check("atajo_cripto_alcista: 1min ya alcista + las otras 3 tambien -> True",
+      bot.atajo_cripto_alcista(ib_todas_alcistas, None, True) is True)
+
+ib_una_bajista = _IBContadorLlamadas({"3 mins": SERIE_ALCISTA, "10 mins": SERIE_BAJISTA, "20 mins": SERIE_ALCISTA})
+check("atajo_cripto_alcista: 1min alcista pero 10min bajista -> False",
+      bot.atajo_cripto_alcista(ib_una_bajista, None, True) is False)
+
+ib_pocos_datos_atajo = _IBContadorLlamadas({"3 mins": [100, 101], "10 mins": SERIE_ALCISTA, "20 mins": SERIE_ALCISTA})
+check("atajo_cripto_alcista: menos de 35 velas en una temporalidad -> None",
+      bot.atajo_cripto_alcista(ib_pocos_datos_atajo, None, True) is None)
+
 
 # Muy pocas velas (menos de 35) -> SIN_DATOS
 ib_falso_pocos_datos = _IBFalso([100, 101, 102])
