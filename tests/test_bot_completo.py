@@ -1659,6 +1659,77 @@ if ib_falso_compras_cripto.ordenes_colocadas:
           f"totalQuantity={orden_cripto.totalQuantity}")
 
 
+# --- redondear_a_incremento / obtener_incremento_lote_cripto: bug real de
+#     produccion (sept. 2026) - LTC/BCH/SOL/LINK daban "Error 202: Order
+#     Canceled - reason: Invalid order" porque la cantidad calculada (redondeada
+#     siempre a 6 decimales, igual para todas las monedas) no era un multiplo
+#     valido del incremento minimo que exige el exchange para esa moneda en
+#     concreto. BTC no lo sufria por pura coincidencia con su propio
+#     incremento, no porque el codigo lo tuviera en cuenta.
+check("redondear_a_incremento: redondea HACIA ABAJO al multiplo valido mas cercano",
+      abs(bot.redondear_a_incremento(0.795272, 0.01) - 0.79) < 1e-9,
+      f"resultado={bot.redondear_a_incremento(0.795272, 0.01)}")
+check("redondear_a_incremento: por debajo de un incremento -> 0 (no una cantidad invalida)",
+      bot.redondear_a_incremento(0.008, 0.01) == 0.0)
+check("redondear_a_incremento: incremento 0 o invalido -> no toca la cantidad (fallback)",
+      bot.redondear_a_incremento(0.795272, 0) == 0.795272)
+
+
+class _IBFalsoContractDetailsCripto:
+    def __init__(self, min_size, incremento):
+        self.min_size = min_size
+        self.incremento = incremento
+
+    def reqContractDetails(self, contrato):
+        return [types.SimpleNamespace(minSize=self.min_size, sizeIncrement=self.incremento)]
+
+
+min_size_ltc, incremento_ltc = bot.obtener_incremento_lote_cripto(
+    _IBFalsoContractDetailsCripto(0.01, 0.01), activo_btc)
+check("obtener_incremento_lote_cripto: devuelve minSize/sizeIncrement como floats (sin redondear a entero)",
+      min_size_ltc == 0.01 and incremento_ltc == 0.01,
+      f"min_size={min_size_ltc}, incremento={incremento_ltc}")
+
+min_size_sin_datos, incremento_sin_datos = bot.obtener_incremento_lote_cripto(
+    _IBFalsoComprasCripto(), activo_btc)  # reqContractDetails -> [] en este fake
+check("obtener_incremento_lote_cripto: sin datos de IBKR -> (0.0, 0.0), no revienta",
+      min_size_sin_datos == 0.0 and incremento_sin_datos == 0.0)
+
+
+# --- Extremo a extremo: revisar_compras CRYPTO respeta el incremento real
+#     del exchange (no solo el redondeo fijo a 6 decimales) ---
+class _IBFalsoComprasCriptoConIncremento(_IBFalsoComprasCripto):
+    def reqContractDetails(self, contrato):
+        return [types.SimpleNamespace(minSize=0.01, sizeIncrement=0.01)]
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(51.29)]  # precio bajo, tipo LTC (con BTC a 50000 el importe de prueba
+                                # ni siquiera llega a 0.01 unidades, no sirve para este caso)
+
+
+bot.ACTIVOS = [activo_btc]
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None
+ib_falso_incremento = _IBFalsoComprasCriptoConIncremento()
+try:
+    bot.revisar_compras(ib_falso_incremento)
+finally:
+    bot.ACTIVOS = activos_originales_compras
+    bot.analizar_activo = analizar_activo_original
+
+check("revisar_compras CRYPTO: con sizeIncrement=0.01, coloca exactamente una orden",
+      len(ib_falso_incremento.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_incremento.ordenes_colocadas}")
+if ib_falso_incremento.ordenes_colocadas:
+    cantidad_final = ib_falso_incremento.ordenes_colocadas[0].totalQuantity
+    # Multiplo valido de 0.01: (cantidad * 100) debe ser un entero (con
+    # margen para ruido de coma flotante).
+    check("revisar_compras CRYPTO: la cantidad final es multiplo del incremento real (0.01), "
+          "no el redondeo fijo a 6 decimales de antes",
+          abs(round(cantidad_final * 100) - cantidad_final * 100) < 1e-6,
+          f"totalQuantity={cantidad_final}")
+
+
 # --- 9f. revisar_ventas con una posicion CRYPTO: usa LimitOrder con
 #     totalQuantity fraccionario nativo, sin pasar por la logica de venta
 #     forzada (que no aplica a cripto, no tiene "cierre diario") ---

@@ -472,6 +472,22 @@ pueden no ser válidos para otro, Y ADEMÁS la documentación general de IBKR so
 "admite" un tipo de orden no garantiza que una cuenta/exchange concreto los acepte todos: el
 error real de la cuenta (aquí, el 201) es la única fuente fiable, otra vez.
 
+**Con el `tif` ya arreglado, LTC/BCH/SOL/LINK seguían sin comprarse: `Error 202, Order Canceled
+- reason: Invalid order` (bug real de producción, sept. 2026)**: BTC sí compraba bien, pero el
+resto de monedas no — la diferencia no era el exchange ni el `tif`, sino la CANTIDAD pedida.
+`revisar_compras()` redondeaba siempre a un número fijo de decimales
+(`DECIMALES_FRACCION_CRIPTO = 6`) igual para todas las criptomonedas, sin tener en cuenta que
+cada una tiene su propio incremento mínimo válido en el exchange real de la cuenta (p.ej. BTC
+puede admitir incrementos de 0.00001, pero LTC/BCH/SOL/LINK otros distintos) — BTC funcionaba
+por pura coincidencia con su propio incremento, no porque el código lo tuviera en cuenta.
+Arreglado con `obtener_incremento_lote_cripto(ib, contrato)` (variante de la ya existente
+`obtener_incremento_lote()`, usada para lotes de HK, pero SIN redondear a enteros — en cripto
+`minSize`/`sizeIncrement` son fraccionarios) + `redondear_a_incremento()`, que redondea la
+cantidad calculada HACIA ABAJO al múltiplo válido más cercano del incremento real que devuelve
+`ib.reqContractDetails()` para ese contrato en concreto, antes de construir la orden. Si el
+incremento no se pudo consultar, se deja la cantidad tal cual (mismo comportamiento que antes,
+sin regresión).
+
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a
   viernes 4:00 PM ET (cerrado la mayor parte del fin de semana).

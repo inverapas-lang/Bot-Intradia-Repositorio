@@ -45,6 +45,7 @@ Revisa bien la configuracion antes de dejarlo corriendo desatendido.
 """
 
 import json
+import math
 import os
 import threading
 import time
@@ -1680,6 +1681,48 @@ def obtener_incremento_lote(ib, contrato):
     return 1, 1
 
 
+def obtener_incremento_lote_cripto(ib, contrato):
+    """Version de obtener_incremento_lote() para CRYPTO: a diferencia de las
+    acciones (lotes siempre enteros), en cripto minSize/sizeIncrement son
+    FRACCIONARIOS (p.ej. 0.00001 BTC, 0.001 LTC...) y no se pueden redondear
+    a enteros. Devuelve (minSize, sizeIncrement) como floats tal cual los
+    da IBKR; (0.0, 0.0) si no se pudo consultar -en ese caso, quien llame
+    debe decidir un fallback (ver su uso en revisar_compras).
+
+    Bug real de produccion (sept. 2026): sin esto, se redondeaba la
+    cantidad a comprar a un numero fijo de decimales (DECIMALES_FRACCION_CRIPTO)
+    igual para todas las criptomonedas, sin tener en cuenta que cada una
+    tiene su propio incremento minimo valido en el exchange real de la
+    cuenta -para LTC/BCH/SOL/LINK, IBKR rechazaba la orden con
+    "Error 202: Order Canceled - reason: Invalid order" (no es un error de
+    permisos ni de exchange, simplemente la cantidad pedida no era un
+    multiplo valido del incremento que admite ese contrato en concreto)."""
+    try:
+        detalles = ib.reqContractDetails(contrato)
+        if detalles:
+            cd = detalles[0]
+            min_size = float(getattr(cd, 'minSize', 0) or 0)
+            incremento = float(getattr(cd, 'sizeIncrement', 0) or 0)
+            return min_size, incremento
+    except Exception:
+        pass
+    return 0.0, 0.0
+
+
+def redondear_a_incremento(cantidad, incremento):
+    """Redondea `cantidad` HACIA ABAJO al multiplo valido mas cercano de
+    `incremento` (nunca hacia arriba: no se debe comprar mas de lo que el
+    presupuesto calculado permite). Si `incremento` es 0 o invalido,
+    devuelve `cantidad` sin tocar -no se pudo consultar el incremento real,
+    ver obtener_incremento_lote_cripto()-."""
+    if incremento <= 0:
+        return cantidad
+    # round() limpia el ruido de coma flotante que suele dejar la division
+    # (p.ej. 0.7999999999999999 en vez de 0.8) antes de multiplicar nada.
+    pasos = math.floor(round(cantidad / incremento, 10))
+    return round(pasos * incremento, 10)
+
+
 def revisar_compras(ib, mercados=None):
     """Ver revisar_ventas() para el significado de `mercados`."""
     valor_total_cartera_usd = obtener_valor_total_cartera_usd(ib)
@@ -1830,9 +1873,12 @@ def revisar_compras(ib, mercados=None):
                     continue
 
                 cantidad_cripto = round(importe_a_usar / precio_actual, DECIMALES_FRACCION_CRIPTO)
-                if cantidad_cripto <= 0:
+                min_size_cripto, incremento_cripto = obtener_incremento_lote_cripto(ib, contrato)
+                cantidad_cripto = redondear_a_incremento(cantidad_cripto, incremento_cripto)
+                if cantidad_cripto <= 0 or (min_size_cripto > 0 and cantidad_cripto < min_size_cripto):
                     log(f"COMPRAS: {ticker} - senal de COMPRA pero el importe calculado ({importe_a_usar:.2f} "
-                        f"USD) no llega a una cantidad valida al precio actual ({precio_actual} USD), se omite.")
+                        f"USD) no llega a una cantidad valida al precio actual ({precio_actual} USD) "
+                        f"respetando el incremento minimo del exchange ({incremento_cripto:g}), se omite.")
                     continue
 
                 log(f"COMPRAS: {ticker} (CRYPTO) - senal de COMPRA, comprando ~{cantidad_cripto:g} unidades "
