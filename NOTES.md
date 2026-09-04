@@ -454,13 +454,23 @@ de producción, sept. 2026)**: con el exchange ya descubierto correctamente, TOD
 hasta este punto) fallaban con este error nada más enviarlas. Causa: `LimitOrder()` de
 `ib_async` deja el campo `tif` (time-in-force) vacío (`''`) por defecto si no se especifica.
 Para acciones esto no da ningún problema (IBKR lo trata como `'DAY'` implícito), pero el
-exchange de cripto real de esta cuenta (`ZEROHASHE`) lo rechaza explícitamente. Arreglado
-fijando `tif='GTC'` a mano en `crear_orden_limitada_cripto()` — se eligió GTC en vez de DAY
-porque cripto es 24/7 y no tiene un "fin de día de sesión" real al que referenciar un `DAY`
-(documentación de IBKR: las órdenes LMT de cripto admiten DAY/GTC/IOC). Moraleja: al añadir
-soporte para un tipo de activo nuevo, no basta con confirmar que el CONTRATO se resuelve bien
-(conId, exchange) — los valores por defecto de la ORDEN (tif y similares) que "simplemente
-funcionan" para un tipo de activo pueden no ser válidos para otro.
+exchange de cripto real de esta cuenta (`ZEROHASHE`) lo rechaza explícitamente.
+
+Primer intento de arreglo: `tif='GTC'` (la documentación general de IBKR dice que las órdenes
+LMT de cripto admiten DAY/GTC/IOC, y GTC parecía la opción lógica para un mercado 24/7 sin
+"fin de día de sesión" real). **Este intento también falló**: la cuenta lo rechazó con
+`Error 201: "The crypto buy order must be Minutes or IOC"` — GTC no es válido para COMPRAR
+cripto en esta cuenta concreta, pese a lo que dice la documentación general de
+PAXOS/ZEROHASH. Arreglo definitivo: `tif='IOC'` (Immediate-or-Cancel) — encaja bien además con
+cómo ya funciona el bot (coloca la orden al precio actual y comprueba el resultado al momento
+vía `esperar_estado_final_orden`, sin depender de que una orden se quede "viva" esperando).
+
+Moraleja (aplica dos veces en este mismo bug): al añadir soporte para un tipo de activo nuevo,
+no basta con confirmar que el CONTRATO se resuelve bien (conId, exchange) — los valores por
+defecto de la ORDEN (`tif` y similares) que "simplemente funcionan" para un tipo de activo
+pueden no ser válidos para otro, Y ADEMÁS la documentación general de IBKR sobre qué valores
+"admite" un tipo de orden no garantiza que una cuenta/exchange concreto los acepte todos: el
+error real de la cuenta (aquí, el 201) es la única fuente fiable, otra vez.
 
 **Horario**: IBKR tiene dos niveles de cuenta con horarios distintos:
 - **Crypto Basic** (por defecto en la mayoría de cuentas nuevas): domingo 3:00 AM ET a

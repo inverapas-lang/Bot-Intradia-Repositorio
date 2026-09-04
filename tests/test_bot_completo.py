@@ -1589,14 +1589,17 @@ check("estimar_comision_cripto: valor 0 -> comision 0 (no revienta por division 
       bot.estimar_comision_cripto(0) == 0.0)
 
 
-# --- crear_orden_limitada_cripto: tif='GTC' explicito (bug real de
-#     produccion, sept. 2026: LimitOrder() deja tif='' por defecto, y el
-#     exchange real de cripto de la cuenta -ZEROHASHE- lo rechazaba con
-#     "Error 10052: Invalid time in force"; ninguna compra ni venta de
-#     cripto llegaba a colocarse hasta fijar un tif valido a mano) ---
+# --- crear_orden_limitada_cripto: tif='IOC' explicito (bug real de
+#     produccion, sept. 2026, en dos pasos: 1) LimitOrder() deja tif=''
+#     por defecto, y el exchange real de cripto de la cuenta -ZEROHASHE-
+#     lo rechazaba con "Error 10052: Invalid time in force"; 2) probado
+#     tif='GTC' (documentacion general de IBKR), rechazado con "Error 201:
+#     The crypto buy order must be Minutes or IOC" -esta cuenta solo
+#     admite IOC para comprar cripto, pese a lo que dice la documentacion
+#     general de PAXOS/ZEROHASH-) ---
 orden_cripto_tif = bot.crear_orden_limitada_cripto('BUY', 0.001, 50000.0)
-check("crear_orden_limitada_cripto: tif='GTC' (no vacio, valido para el exchange de cripto)",
-      orden_cripto_tif.tif == "GTC", f"tif={orden_cripto_tif.tif!r}")
+check("crear_orden_limitada_cripto: tif='IOC' (no vacio, la unica valida para comprar en esta cuenta)",
+      orden_cripto_tif.tif == "IOC", f"tif={orden_cripto_tif.tif!r}")
 
 
 # --- 9e. revisar_compras con un activo CRYPTO: usa LimitOrder con

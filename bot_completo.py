@@ -926,16 +926,21 @@ def crear_orden_limitada_cripto(accion, cantidad, precio_limite):
     aqui no se usan ordenes a mercado para cripto). No hace falta ningun
     Plan B/C como con las acciones.
 
-    Bug real de produccion (sept. 2026): LimitOrder() de ib_async deja
-    `tif` vacio ('') por defecto. Para acciones esto funciona (IBKR lo
-    trata como 'DAY' implicito), pero el exchange de cripto de esta cuenta
-    (ZEROHASHE) lo RECHAZA explicitamente con el error 10052 "Invalid time
-    in force" -ninguna compra ni venta de cripto llegaba a colocarse-. Se
-    fija `tif='GTC'` explicitamente (valido en cripto segun la
-    documentacion de IBKR: LMT admite DAY/GTC/IOC); GTC en vez de DAY
-    porque cripto es 24/7 y no tiene un "fin de dia de sesion" real al que
-    referenciar un DAY."""
-    return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite, tif='GTC'))
+    Bug real de produccion (sept. 2026), en DOS pasos:
+    1) LimitOrder() de ib_async deja `tif` vacio ('') por defecto. Para
+       acciones esto funciona (IBKR lo trata como 'DAY' implicito), pero el
+       exchange de cripto de esta cuenta (ZEROHASHE) lo RECHAZA
+       explicitamente con el error 10052 "Invalid time in force" -ninguna
+       compra ni venta de cripto llegaba a colocarse-.
+    2) Se probo `tif='GTC'` (la documentacion general de IBKR dice que LMT
+       admite DAY/GTC/IOC en cripto), pero esta cuenta lo rechazo con el
+       error 201 "The crypto buy order must be Minutes or IOC" -GTC
+       tampoco vale para comprar, pese a lo que dice la documentacion
+       general-. Corregido a `tif='IOC'` (Immediate-or-Cancel): encaja bien
+       ademas con como ya funciona el bot (coloca la orden al precio actual
+       y comprueba el resultado al momento vía esperar_estado_final_orden,
+       sin depender de que una orden se quede "viva" esperando)."""
+    return _sin_flags_legacy(LimitOrder(accion, cantidad, precio_limite, tif='IOC'))
 
 
 def estimar_comision_cripto(valor_operacion):
