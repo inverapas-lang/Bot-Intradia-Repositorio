@@ -159,7 +159,7 @@ FRAGMENTOS_RUIDO_LOG = [
     "fuera de horario operativo",
     "no se analiza ningun valor",
     "Ciclo completado.",
-    "señales de compra, 0 errores.",
+    "0 señales de compra, 0 errores.",
 ]
 
 

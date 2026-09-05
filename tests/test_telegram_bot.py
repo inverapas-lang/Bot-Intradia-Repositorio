@@ -92,7 +92,9 @@ def _run_falso_log_con_ruido(cmd, **kwargs):
                    "[2026-08-31 12:47:23] VENTAS: AMD - beneficio -2.42%, por debajo del umbral -> se mantiene.\n"
                    "[2026-08-31 12:47:24] VENTAS: META - beneficio 1.16%, MACD 5min BAJISTA -> VENDIENDO "
                    "(orden limitada al precio exacto).\n"
-                   "[2026-08-31 12:47:24] VENTAS: META - orden colocada, estado: filled",
+                   "[2026-08-31 12:47:24] VENTAS: META - orden colocada, estado: filled\n"
+                   "[2026-08-31 12:47:25] COMPRAS: 6 analizados, 0 señales de compra, 0 errores.\n"
+                   "[2026-08-31 12:47:26] COMPRAS CRIPTO: 6 analizados, 1 señales de compra, 0 errores.",
             returncode=0)
     return types.SimpleNamespace(returncode=1, stdout="", stderr="")
 
@@ -111,6 +113,11 @@ try:
           "VENDIENDO" in resultado_log and "orden colocada" in resultado_log)
     check("/log: convierte el punto decimal a coma (formato español)",
           "1,16%" in resultado_log and "1.16%" not in resultado_log, f"resultado={resultado_log!r}")
+    check("/log: quita el resumen de analisis SIN señales (0 señales de compra, 0 errores)",
+          "0 señales de compra" not in resultado_log, f"resultado={resultado_log!r}")
+    check("/log: SI conserva el resumen de analisis CON señales de compra (bug corregido sept. 2026: "
+          "antes se filtraba por error cualquier resumen con 0 errores, aunque hubiera señales)",
+          "1 señales de compra" in resultado_log, f"resultado={resultado_log!r}")
 finally:
     tb.subprocess.run = run_original_log
 check("/ayuda -> lista de comandos", "/estado" in tb.procesar_comando("/ayuda"))
