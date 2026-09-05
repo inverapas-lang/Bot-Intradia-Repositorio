@@ -69,8 +69,13 @@ def formatear_posiciones_abiertas(html=False):
     etiqueta, igual que antes."""
     posiciones = bot.obtener_posiciones()
 
+    # Las posiciones ABIERTAS vienen en vivo de la API de Alpaca, siempre en
+    # el modo con el que esta conectado el bot AHORA MISMO (a diferencia del
+    # historial de cerradas, que se acumula entre cambios de modo) - se deja
+    # claro en el titulo para no confundirlo con una operacion PAPER antigua.
+    modo_actual = "PAPER" if bot.ALPACA_PAPER else "REAL"
     if not posiciones:
-        titulo = "📈 <b>POSICIONES ABIERTAS</b>" if html else "📈 POSICIONES ABIERTAS"
+        titulo = f"📈 <b>POSICIONES ABIERTAS</b> [{modo_actual}]" if html else f"📈 POSICIONES ABIERTAS [{modo_actual}]"
         return titulo + "\n(ninguna)"
 
     total_invertido = 0.0
@@ -105,9 +110,9 @@ def formatear_posiciones_abiertas(html=False):
                   f"P/L: {bot.formato_es(pl_total_usd, signo=True)} USD "
                   f"({bot.formato_es(pl_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR, "
                   f"{bot.formato_es(pl_total_pct, signo=True)}%)")
-        return f"📈 <b>POSICIONES ABIERTAS</b>\n{tabla}\n{resumen}"
+        return f"📈 <b>POSICIONES ABIERTAS</b> [{modo_actual}]\n{tabla}\n{resumen}"
 
-    lineas = ["📈 POSICIONES ABIERTAS"]
+    lineas = [f"📈 POSICIONES ABIERTAS [{modo_actual}]"]
     for symbol, cantidad, coste_medio, precio_actual, invertido, pl_usd, pl_eur, pl_pct in filas:
         lineas.append(f"{symbol}: {bot.formato_es(cantidad, 4)} acciones a {bot.formato_es(coste_medio, 4)} USD "
                       f"(invertido {bot.formato_es(invertido)} USD, ahora {bot.formato_es(precio_actual, 4)} USD) "
@@ -150,31 +155,51 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         else:
             ganancia_usd = ganancia_eur = None
         ganancia_total_usd += ganancia_usd or 0.0
-        filas.append((o["fecha_hora"], o["ticker"], cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct))
+        filas.append((o["fecha_hora"], o["ticker"], cantidad, precio, ganancia_usd, ganancia_eur,
+                      beneficio_pct, _modo_operacion(o)))
 
     if html:
-        lineas_tabla = [f"  {'Fecha':<12}{'Ticker':<7}{'Cant.':>8}{'Gan. USD':>12}"]
-        for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct in filas:
+        lineas_tabla = [f"  {'Fecha':<12}{'Ticker':<7}{'Cant.':>8}{'Gan. USD':>12}  Modo"]
+        for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo in filas:
             fecha_corta = fecha_hora[5:16].replace("T", " ")  # MM-DD HH:MM (11 caracteres)
             emoji = _emoji_pl(ganancia_usd) if ganancia_usd is not None else "⚪"
             ganancia_str = f"{bot.formato_es(ganancia_usd, signo=True):>12}" if ganancia_usd is not None else f"{'N/D':>12}"
-            lineas_tabla.append(f"{emoji} {fecha_corta:<12}{ticker:<7}{bot.formato_es(cantidad, 2):>8}{ganancia_str}")
+            modo_emoji = "💰" if modo == "REAL" else "🧪"
+            lineas_tabla.append(f"{emoji} {fecha_corta:<12}{ticker:<7}{bot.formato_es(cantidad, 2):>8}{ganancia_str}  {modo_emoji}")
         tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
         resumen = (f"<b>TOTAL</b> ganancia/perdida realizada: {bot.formato_es(ganancia_total_usd, signo=True)} USD "
-                  f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR)")
+                  f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR)\n"
+                  f"💰 = REAL, 🧪 = PAPER (simulado){_resumen_por_modo(ventas)}")
         return f"{titulo_html}\n{tabla}\n{resumen}"
 
     lineas = [titulo_plano]
-    for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct in filas:
+    for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo in filas:
         fecha_str = fecha_hora[:16].replace("T", " ")
         ganancia_str = (f", ganancia {bot.formato_es(ganancia_usd, signo=True)} USD / "
                         f"{bot.formato_es(ganancia_eur, signo=True)} EUR") if ganancia_usd is not None else ""
         beneficio_pct_str = f" ({bot.formato_es(beneficio_pct, signo=True)}%)" if beneficio_pct is not None else ""
-        lineas.append(f"{fecha_str} {ticker}: {bot.formato_es(cantidad, 4)} acciones a {bot.formato_es(precio, 4)} USD"
-                      f"{ganancia_str}{beneficio_pct_str}")
+        lineas.append(f"[{modo}] {fecha_str} {ticker}: {bot.formato_es(cantidad, 4)} acciones a "
+                      f"{bot.formato_es(precio, 4)} USD{ganancia_str}{beneficio_pct_str}")
     lineas.append(f"TOTAL ganancia/perdida realizada: {bot.formato_es(ganancia_total_usd, signo=True)} USD "
                   f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR)")
     return "\n".join(lineas)
+
+
+def _modo_operacion(o):
+    """Modo (REAL/PAPER) de una operacion del historial. Las operaciones
+    anteriores a que este campo existiera (antes de sept. 2026, cuando el
+    bot solo corria en PAPER) no lo tienen -se asume PAPER para esas, que
+    es el unico modo que existia entonces."""
+    return o.get("modo", "PAPER")
+
+
+def _resumen_por_modo(operaciones):
+    """'(N REAL, M PAPER)', omitiendo el lado que tenga 0 -para no repetir
+    '0 REAL' cuando todo el rango es de un solo modo-."""
+    reales = sum(1 for o in operaciones if _modo_operacion(o) == "REAL")
+    paper = sum(1 for o in operaciones if _modo_operacion(o) == "PAPER")
+    partes = [p for p in (f"{reales} REAL" if reales else "", f"{paper} PAPER" if paper else "") if p]
+    return f" ({', '.join(partes)})" if partes else ""
 
 
 def formatear_actividad(desde, hasta, html=False):
@@ -182,7 +207,10 @@ def formatear_actividad(desde, hasta, html=False):
     fechas (numero de operaciones y acciones totales de cada lado) — un
     resumen rapido de "cuanta actividad ha habido", antes del detalle
     linea a linea de las ventas cerradas que ya da
-    formatear_operaciones_cerradas()."""
+    formatear_operaciones_cerradas(). Distingue REAL de PAPER (peticion del
+    usuario, sept. 2026: el historial se acumula entre cambios de modo del
+    bot, sin distinguirlos no se podia saber desde Telegram cuales fueron
+    operaciones de verdad)."""
     operaciones = bot.cargar_historial_operaciones()
     en_rango = [o for o in operaciones if desde <= datetime.fromisoformat(o["fecha_hora"]).date() <= hasta]
     compras = [o for o in en_rango if o["lado"] == "COMPRA"]
@@ -193,8 +221,10 @@ def formatear_actividad(desde, hasta, html=False):
 
     titulo = f"📊 <b>ACTIVIDAD</b> ({desde} a {hasta})" if html else f"📊 ACTIVIDAD ({desde} a {hasta})"
     return (f"{titulo}\n"
-            f"🟢 Compras: {len(compras)} operaciones, {bot.formato_es(acciones_compradas, 2)} acciones\n"
-            f"🔴 Ventas: {len(ventas)} operaciones, {bot.formato_es(acciones_vendidas, 2)} acciones")
+            f"🟢 Compras: {len(compras)} operaciones{_resumen_por_modo(compras)}, "
+            f"{bot.formato_es(acciones_compradas, 2)} acciones\n"
+            f"🔴 Ventas: {len(ventas)} operaciones{_resumen_por_modo(ventas)}, "
+            f"{bot.formato_es(acciones_vendidas, 2)} acciones")
 
 
 def main():

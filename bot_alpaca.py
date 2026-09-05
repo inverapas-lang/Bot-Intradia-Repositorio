@@ -523,6 +523,12 @@ def registrar_operacion_historial(ticker, lado, cantidad, precio, coste_medio=No
         "lado": lado,  # "COMPRA" o "VENTA"
         "cantidad": cantidad,
         "precio": precio,
+        # Modo de la cuenta en el momento de la operacion (peticion del
+        # usuario, sept. 2026: poder distinguir desde Telegram que
+        # operaciones fueron con dinero real y cuales de cuando el bot
+        # corria en paper -el historial se acumula entre cambios de modo,
+        # sin este campo no habria forma de saberlo a posteriori-).
+        "modo": "PAPER" if ALPACA_PAPER else "REAL",
     }
     if coste_medio is not None:
         registro["coste_medio"] = coste_medio

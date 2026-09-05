@@ -80,6 +80,20 @@ check("formatear_posiciones_abiertas (plano): formato español (coma decimal)",
 resultado_html = cartera.formatear_posiciones_abiertas(html=True)
 check("formatear_posiciones_abiertas (html): usa <pre> y negrita",
       "<pre>" in resultado_html and "<b>" in resultado_html)
+
+# El titulo debe indicar el modo ACTUAL de conexion del bot (peticion del
+# usuario, sept. 2026): las posiciones abiertas vienen en vivo de la API,
+# siempre en el modo con el que esta conectado ahora mismo.
+paper_original = bot.ALPACA_PAPER
+bot.ALPACA_PAPER = True
+check("formatear_posiciones_abiertas: titulo indica [PAPER] cuando ALPACA_PAPER=True",
+      "[PAPER]" in cartera.formatear_posiciones_abiertas(),
+      f"resultado={cartera.formatear_posiciones_abiertas()!r}")
+bot.ALPACA_PAPER = False
+check("formatear_posiciones_abiertas: titulo indica [REAL] cuando ALPACA_PAPER=False",
+      "[REAL]" in cartera.formatear_posiciones_abiertas(),
+      f"resultado={cartera.formatear_posiciones_abiertas()!r}")
+bot.ALPACA_PAPER = paper_original
 bot.obtener_posiciones = obtener_posiciones_original
 
 
@@ -102,17 +116,56 @@ actividad_hoy = cartera.formatear_actividad(hoy_dt.date(), hoy_dt.date())
 check("formatear_actividad hoy: cuenta 2 compras",
       "2 operaciones" in actividad_hoy and "5,50 acciones" in actividad_hoy, f"resultado={actividad_hoy!r}")
 check("formatear_actividad hoy: cuenta 1 venta",
-      "1 operaciones, 5,00 acciones" in actividad_hoy, f"resultado={actividad_hoy!r}")
+      "1 operaciones" in actividad_hoy and "5,00 acciones" in actividad_hoy, f"resultado={actividad_hoy!r}")
 check("formatear_actividad hoy: NO cuenta la compra de TSLA de ayer",
       "TSLA" not in actividad_hoy)
 
 actividad_rango_completo = cartera.formatear_actividad(ayer_dt.date(), hoy_dt.date())
 check("formatear_actividad con rango de 2 dias: cuenta las 3 compras (5,5 + 1 = 6,5 acciones)",
-      "3 operaciones, 6,50 acciones" in actividad_rango_completo, f"resultado={actividad_rango_completo!r}")
+      "3 operaciones" in actividad_rango_completo and "6,50 acciones" in actividad_rango_completo,
+      f"resultado={actividad_rango_completo!r}")
 
 actividad_vacia = cartera.formatear_actividad(date(2000, 1, 1), date(2000, 1, 1))
 check("formatear_actividad sin operaciones en el rango -> 0 y 0",
       "0 operaciones, 0,00 acciones" in actividad_vacia, f"resultado={actividad_vacia!r}")
+
+
+# ---------------------------------------------------------------------------
+# 4. Distincion REAL/PAPER (peticion del usuario, sept. 2026): el historial
+#    se acumula entre cambios de modo del bot, sin este campo no se podia
+#    saber desde Telegram cuales operaciones fueron con dinero real.
+# ---------------------------------------------------------------------------
+operaciones_modo_mixto = [
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "AAPL", "lado": "COMPRA",
+     "cantidad": 1.0, "precio": 100.0, "modo": "REAL"},
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "MSFT", "lado": "COMPRA",
+     "cantidad": 2.0, "precio": 400.0, "modo": "PAPER"},
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "NVDA", "lado": "VENTA",
+     "cantidad": 5.0, "precio": 110.0, "coste_medio": 100.0, "beneficio_pct": 10.0, "modo": "REAL"},
+    # Operacion SIN campo "modo" (anterior a que existiera este campo):
+    # debe tratarse como PAPER, el unico modo que existia entonces.
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "TSLA", "lado": "VENTA",
+     "cantidad": 1.0, "precio": 300.0, "coste_medio": 290.0, "beneficio_pct": 3.4},
+]
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump(operaciones_modo_mixto, f)
+
+actividad_mixta = cartera.formatear_actividad(hoy_dt.date(), hoy_dt.date())
+check("formatear_actividad: distingue compras REAL de PAPER",
+      "1 REAL" in actividad_mixta and "1 PAPER" in actividad_mixta, f"resultado={actividad_mixta!r}")
+check("formatear_actividad: una operacion de venta SIN campo 'modo' cuenta como PAPER",
+      "1 REAL, 1 PAPER" in actividad_mixta or "2 PAPER" in actividad_mixta,
+      f"resultado={actividad_mixta!r}")
+
+cerradas_plano = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date())
+check("formatear_operaciones_cerradas (plano): etiqueta NVDA como [REAL]",
+      "[REAL] " in cerradas_plano and "NVDA" in cerradas_plano, f"resultado={cerradas_plano!r}")
+check("formatear_operaciones_cerradas (plano): TSLA sin campo 'modo' se etiqueta como [PAPER]",
+      "[PAPER]" in cerradas_plano and "TSLA" in cerradas_plano, f"resultado={cerradas_plano!r}")
+
+cerradas_html = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html): usa el emoji de REAL (💰) y de PAPER (🧪)",
+      "💰" in cerradas_html and "🧪" in cerradas_html, f"resultado={cerradas_html!r}")
 
 
 if fallos:

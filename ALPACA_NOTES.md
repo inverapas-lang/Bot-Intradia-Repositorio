@@ -280,6 +280,22 @@ python cartera_alpaca.py --semana                # semana laboral actual (lunes 
 python cartera_alpaca.py --desde 2026-08-01 --hasta 2026-08-15
 ```
 
+**Distinción REAL/PAPER (añadido sept. 2026, petición del usuario)**: el historial se acumula
+entre cambios de modo del bot (p.ej. cuando se pasó de paper a real, sin borrar el archivo), así
+que sin más contexto no se podría saber a posteriori qué operaciones fueron con dinero real. Se
+añadió el campo `"modo"` (`"REAL"` o `"PAPER"`) a cada registro de
+`registrar_operacion_historial()`, tomado de `ALPACA_PAPER` en el momento de la operación. Las
+operaciones anteriores a este cambio (sin el campo) se tratan como `"PAPER"` — el único modo que
+existía entonces. Esto se refleja en `cartera_alpaca.py` (y por tanto en `/hoy`, `/ayer`,
+`/semana` de Telegram, ver más abajo):
+- `formatear_actividad()`: desglosa compras/ventas por modo, p.ej. "3 operaciones (1 REAL, 2 PAPER)".
+- `formatear_operaciones_cerradas()`: cada fila lleva `[REAL]`/`[PAPER]` (texto plano) o el emoji
+  💰 (REAL) / 🧪 (PAPER) (tablas HTML de Telegram).
+- `formatear_posiciones_abiertas()`: el título indica el modo ACTUAL de conexión del bot
+  (`[REAL]`/`[PAPER]`) — a diferencia de las cerradas, las posiciones abiertas vienen en vivo de
+  la API de Alpaca, así que siempre están en el modo con el que está conectado el bot en ese
+  momento, no mezcladas.
+
 ## Control y consulta desde el móvil (Telegram)
 
 Desde agosto 2026, además de correr en un servidor en la nube (ver más
