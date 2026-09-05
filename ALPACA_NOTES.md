@@ -558,20 +558,35 @@ mercado de cripto exigió toda una cadena de permisos de datos aparte) —
 sí conviene verificar que la cuenta tenga el trading de cripto habilitado
 en el dashboard de Alpaca si nunca se ha operado cripto ahí antes.
 
-### Ciclo del bot: sin horario, 24/7
+### Ciclo del bot: sin horario, 24/7, y en su PROPIA cadencia (cada 1 min)
 
 A diferencia de acciones (premercado/regular/postmercado/cerrado), cripto
 cotiza 24/7 sin horario de mercado. Se quitó por completo la puerta de
 `if not es_horario_operativo(): sleep varias horas; continue` que tenía
 antes el bucle principal (`main()`) — código ahora muerto y eliminado:
 `segundos_hasta_apertura()`, `esperar_en_tramos()`,
-`TRAMO_ESPERA_LARGA_SEGUNDOS`. El bucle principal ahora siempre, en cada
-vuelta: revisa ventas de acciones (`revisar_ventas()`, que se autolimita
-por horario), revisa compras de acciones (`revisar_compras()`, igual), y
-SIEMPRE revisa ventas y compras de cripto (`revisar_ventas_cripto()`,
-`revisar_compras_cripto()`, sin ninguna puerta de horario), cada bloque en
-su propio `try/except` para que un fallo en cripto no pare las acciones ni
-viceversa.
+`TRAMO_ESPERA_LARGA_SEGUNDOS`.
+
+**Cadencia doble e independiente (añadido sept. 2026, petición del
+usuario: "¿el bot cripto puede correr cada minuto?")**: igual que en
+`bot_completo.py`/IBKR, cripto y acciones ya no comparten el mismo ciclo
+ni el mismo `sleep` — cada grupo tiene su propio intervalo y se ejecuta
+solo cuando le toca a él, sin frenar ni acelerar al otro:
+- `CRYPTO_INTERVALO_SEGUNDOS = 60` — cripto se revisa cada minuto
+  (`revisar_ventas_cripto()`, `revisar_compras_cripto()`).
+- `INTERVALO_SEGUNDOS = 130` — acciones siguen a su ritmo de siempre
+  (`revisar_ventas()`, `revisar_compras()`, que además se autolimitan por
+  horario de mercado).
+
+`main()` guarda `proxima_revision_cripto`/`proxima_revision_acciones`
+(marcas de tiempo con `time.monotonic()`) y en cada vuelta del bucle
+ejecuta cada grupo solo si ya le toca; al final espera únicamente hasta la
+MÁS PRÓXIMA de las dos revisiones (`min(...)`), nunca más de lo necesario.
+Cada bloque tiene su propio `try/except` para que un fallo en cripto no
+pare las acciones ni viceversa, y el latido se refresca tras ejecutar
+cualquiera de los dos grupos (no solo al final del bucle) para que el
+vigilante de congelación no confunda una espera corta y legítima con un
+cuelgue real.
 
 ### Separación de `revisar_ventas()` (acciones) y cripto
 

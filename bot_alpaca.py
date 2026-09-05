@@ -155,7 +155,9 @@ BENEFICIO_MAX_VENTA_FORZADA_PCT = 2.0
 UMBRAL_BENEFICIO_PCT = 0.5
 MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2
 
-INTERVALO_SEGUNDOS = 130  # 2 min 10 s (ajustado tras pruebas en paper, ago 2026)
+INTERVALO_SEGUNDOS = 130  # 2 min 10 s (ajustado tras pruebas en paper, ago 2026) - solo acciones
+CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto, en su propia cadencia (peticion
+                                 # del usuario, sept. 2026): mismo valor que en bot_completo.py/IBKR
 LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera por valor
 IMPORTE_EUROS = 45           # presupuesto maximo por operacion (convertido a USD) - ajustado
                               # para capital real de ~300 EUR (antes 1000, pensado para el
@@ -1181,6 +1183,8 @@ def main():
     log("#" * 60)
 
     resumenes_enviados_hoy = set()
+    proxima_revision_cripto = 0.0
+    proxima_revision_acciones = 0.0
 
     while True:
         try:
@@ -1188,11 +1192,14 @@ def main():
             # cuando el mercado de US estaba cerrado el bot dormia horas de
             # un tiron (segundos_hasta_apertura()). Ahora ya no tiene
             # sentido dormir asi -siempre hay algo que revisar en cripto-,
-            # asi que el bucle cicla siempre cada INTERVALO_SEGUNDOS.
+            # asi que el bucle nunca duerme del todo.
+            #
+            # Cripto (CRYPTO_INTERVALO_SEGUNDOS = 1 min) y acciones
+            # (INTERVALO_SEGUNDOS = 2 min 10s) corren en su propia cadencia,
+            # cada una independiente de la otra (peticion del usuario, sept.
+            # 2026: cripto cada minuto), igual que en bot_completo.py/IBKR.
             # revisar_ventas()/revisar_compras() (acciones) se siguen auto-
-            # limitando con su propio chequeo de es_horario_operativo(); las
-            # de cripto (revisar_ventas_cripto()/revisar_compras_cripto())
-            # no tienen ese chequeo, se ejecutan siempre.
+            # limitando con su propio chequeo de es_horario_operativo().
             hoy = datetime.now(ZONA_NY).date()
             ahora_ny = datetime.now(ZONA_NY).time()
             if es_horario_operativo() and ahora_ny >= HORA_CIERRE_EXTENDIDO_US and hoy not in resumenes_enviados_hoy:
@@ -1202,35 +1209,51 @@ def main():
                     log(f"RESUMEN: error al generar el resumen: {type(e).__name__}: {e}")
                 resumenes_enviados_hoy.add(hoy)
 
-            inicio_ciclo = time.monotonic()
-            log("=" * 60)
-            log("Iniciando nuevo ciclo de revision.")
-            try:
-                revisar_ventas()
-            except Exception as e:
-                log(f"ERROR inesperado en revisar_ventas: {type(e).__name__}: {e}")
-            try:
-                revisar_compras()
-            except Exception as e:
-                log(f"ERROR inesperado en revisar_compras: {type(e).__name__}: {e}")
-            try:
-                revisar_ventas_cripto()
-            except Exception as e:
-                log(f"ERROR inesperado en revisar_ventas_cripto: {type(e).__name__}: {e}")
-            try:
-                revisar_compras_cripto()
-            except Exception as e:
-                log(f"ERROR inesperado en revisar_compras_cripto: {type(e).__name__}: {e}")
+            ahora_mono = time.monotonic()
 
-            duracion_ciclo = time.monotonic() - inicio_ciclo
-            log("Ciclo completado.")
-            espera = max(INTERVALO_SEGUNDOS - duracion_ciclo, 0)
-            if duracion_ciclo > INTERVALO_SEGUNDOS:
-                log(f"AVISO: el ciclo ha tardado {duracion_ciclo:.0f}s, mas que el intervalo "
-                    f"configurado ({INTERVALO_SEGUNDOS}s). Se pasa a la siguiente revision sin esperar.")
-            else:
-                log(f"Ciclo completado en {duracion_ciclo:.0f}s. Esperando {espera:.0f}s hasta la siguiente revision...")
-            time.sleep(espera)
+            if ahora_mono >= proxima_revision_cripto:
+                inicio_cripto = time.monotonic()
+                log("=" * 60)
+                log("Iniciando nuevo ciclo de revision CRIPTO.")
+                try:
+                    revisar_ventas_cripto()
+                except Exception as e:
+                    log(f"ERROR inesperado en revisar_ventas_cripto: {type(e).__name__}: {e}")
+                try:
+                    revisar_compras_cripto()
+                except Exception as e:
+                    log(f"ERROR inesperado en revisar_compras_cripto: {type(e).__name__}: {e}")
+                duracion_cripto = time.monotonic() - inicio_cripto
+                if duracion_cripto > CRYPTO_INTERVALO_SEGUNDOS:
+                    log(f"AVISO: el ciclo CRIPTO ha tardado {duracion_cripto:.0f}s, mas que su "
+                        f"intervalo configurado ({CRYPTO_INTERVALO_SEGUNDOS}s).")
+                proxima_revision_cripto = inicio_cripto + CRYPTO_INTERVALO_SEGUNDOS
+                actualizar_latido()
+
+            if ahora_mono >= proxima_revision_acciones:
+                inicio_acciones = time.monotonic()
+                log("=" * 60)
+                log("Iniciando nuevo ciclo de revision ACCIONES.")
+                try:
+                    revisar_ventas()
+                except Exception as e:
+                    log(f"ERROR inesperado en revisar_ventas: {type(e).__name__}: {e}")
+                try:
+                    revisar_compras()
+                except Exception as e:
+                    log(f"ERROR inesperado en revisar_compras: {type(e).__name__}: {e}")
+                duracion_acciones = time.monotonic() - inicio_acciones
+                if duracion_acciones > INTERVALO_SEGUNDOS:
+                    log(f"AVISO: el ciclo ACCIONES ha tardado {duracion_acciones:.0f}s, mas que el "
+                        f"intervalo configurado ({INTERVALO_SEGUNDOS}s).")
+                proxima_revision_acciones = inicio_acciones + INTERVALO_SEGUNDOS
+                actualizar_latido()
+
+            proxima_revision = min(proxima_revision_cripto, proxima_revision_acciones)
+            segundos_espera = max(proxima_revision - time.monotonic(), 1)
+            log(f"Esperando {segundos_espera:.0f}s hasta la siguiente revision "
+                f"(cripto cada {CRYPTO_INTERVALO_SEGUNDOS}s, acciones cada {INTERVALO_SEGUNDOS}s)...")
+            time.sleep(segundos_espera)
             actualizar_latido()
         except KeyboardInterrupt:
             log("Detenido por el usuario (Ctrl+C).")
