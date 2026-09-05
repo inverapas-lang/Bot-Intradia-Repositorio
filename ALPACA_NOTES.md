@@ -45,6 +45,18 @@ ALPACA_PAPER=true    # true = simulado (por defecto). Pon "false" explícitament
 accidente" con una variable mal puesta. Solo pasa a real si pones
 `ALPACA_PAPER=false` explícitamente.
 
+**Opcionales, solo para `/carterapaper` de Telegram** (añadido sept. 2026, petición del
+usuario: tras pasar a real, poder seguir consultando el estado de la cuenta paper sin cambiar
+el bot de modo):
+```
+ALPACA_PAPER_API_KEY=tu_api_key_de_la_cuenta_paper
+ALPACA_PAPER_SECRET_KEY=tu_secret_key_de_la_cuenta_paper
+```
+Son las claves de tu cuenta **paper** (distintas de `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`, que
+son las de la cuenta con la que opera el bot — ahora la real). Si no las defines,
+`/carterapaper` responde con un aviso claro en vez de fallar; el resto de comandos funcionan
+igual sin ellas.
+
 ## Cómo instalar y ejecutar
 
 ```
@@ -328,6 +340,8 @@ arrancar/parar el bot y consultar la cartera sin tener que entrar por SSH.
 /arrancar  - arranca el bot (systemctl start bot-alpaca)
 /parar     - para el bot (systemctl stop bot-alpaca)
 /cartera   - posiciones abiertas (igual que cartera_alpaca.py)
+/carterapaper - posiciones abiertas de la cuenta PAPER, aparte de la activa
+             (requiere ALPACA_PAPER_API_KEY/ALPACA_PAPER_SECRET_KEY, ver arriba)
 /hoy       - actividad de hoy (num. compras/ventas y acciones de cada
              lado) + detalle de las ventas cerradas
 /ayer      - lo mismo, del dia anterior

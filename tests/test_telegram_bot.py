@@ -28,7 +28,8 @@ def check(nombre, condicion, detalle=""):
 
 
 # --- Dobles de prueba ---
-tb.cartera.formatear_posiciones_abiertas = lambda html=False: "POSICIONES_FALSAS"
+tb.cartera.formatear_posiciones_abiertas = lambda html=False, client=None, modo_etiqueta=None: (
+    f"POSICIONES_FALSAS[{modo_etiqueta}]" if modo_etiqueta else "POSICIONES_FALSAS")
 tb.cartera.formatear_operaciones_cerradas = lambda d, h, html=False: f"CERRADAS de {d} a {h}"
 tb.cartera.formatear_actividad = lambda d, h, html=False: f"ACTIVIDAD de {d} a {h}"
 
@@ -52,6 +53,24 @@ tb.subprocess.run = _run_falso_ok
 check("/estado -> activo", tb.procesar_comando("/estado") == "🟢 Estado del bot: active")
 check("/cartera -> reutiliza cartera_alpaca.formatear_posiciones_abiertas",
       tb.procesar_comando("/cartera") == "POSICIONES_FALSAS")
+
+# --- /carterapaper (peticion del usuario, sept. 2026): consulta la cuenta
+#     PAPER aparte, incluso con el bot operando en REAL ---
+check("/carterapaper sin ALPACA_PAPER_API_KEY/SECRET_KEY -> aviso claro, no revienta",
+      "ALPACA_PAPER_API_KEY" in tb.procesar_comando("/carterapaper"))
+
+tb.ALPACA_PAPER_API_KEY = "paper-key-test"
+tb.ALPACA_PAPER_SECRET_KEY = "paper-secret-test"
+tb.bot.TradingClient = lambda *a, **k: types.SimpleNamespace(_falso_cliente_paper=True)
+tb.bot._forzar_timeout_por_defecto = lambda cliente: None
+try:
+    check("/carterapaper con claves puestas -> reutiliza formatear_posiciones_abiertas con modo_etiqueta=PAPER",
+          tb.procesar_comando("/carterapaper") == "POSICIONES_FALSAS[PAPER]",
+          f"resultado={tb.procesar_comando('/carterapaper')!r}")
+finally:
+    tb.ALPACA_PAPER_API_KEY = ""
+    tb.ALPACA_PAPER_SECRET_KEY = ""
+    tb._cliente_paper = None
 check("/log -> reutiliza journalctl, en forma de lista con viñetas",
       "linea 1\nlinea 2".replace("\n", "") not in tb.procesar_comando("/log").replace("\n", "")
       and "• linea 1" in tb.procesar_comando("/log") and "• linea 2" in tb.procesar_comando("/log"))

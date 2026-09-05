@@ -61,19 +61,25 @@ def _emoji_pl(valor):
     return "🟢" if valor >= 0 else "🔴"
 
 
-def formatear_posiciones_abiertas(html=False):
+def formatear_posiciones_abiertas(html=False, client=None, modo_etiqueta=None):
     """Si html=True, devuelve el texto listo para mandar a Telegram con
     parse_mode=HTML: una tabla monoespaciada (<pre>) mas facil de leer en el
     movil que una lista de frases largas. Si html=False (uso desde la
     terminal, cartera_alpaca.py --*), devuelve texto plano sin ninguna
-    etiqueta, igual que antes."""
-    posiciones = bot.obtener_posiciones()
+    etiqueta, igual que antes.
+
+    `client` y `modo_etiqueta` permiten consultar una cuenta DISTINTA de la
+    que el bot usa para operar -usado por /carterapaper de telegram_bot.py
+    para consultar la cuenta PAPER incluso con el bot operando en REAL
+    (peticion del usuario, sept. 2026). Si no se pasan, se usa la cuenta
+    activa del bot como siempre."""
+    posiciones = bot.obtener_posiciones(client)
 
     # Las posiciones ABIERTAS vienen en vivo de la API de Alpaca, siempre en
-    # el modo con el que esta conectado el bot AHORA MISMO (a diferencia del
-    # historial de cerradas, que se acumula entre cambios de modo) - se deja
-    # claro en el titulo para no confundirlo con una operacion PAPER antigua.
-    modo_actual = "PAPER" if bot.ALPACA_PAPER else "REAL"
+    # el modo de la cuenta consultada (a diferencia del historial de
+    # cerradas, que se acumula entre cambios de modo) - se deja claro en el
+    # titulo para no confundirlo con una operacion PAPER antigua.
+    modo_actual = modo_etiqueta or ("PAPER" if bot.ALPACA_PAPER else "REAL")
     if not posiciones:
         titulo = f"📈 <b>POSICIONES ABIERTAS</b> [{modo_actual}]" if html else f"📈 POSICIONES ABIERTAS [{modo_actual}]"
         return titulo + "\n(ninguna)"

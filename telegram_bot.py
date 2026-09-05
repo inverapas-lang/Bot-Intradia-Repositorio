@@ -60,6 +60,30 @@ API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TIMEOUT_LARGO_POLLING_SEGUNDOS = 30  # long polling: la peticion se queda esperando hasta que hay un mensaje nuevo, o hasta este limite
 NOMBRE_SERVICIO_BOT = "bot-alpaca"
 
+# /carterapaper (peticion del usuario, sept. 2026): tras pasar el bot a
+# REAL, no habia forma de consultar el estado de la cuenta PAPER (el bot
+# solo mantiene un cliente activo, el de la cuenta con la que opera). Estas
+# dos variables son OPCIONALES: si no estan puestas, /carterapaper avisa
+# con un mensaje claro en vez de fallar. Requieren las claves de la cuenta
+# PAPER, DISTINTAS de ALPACA_API_KEY/ALPACA_SECRET_KEY (que ahora son las
+# de la cuenta REAL).
+ALPACA_PAPER_API_KEY = os.environ.get("ALPACA_PAPER_API_KEY", "")
+ALPACA_PAPER_SECRET_KEY = os.environ.get("ALPACA_PAPER_SECRET_KEY", "")
+_cliente_paper = None  # se crea una sola vez, de forma perezosa (lazy), en _obtener_cliente_paper()
+
+
+def _obtener_cliente_paper():
+    """Crea (la primera vez) y devuelve un TradingClient aparte para la
+    cuenta PAPER, independiente del que usa bot_alpaca.py para operar (que
+    ahora es el de la cuenta REAL). None si faltan las variables de entorno."""
+    global _cliente_paper
+    if not ALPACA_PAPER_API_KEY or not ALPACA_PAPER_SECRET_KEY:
+        return None
+    if _cliente_paper is None:
+        _cliente_paper = bot.TradingClient(ALPACA_PAPER_API_KEY, ALPACA_PAPER_SECRET_KEY, paper=True)
+        bot._forzar_timeout_por_defecto(_cliente_paper)
+    return _cliente_paper
+
 
 def log(mensaje):
     print(f"[telegram_bot] {mensaje}", flush=True)
@@ -183,7 +207,8 @@ AYUDA = (
     "/estado - si el bot esta corriendo o parado\n"
     "/arrancar - arranca el bot\n"
     "/parar - para el bot\n"
-    "/cartera - posiciones abiertas\n"
+    "/cartera - posiciones abiertas (cuenta activa del bot)\n"
+    "/carterapaper - posiciones abiertas de la cuenta PAPER (aparte de la activa)\n"
     "/hoy - actividad y operaciones cerradas hoy\n"
     "/ayer - operaciones cerradas ayer\n"
     "/semana - operaciones cerradas esta semana\n"
@@ -210,6 +235,15 @@ def procesar_comando(texto):
 
     if comando == "cartera":
         return cartera.formatear_posiciones_abiertas(html=True)
+
+    if comando == "carterapaper":
+        cliente_paper = _obtener_cliente_paper()
+        if cliente_paper is None:
+            return ("⚠️ Faltan las variables de entorno ALPACA_PAPER_API_KEY y/o "
+                    "ALPACA_PAPER_SECRET_KEY -son las claves de la cuenta PAPER, distintas "
+                    "de ALPACA_API_KEY/ALPACA_SECRET_KEY (ahora las de la cuenta REAL). "
+                    "Ver ALPACA_NOTES.md.")
+        return cartera.formatear_posiciones_abiertas(html=True, client=cliente_paper, modo_etiqueta="PAPER")
 
     if comando in ("hoy", "ayer", "semana"):
         args_falsos = type("Args", (), {

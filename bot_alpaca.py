@@ -565,11 +565,16 @@ def calcular_precio_limite_venta(precio_actual):
     return round(precio_actual * (1 - MARGEN_ORDEN_LIMITADA_VENTA_PCT / 100), 2)
 
 
-def obtener_posiciones():
+def obtener_posiciones(client=None):
     """Devuelve la lista de posiciones abiertas (solo largas: este bot
-    nunca abre cortos)."""
+    nunca abre cortos). Acepta un `client` distinto del que usa el bot para
+    operar (por defecto `_trading_client`, la cuenta REAL/PAPER activa) -
+    usado por /carterapaper de telegram_bot.py para consultar la cuenta
+    PAPER incluso cuando el bot esta operando en REAL (peticion del
+    usuario, sept. 2026)."""
+    cliente = client or _trading_client
     try:
-        return [p for p in _trading_client.get_all_positions() if float(p.qty) > 0]
+        return [p for p in cliente.get_all_positions() if float(p.qty) > 0]
     except Exception as e:
         log(f"ERROR al obtener las posiciones abiertas: {type(e).__name__}: {e}")
         return []

@@ -66,11 +66,11 @@ class FakePos:
 
 
 obtener_posiciones_original = bot.obtener_posiciones
-bot.obtener_posiciones = lambda: []
+bot.obtener_posiciones = lambda client=None: []
 check("formatear_posiciones_abiertas sin posiciones -> '(ninguna)'",
       "(ninguna)" in cartera.formatear_posiciones_abiertas())
 
-bot.obtener_posiciones = lambda: [FakePos("AAPL", 3.5, 100.0, 385.0, 35.0, 0.10)]
+bot.obtener_posiciones = lambda client=None: [FakePos("AAPL", 3.5, 100.0, 385.0, 35.0, 0.10)]
 resultado_plano = cartera.formatear_posiciones_abiertas(html=False)
 check("formatear_posiciones_abiertas (plano): incluye el ticker y el signo +",
       "AAPL" in resultado_plano and "+35,00" in resultado_plano, f"resultado={resultado_plano!r}")
