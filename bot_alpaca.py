@@ -759,7 +759,8 @@ def revisar_ventas():
                     registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
                     notificar_telegram(f"🔴 VENTA FORZADA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
-                                        f"{formato_es(precio_real)} USD (beneficio {formato_es(beneficio_pct, signo=True)}%)")
+                                        f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
+                                        f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
                 continue
 
             if beneficio_pct < UMBRAL_BENEFICIO_PCT:
@@ -797,7 +798,8 @@ def revisar_ventas():
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct)
                 notificar_telegram(f"🔴 VENTA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
-                                    f"{formato_es(precio_real)} USD (beneficio {formato_es(beneficio_pct, signo=True)}%)")
+                                    f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
+                                    f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
 
@@ -877,7 +879,8 @@ def revisar_ventas_cripto():
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct)
                 notificar_telegram(f"🔴 VENTA <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "
-                                    f"{formato_es(precio_real)} USD (beneficio {formato_es(beneficio_pct, signo=True)}%)")
+                                    f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
+                                    f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion cripto: {type(e).__name__}: {e}. Se omite.")
 
@@ -972,7 +975,8 @@ def revisar_compras():
             if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
-                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a {formato_es(precio_real)} USD")
+                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
+                                    f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD)")
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {type(e).__name__}: {e}. Se omite.")
             errores += 1
@@ -1055,7 +1059,8 @@ def revisar_compras_cripto():
             if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
-                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a {formato_es(precio_real)} USD")
+                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "
+                                    f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD)")
                 # Para que la SIGUIENTE cripto de este mismo ciclo vea el
                 # limite total ya actualizado (sin esto, dos señales en el
                 # mismo ciclo podrian sumar mas del limite entre las dos).
