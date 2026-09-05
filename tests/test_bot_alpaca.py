@@ -493,6 +493,156 @@ bot.ACTIVOS = activos_originales
 
 
 # ---------------------------------------------------------------------------
+# 9. Cripto (añadido sept. 2026, petición del usuario): es_cripto,
+#    estimar_comision_cripto_alpaca, calcular_exposicion_total_cripto_usd, y
+#    revisar_ventas_cripto/revisar_compras_cripto extremo a extremo con
+#    clientes falsos (incluido el limite propio de exposicion TOTAL en
+#    cripto, 20%, distinto del limite por moneda individual).
+# ---------------------------------------------------------------------------
+check("es_cripto: 'BTC/USD' -> True", bot.es_cripto("BTC/USD") is True)
+check("es_cripto: 'AAPL' -> False", bot.es_cripto("AAPL") is False)
+
+check("estimar_comision_cripto_alpaca: 0.25% del valor operado (a diferencia de acciones, sin comision)",
+      abs(bot.estimar_comision_cripto_alpaca(1000.0) - 2.5) < 1e-9)
+check("estimar_comision_cripto_alpaca: valor 0 -> comision 0",
+      bot.estimar_comision_cripto_alpaca(0) == 0.0)
+
+posicion_cripto_btc = types.SimpleNamespace(
+    symbol="BTC/USD", qty="0.01", avg_entry_price="50000.0", market_value="510.0",
+    unrealized_pl="10.0", unrealized_plpc="0.02",
+)
+posicion_stock_aapl = types.SimpleNamespace(
+    symbol="AAPL", qty="1", avg_entry_price="200.0", market_value="200.0",
+    unrealized_pl="0.0", unrealized_plpc="0.0",
+)
+check("calcular_exposicion_total_cripto_usd: suma solo cripto, ignora acciones (misma funcion generica)",
+      abs(bot.calcular_exposicion_total_cripto_usd([posicion_cripto_btc, posicion_stock_aapl]) - 510.0) < 1e-9)
+
+# revisar_ventas() (acciones) debe IGNORAR posiciones de cripto -las
+# gestiona revisar_ventas_cripto() aparte, ver el filtro es_cripto() al
+# principio de la funcion-.
+bot._trading_client = _TradingClientFalso(posiciones=[posicion_cripto_btc])
+bot._data_client = data_client_original
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    ordenes_stock_con_solo_cripto = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+
+check("revisar_ventas (acciones): ignora una posicion de cripto, no revienta ni opera con ella",
+      len(ordenes_stock_con_solo_cripto) == 0, f"ordenes={ordenes_stock_con_solo_cripto}")
+
+
+def _fake_crypto_data_client_precio(precio):
+    class _CryptoDataClientPrecioFijo:
+        def get_crypto_bars(self, peticion):
+            return _BarSetFalso({t: [_VelaFalsa(precio)] for t in peticion.symbol_or_symbols})
+    return _CryptoDataClientPrecioFijo()
+
+
+def _fake_crypto_data_client_alcista():
+    class _CryptoDataClientAlcista:
+        def get_crypto_bars(self, peticion):
+            return _BarSetFalso({t: [_VelaFalsa(100 * (1.02 ** i)) for i in range(60)]
+                                  for t in peticion.symbol_or_symbols})
+    return _CryptoDataClientAlcista()
+
+
+crypto_data_client_original = bot._crypto_data_client
+macd_5min_bajista_cripto_original = bot.macd_5min_bajista_cripto
+
+# --- revisar_ventas_cripto: beneficio neto claramente por encima del umbral -> vende ---
+bot._trading_client = _TradingClientFalso(posiciones=[posicion_cripto_btc])
+bot._crypto_data_client = _fake_crypto_data_client_precio(55000.0)  # +10% sobre coste medio (50000)
+bot.macd_5min_bajista_cripto = lambda ticker: True
+try:
+    bot.revisar_ventas_cripto()
+finally:
+    ordenes_venta_cripto = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._crypto_data_client = crypto_data_client_original
+    bot.macd_5min_bajista_cripto = macd_5min_bajista_cripto_original
+
+check("revisar_ventas_cripto: coloca exactamente una orden",
+      len(ordenes_venta_cripto) == 1, f"ordenes={ordenes_venta_cripto}")
+if ordenes_venta_cripto:
+    orden_venta_cripto = ordenes_venta_cripto[0]
+    check("revisar_ventas_cripto: la orden es LIMITADA",
+          orden_venta_cripto.type.value == "limit", f"type={orden_venta_cripto.type}")
+    check("revisar_ventas_cripto: time_in_force es IOC (Alpaca no admite DAY en cripto)",
+          orden_venta_cripto.time_in_force.value == "ioc", f"tif={orden_venta_cripto.time_in_force}")
+    check("revisar_ventas_cripto: usa qty fraccionario nativo (0.01)",
+          abs(orden_venta_cripto.qty - 0.01) < 1e-9, f"qty={orden_venta_cripto.qty}")
+
+# --- revisar_ventas_cripto: beneficio bruto pequeño que, tras la comision
+#     REAL de Alpaca (0.25% x 2), queda neto por debajo del umbral -> NO
+#     vende (a diferencia de acciones, sin comision, aqui SI importa) ---
+posicion_cripto_umbral = types.SimpleNamespace(
+    symbol="BTC/USD", qty="0.01", avg_entry_price="50000.0", market_value="500.0",
+    unrealized_pl="0.0", unrealized_plpc="0.0",
+)
+bot._trading_client = _TradingClientFalso(posiciones=[posicion_cripto_umbral])
+bot._crypto_data_client = _fake_crypto_data_client_precio(50050.0)  # +0.1% bruto
+bot.macd_5min_bajista_cripto = lambda ticker: True
+try:
+    bot.revisar_ventas_cripto()
+finally:
+    ordenes_venta_cripto_bajo_umbral = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._crypto_data_client = crypto_data_client_original
+    bot.macd_5min_bajista_cripto = macd_5min_bajista_cripto_original
+
+check("revisar_ventas_cripto: con beneficio neto por debajo del umbral tras comision real, NO vende",
+      len(ordenes_venta_cripto_bajo_umbral) == 0, f"ordenes={ordenes_venta_cripto_bajo_umbral}")
+
+# --- revisar_compras_cripto: extremo a extremo ---
+activos_cripto_originales = bot.ACTIVOS_CRYPTO
+bot.ACTIVOS_CRYPTO = ["BTC/USD"]
+
+bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
+bot._crypto_data_client = _fake_crypto_data_client_alcista()
+try:
+    bot.revisar_compras_cripto()
+finally:
+    ordenes_compra_cripto = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._crypto_data_client = crypto_data_client_original
+
+check("revisar_compras_cripto: coloca exactamente una orden",
+      len(ordenes_compra_cripto) == 1, f"ordenes={ordenes_compra_cripto}")
+if ordenes_compra_cripto:
+    orden_compra_cripto = ordenes_compra_cripto[0]
+    check("revisar_compras_cripto: usa notional (importe en efectivo), no qty",
+          orden_compra_cripto.notional is not None and orden_compra_cripto.qty is None,
+          f"orden={orden_compra_cripto}")
+    check("revisar_compras_cripto: time_in_force es IOC",
+          orden_compra_cripto.time_in_force.value == "ioc", f"tif={orden_compra_cripto.time_in_force}")
+
+# --- Limite de exposicion TOTAL en cripto (peticion del usuario, 20%): con
+#     una posicion de OTRA cripto ya ocupando casi todo ese limite, NO debe
+#     comprar mas, aunque la señal de compra sea valida ---
+portfolio_value_prueba = 1000.0
+limite_cripto_total_usd_prueba = portfolio_value_prueba * (bot.LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT / 100)  # 200 USD
+posicion_cripto_cerca_del_limite = types.SimpleNamespace(
+    symbol="ETH/USD", qty="0.1", avg_entry_price="1900.0",
+    market_value=str(limite_cripto_total_usd_prueba - 10), unrealized_pl="0.0", unrealized_plpc="0.0",
+)
+bot._trading_client = _TradingClientFalso(portfolio_value=portfolio_value_prueba,
+                                            posiciones=[posicion_cripto_cerca_del_limite])
+bot._crypto_data_client = _fake_crypto_data_client_alcista()
+try:
+    bot.revisar_compras_cripto()
+finally:
+    ordenes_compra_cripto_limite = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._crypto_data_client = crypto_data_client_original
+    bot.ACTIVOS_CRYPTO = activos_cripto_originales
+
+check("revisar_compras_cripto: NO compra si superaria el limite de exposicion TOTAL en cripto (20%)",
+      len(ordenes_compra_cripto_limite) == 0, f"ordenes={ordenes_compra_cripto_limite}")
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()

@@ -51,7 +51,8 @@ try:
     from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
     from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
     from alpaca.data.historical import StockHistoricalDataClient
-    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 except ImportError as e:
     raise SystemExit(
@@ -171,6 +172,42 @@ ACTIVOS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD
            "XOM", "CVX",
            "WMT", "DIS", "KO", "JNJ", "PFE", "F", "T", "GE"]
 
+# --- Cripto en Alpaca (añadido sept. 2026, petición del usuario) ---
+# A diferencia de IBKR, Alpaca opera cripto con las MISMAS claves API que
+# acciones (sin exchange que descubrir, sin tif especial que adivinar: los
+# símbolos llevan "/" -p.ej. "BTC/USD"- y eso basta para distinguirlos de
+# un ticker de accion, ver es_cripto()). Mismas 6 monedas que en
+# bot_completo.py (IBKR); LINK y BCH confirmados en la lista de pares
+# soportados por Alpaca, SOL NO aparecía en esa lista en el momento de
+# escribir esto -si el bot la ve rechazada sistemáticamente, quitarla de
+# aquí-.
+ACTIVOS_CRYPTO = ["BTC/USD", "ETH/USD", "LTC/USD", "BCH/USD", "LINK/USD", "SOL/USD"]
+
+# Comision REAL de Alpaca para cripto (a diferencia de acciones, que Alpaca
+# no cobra comision propia): tarifa "taker" del primer tramo de volumen
+# (0-100.000 USD en 30 dias, el unico realista para este capital), la que
+# aplica una orden a mercado/IOC como las que usa este bot. NO es 0% como
+# las acciones -ver ALPACA_NOTES.md para la tabla completa de tramos-.
+COMISION_CRIPTO_ALPACA_PCT = 0.25 / 100
+
+# Peticion del usuario (sept. 2026): limite propio de este bot al CONJUNTO
+# de toda la cripto (no solo por moneda individual, que sigue usando el
+# mismo LIMITE_EXPOSICION_PCT del 15% que las acciones), sobre el valor
+# TOTAL de la cuenta (acciones + cash + cripto -portfolio_value de Alpaca
+# ya las suma todas-).
+LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT = 20
+
+UMBRAL_BENEFICIO_CRYPTO_PCT = 0.3  # cripto: umbral mas bajo que acciones (igual que en
+                                    # bot_completo.py/IBKR) - 24/7 y mas rapida
+VALOR_MINIMO_OPERACION_CRIPTO_USD = 5.0
+DECIMALES_FRACCION_CRIPTO = 6  # mas precision que acciones: BTC/ETH suelen necesitarla
+
+
+def es_cripto(ticker):
+    """Los simbolos de cripto en Alpaca llevan barra ('BTC/USD'); los de
+    acciones nunca la llevan -no hace falta nada mas para distinguirlos."""
+    return "/" in ticker
+
 # --- Temporalidades para el analisis MACD (identico a bot_completo.py) ---
 # duration_dias: cuantos dias hacia atras pedir para tener suficientes velas
 # (el analisis exige al menos 35 velas por temporalidad).
@@ -288,19 +325,6 @@ def en_ventana_venta_forzada():
     if minutos is None:
         return False
     return 0 <= minutos <= MINUTOS_VENTA_FORZADA_ANTES_CIERRE
-
-
-def segundos_hasta_apertura():
-    """Segundos hasta el inicio del premercado (4:00 ET), saltando fines de
-    semana. Se usa cuando el mercado esta cerrado del todo."""
-    ahora = datetime.now(ZONA_NY)
-    candidato = ahora.replace(hour=HORA_INICIO_US.hour, minute=HORA_INICIO_US.minute,
-                               second=0, microsecond=0)
-    if candidato <= ahora:
-        candidato += timedelta(days=1)
-    while candidato.weekday() >= 5:
-        candidato += timedelta(days=1)
-    return max((candidato - ahora).total_seconds(), 0)
 
 
 # --- MACD (identico a bot_completo.py) ---
@@ -422,6 +446,94 @@ def precio_actual_ticker(ticker):
     resultado = pedir_velas_lote([ticker], TEMPORALIDADES[0]["timeframe"], TEMPORALIDADES[0]["duration_dias"])
     velas = resultado.get(ticker, [])
     return float(velas[-1].close) if velas else None
+
+
+# --- Cripto: mismas funciones de arriba, pero con CryptoHistoricalDataClient/
+# CryptoBarsRequest en vez de StockHistoricalDataClient/StockBarsRequest (los
+# simbolos de cripto no se pueden pedir con el cliente de acciones). El resto
+# de la logica de analisis (MACD, decidir_senal) es la misma, se reutiliza
+# tal cual -no hace falta duplicarla, solo la parte de "de donde vienen las
+# velas"-.
+_crypto_data_client = CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+_forzar_timeout_por_defecto(_crypto_data_client)
+
+
+def pedir_velas_lote_cripto(tickers, timeframe, duration_dias):
+    """Version de pedir_velas_lote() para cripto."""
+    inicio = datetime.now(ZONA_NY) - timedelta(days=duration_dias)
+    peticion = CryptoBarsRequest(symbol_or_symbols=tickers, timeframe=timeframe, start=inicio)
+
+    for intento in range(1, INTENTOS_MAXIMOS_DATOS + 1):
+        try:
+            barset = _crypto_data_client.get_crypto_bars(peticion)
+            resultado = {t: list(barset.data.get(t, [])) for t in tickers}
+            if any(resultado.values()):
+                return resultado
+        except Exception as e:
+            log(f"ERROR al pedir velas de cripto en lote (intento {intento}/{INTENTOS_MAXIMOS_DATOS}): "
+                f"{type(e).__name__}: {e}")
+        if intento < INTENTOS_MAXIMOS_DATOS:
+            log(f"CRIPTO: sin datos en el intento {intento}/{INTENTOS_MAXIMOS_DATOS}, "
+                f"reintentando en {ESPERA_ENTRE_INTENTOS_DATOS_SEGUNDOS}s...")
+            time.sleep(ESPERA_ENTRE_INTENTOS_DATOS_SEGUNDOS)
+        else:
+            log(f"CRIPTO: sin datos tras el ultimo intento ({intento}/{INTENTOS_MAXIMOS_DATOS}), "
+                f"se sigue con lo que haya (posiblemente vacio para algunas monedas).")
+
+    return {t: [] for t in tickers}
+
+
+def analizar_todos_los_activos_cripto(tickers):
+    """Version de analizar_todos_los_activos() para cripto."""
+    velas_por_temporalidad = {}
+    for tf in TEMPORALIDADES:
+        velas_por_temporalidad[tf["nombre"]] = pedir_velas_lote_cripto(tickers, tf["timeframe"], tf["duration_dias"])
+
+    decisiones = {}
+    precios = {}
+    for ticker in tickers:
+        detalle = {}
+        for tf in TEMPORALIDADES:
+            velas = velas_por_temporalidad[tf["nombre"]].get(ticker, [])
+            detalle[tf["nombre"]] = macd_alcista_o_bajista(velas, tf["tipo"])
+        decisiones[ticker] = decidir_senal(detalle)
+
+        velas_1min = velas_por_temporalidad["1 minuto"].get(ticker, [])
+        precios[ticker] = float(velas_1min[-1].close) if velas_1min else None
+
+    return decisiones, precios
+
+
+def precio_actual_ticker_cripto(ticker):
+    """Version de precio_actual_ticker() para cripto."""
+    resultado = pedir_velas_lote_cripto([ticker], TEMPORALIDADES[0]["timeframe"], TEMPORALIDADES[0]["duration_dias"])
+    velas = resultado.get(ticker, [])
+    return float(velas[-1].close) if velas else None
+
+
+def macd_5min_bajista_cripto(ticker):
+    resultado = pedir_velas_lote_cripto([ticker], TimeFrame(5, TimeFrameUnit.Minute), 5)
+    velas = resultado.get(ticker, [])
+    if len(velas) < 35:
+        return None
+    cierres = pd.Series([float(v.close) for v in velas])
+    macd, linea_senal, _ = calcular_macd(cierres)
+    return bool(macd.iloc[-1] < linea_senal.iloc[-1])
+
+
+def estimar_comision_cripto_alpaca(valor_operacion):
+    """Comision REAL de Alpaca para cripto (a diferencia de acciones, sin
+    comision). Ver COMISION_CRIPTO_ALPACA_PCT."""
+    if valor_operacion <= 0:
+        return 0.0
+    return valor_operacion * COMISION_CRIPTO_ALPACA_PCT
+
+
+def calcular_exposicion_total_cripto_usd(posiciones):
+    """Suma el valor de mercado (market_value) de TODAS las posiciones de
+    cripto abiertas -para el limite propio LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT,
+    ver revisar_compras_cripto()."""
+    return sum(float(p.market_value) for p in posiciones if es_cripto(p.symbol))
 
 
 # --- Comisiones: se asume 0 EUR en compras Y en ventas (a peticion expresa
@@ -598,9 +710,12 @@ def obtener_valor_posicion_actual_usd(posiciones, ticker):
 
 # --- Ventas ---
 def revisar_ventas():
-    posiciones = obtener_posiciones()
+    # Las posiciones de cripto las gestiona revisar_ventas_cripto() aparte
+    # (24/7, sin el chequeo de es_horario_operativo() de mas abajo, que es
+    # especifico del mercado de acciones de US).
+    posiciones = [p for p in obtener_posiciones() if not es_cripto(p.symbol)]
     if not posiciones:
-        log("VENTAS: no hay posiciones abiertas.")
+        log("VENTAS: no hay posiciones de acciones abiertas.")
         return
 
     if not es_horario_operativo():
@@ -695,6 +810,76 @@ def macd_5min_bajista(ticker):
     cierres = pd.Series([float(v.close) for v in velas])
     macd, linea_senal, _ = calcular_macd(cierres)
     return bool(macd.iloc[-1] < linea_senal.iloc[-1])
+
+
+def revisar_ventas_cripto():
+    """Version de revisar_ventas() para cripto: SIN el chequeo de
+    es_horario_operativo() (cripto es 24/7) y SIN "venta forzada antes del
+    cierre" (no tiene un unico cierre diario del que calcular minutos-hasta-
+    cierre, igual que en bot_completo.py/IBKR). Usa el umbral mas bajo
+    UMBRAL_BENEFICIO_CRYPTO_PCT y la comision REAL de Alpaca para cripto
+    (estimar_comision_cripto_alpaca), a diferencia de las acciones (sin
+    comision, ver mas arriba)."""
+    posiciones = [p for p in obtener_posiciones() if es_cripto(p.symbol)]
+    if not posiciones:
+        return  # silencioso: se llama cada ciclo, no tiene sentido repetir "no hay posiciones"
+
+    log(f"\n########## VENTAS - CRIPTO ##########")
+    for pos in sorted(posiciones, key=lambda p: p.symbol):
+        ticker = pos.symbol
+        try:
+            cantidad = float(pos.qty)
+            coste_medio = float(pos.avg_entry_price)
+            if cantidad <= 0 or coste_medio <= 0:
+                continue
+
+            precio_actual = precio_actual_ticker_cripto(ticker)
+            if precio_actual is None:
+                log(f"VENTAS: {ticker} - no se pudo obtener precio actual, se omite.")
+                continue
+
+            valor_compra = cantidad * coste_medio
+            valor_venta = cantidad * precio_actual
+            comision_total = estimar_comision_cripto_alpaca(valor_compra) + estimar_comision_cripto_alpaca(valor_venta)
+            beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
+            comision_total_pct = (comision_total / valor_compra * 100) if valor_compra else 0.0
+            beneficio_pct = beneficio_pct_bruto - comision_total_pct
+
+            info_posicion = (f"{cantidad:g} unidades, precio medio {coste_medio:.4f} USD, "
+                              f"comision estimada {comision_total:.2f} USD")
+
+            if beneficio_pct < UMBRAL_BENEFICIO_CRYPTO_PCT:
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                    f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
+                continue
+
+            bajista = macd_5min_bajista_cripto(ticker)
+            if bajista is None:
+                log(f"VENTAS: {ticker} - {info_posicion} - datos insuficientes para MACD 5min, se mantiene por precaucion.")
+                continue
+
+            if not bajista:
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
+                continue
+
+            precio_limite = calcular_precio_limite_venta(precio_actual)
+            log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden limitada IOC).")
+            cancelar_ordenes_abiertas(ticker)
+            orden = LimitOrderRequest(symbol=ticker, qty=cantidad, limit_price=precio_limite,
+                                       side=OrderSide.SELL, time_in_force=TimeInForce.IOC)
+            trade = _trading_client.submit_order(order_data=orden)
+            estado = esperar_estado_final_orden(trade.id)
+            log(f"VENTAS: {ticker} - orden limitada IOC a {precio_limite} USD, estado: {estado}")
+            if estado == "filled":
+                cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_limite)
+                registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
+                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                notificar_telegram(f"🔴 VENTA <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "
+                                    f"{formato_es(precio_real)} USD (beneficio {formato_es(beneficio_pct, signo=True)}%)")
+        except Exception as e:
+            log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion cripto: {type(e).__name__}: {e}. Se omite.")
 
 
 # --- Compras ---
@@ -795,6 +980,93 @@ def revisar_compras():
     log(f"COMPRAS: {analizados} analizados, {senales} señales de compra, {errores} errores.")
 
 
+def revisar_compras_cripto():
+    """Version de revisar_compras() para cripto: SIN el chequeo de
+    es_horario_operativo() (24/7), SIN distincion pre/postmercado, y con un
+    limite ADICIONAL propio -LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT- sobre el
+    CONJUNTO de toda la cripto (no solo por moneda individual, que sigue
+    usando el mismo LIMITE_EXPOSICION_PCT que las acciones), peticion
+    explicita del usuario (sept. 2026)."""
+    valor_total_cartera_usd = obtener_valor_total_cartera_usd()
+    if valor_total_cartera_usd is None:
+        log("COMPRAS: no se pudo obtener el valor total de la cartera, se omite este ciclo de cripto.")
+        return
+
+    limite_por_valor_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_PCT / 100)
+    limite_cripto_total_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT / 100)
+
+    posiciones = obtener_posiciones()
+    exposicion_cripto_actual_usd = calcular_exposicion_total_cripto_usd(posiciones)
+
+    log(f"\n########## COMPRAS - CRIPTO ##########")
+    log(f"COMPRAS: analizando {len(ACTIVOS_CRYPTO)} criptomonedas en lote...")
+    decisiones, precios = analizar_todos_los_activos_cripto(ACTIVOS_CRYPTO)
+
+    analizados = sum(1 for d in decisiones.values() if d != "SIN_DATOS")
+    senales = 0
+    errores = 0
+
+    for ticker in ACTIVOS_CRYPTO:
+        decision = decisiones.get(ticker)
+        if decision != "COMPRA":
+            continue
+        senales += 1
+
+        try:
+            precio_actual = precios.get(ticker)
+            if precio_actual is None:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero no se pudo obtener precio, se omite.")
+                continue
+
+            valor_posicion_actual = obtener_valor_posicion_actual_usd(posiciones, ticker)
+            margen_disponible = limite_por_valor_usd - valor_posicion_actual
+            if margen_disponible <= 0:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero ya tiene {valor_posicion_actual:.2f} USD "
+                    f"({LIMITE_EXPOSICION_PCT}% del limite = {limite_por_valor_usd:.2f} USD alcanzado) -> se omite.")
+                continue
+
+            importe_a_usar = min(IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD, margen_disponible)
+
+            if exposicion_cripto_actual_usd + importe_a_usar > limite_cripto_total_usd:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero comprar {importe_a_usar:.2f} USD mas "
+                    f"superaria el limite de exposicion TOTAL en cripto ({LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT}% "
+                    f"de la cartera = {limite_cripto_total_usd:.2f} USD; ya invertido en cripto: "
+                    f"{exposicion_cripto_actual_usd:.2f} USD), se omite.")
+                continue
+
+            if importe_a_usar < VALOR_MINIMO_OPERACION_CRIPTO_USD:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
+                    f"({importe_a_usar:.2f} USD) no llega al minimo de "
+                    f"{VALOR_MINIMO_OPERACION_CRIPTO_USD:.2f} USD por operacion, se omite.")
+                continue
+
+            cantidad_estimada = round(importe_a_usar / precio_actual, DECIMALES_FRACCION_CRIPTO)
+
+            log(f"COMPRAS: {ticker} (cripto) - senal de COMPRA, comprando ~{cantidad_estimada:g} unidades "
+                f"(importe {importe_a_usar:.2f} USD) a ~{precio_actual} USD (posicion actual: "
+                f"{valor_posicion_actual:.2f} USD, limite: {limite_por_valor_usd:.2f} USD).")
+            orden = MarketOrderRequest(symbol=ticker, notional=round(importe_a_usar, 2),
+                                        side=OrderSide.BUY, time_in_force=TimeInForce.IOC)
+
+            cancelar_ordenes_abiertas(ticker)
+            trade = _trading_client.submit_order(order_data=orden)
+            estado = esperar_estado_final_orden(trade.id)
+            log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
+            if estado == "filled":
+                cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
+                registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
+                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a {formato_es(precio_real)} USD")
+                # Para que la SIGUIENTE cripto de este mismo ciclo vea el
+                # limite total ya actualizado (sin esto, dos señales en el
+                # mismo ciclo podrian sumar mas del limite entre las dos).
+                exposicion_cripto_actual_usd += importe_a_usar
+        except Exception as e:
+            log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra cripto: {type(e).__name__}: {e}. Se omite.")
+            errores += 1
+
+    log(f"COMPRAS CRIPTO: {analizados} analizados, {senales} señales de compra, {errores} errores.")
+
+
 def _emoji_pl(valor):
     return "🟢" if valor >= 0 else "🔴"
 
@@ -873,25 +1145,6 @@ def generar_resumen():
     notificar_telegram("\n".join(bloques_html))
 
 
-TRAMO_ESPERA_LARGA_SEGUNDOS = 60  # bastante por debajo de UMBRAL_CONGELACION_SEGUNDOS (20 min)
-
-
-def esperar_en_tramos(segundos_totales):
-    """Espera el numero de segundos indicado, pero en tramos cortos que
-    refrescan el latido en cada uno (actualizar_latido()). Un unico
-    time.sleep() largo (p.ej. los ~7-8 horas que el mercado esta cerrado de
-    noche) deja pasar mas de UMBRAL_CONGELACION_SEGUNDOS sin dar señal de
-    vida, y el vigilante interno lo confunde con una congelacion real y mata
-    el proceso -bug real visto en produccion: 'fuera de horario, esperando
-    464 minutos' seguido de '[VIGILANTE] 20 minutos sin señal de vida' a los
-    20 minutos exactos-. Con tramos de 60s (bien por debajo del umbral de 20
-    min) esto no puede volver a pasar."""
-    restante = segundos_totales
-    while restante > 0:
-        tramo = min(TRAMO_ESPERA_LARGA_SEGUNDOS, restante)
-        time.sleep(tramo)
-        actualizar_latido()
-        restante -= tramo
 
 
 def evitar_suspension_windows():
@@ -926,17 +1179,18 @@ def main():
 
     while True:
         try:
-            if not es_horario_operativo():
-                segundos_espera = segundos_hasta_apertura()
-                minutos_espera = segundos_espera / 60
-                log(f"Fuera de horario operativo (4:00-20:00 ET). Esperando {minutos_espera:.0f} "
-                    f"minutos hasta la proxima apertura...")
-                esperar_en_tramos(segundos_espera)
-                continue
-
+            # Cripto opera 24/7 (añadido sept. 2026): a diferencia de antes,
+            # cuando el mercado de US estaba cerrado el bot dormia horas de
+            # un tiron (segundos_hasta_apertura()). Ahora ya no tiene
+            # sentido dormir asi -siempre hay algo que revisar en cripto-,
+            # asi que el bucle cicla siempre cada INTERVALO_SEGUNDOS.
+            # revisar_ventas()/revisar_compras() (acciones) se siguen auto-
+            # limitando con su propio chequeo de es_horario_operativo(); las
+            # de cripto (revisar_ventas_cripto()/revisar_compras_cripto())
+            # no tienen ese chequeo, se ejecutan siempre.
             hoy = datetime.now(ZONA_NY).date()
             ahora_ny = datetime.now(ZONA_NY).time()
-            if ahora_ny >= HORA_CIERRE_EXTENDIDO_US and hoy not in resumenes_enviados_hoy:
+            if es_horario_operativo() and ahora_ny >= HORA_CIERRE_EXTENDIDO_US and hoy not in resumenes_enviados_hoy:
                 try:
                     generar_resumen()
                 except Exception as e:
@@ -954,6 +1208,14 @@ def main():
                 revisar_compras()
             except Exception as e:
                 log(f"ERROR inesperado en revisar_compras: {type(e).__name__}: {e}")
+            try:
+                revisar_ventas_cripto()
+            except Exception as e:
+                log(f"ERROR inesperado en revisar_ventas_cripto: {type(e).__name__}: {e}")
+            try:
+                revisar_compras_cripto()
+            except Exception as e:
+                log(f"ERROR inesperado en revisar_compras_cripto: {type(e).__name__}: {e}")
 
             duracion_ciclo = time.monotonic() - inicio_ciclo
             log("Ciclo completado.")

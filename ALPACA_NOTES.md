@@ -447,6 +447,142 @@ Misma lista de 30 tickers de US que en `bot_completo.py` (`ACTIVOS_US`),
 copiada literalmente como lista simple de símbolos (Alpaca no necesita
 `exchange`/`currency` por ticker, todo es US/USD).
 
+## Cripto en Alpaca (añadido sept. 2026, petición del usuario)
+
+Igual que se hizo antes con `bot_completo.py`/IBKR, se añadió trading de
+criptomonedas a `bot_alpaca.py`, en paralelo a las acciones (no las
+sustituye). A diferencia de IBKR, aquí no hizo falta ninguna cadena de
+"prueba y error" en producción: se verificó el comportamiento real de
+`alpaca-py` (formato de símbolo, tipos de orden admitidos, fees) contra la
+documentación oficial y contra el propio paquete instalado ANTES de
+escribir el código, precisamente para no repetir el via crucis de IBKR.
+
+### Activos: `ACTIVOS_CRYPTO`
+
+Mismas 6 monedas que en IBKR (petición explícita del usuario, "las mismas
+que en IBKR"): `BTC/USD`, `ETH/USD`, `LTC/USD`, `BCH/USD`, `SOL/USD`,
+`LINK/USD`. Formato de símbolo con barra (`"BASE/USD"`), que es como
+Alpaca identifica un par cripto — se usa precisamente esa barra como señal
+para distinguir cripto de acciones: `es_cripto(ticker) = "/" in ticker`.
+
+**Aviso pendiente de confirmar**: SOL no aparece en la lista de pares
+cripto soportados por Alpaca que se pudo verificar por búsqueda externa
+(sí están confirmados BTC, ETH, LTC, BCH, LINK). Se incluyó de todos modos
+por ser petición explícita del usuario ("las mismas que en IBKR") — si
+Alpaca lo rechaza, el propio manejo de errores por ticker del bot lo
+registrará en el log sin afectar a las demás monedas ni al resto del bot.
+Si aparece un error de símbolo no soportado para SOL, quitarlo de
+`ACTIVOS_CRYPTO` sin más.
+
+### Comisión: SÍ existe, a diferencia de acciones
+
+Alpaca no cobra comisión en acciones, pero **sí en cripto** — algo
+verificado por búsqueda externa antes de asumir "gratis" otra vez. Tabla
+de fees por volumen de 30 días (a partir de la documentación de Alpaca);
+solo el primer nivel es realista para el tamaño de cuenta de este bot:
+
+| Volumen 30 días | Maker | Taker |
+|---|---|---|
+| 0 - 100k USD | 0.15% | 0.25% |
+| ... (niveles superiores, no aplicables aquí) | | |
+
+Este bot manda órdenes IOC (ver más abajo), que actúan como "taker" (se
+ejecutan contra órdenes ya existentes en el libro, no aportan liquidez
+nueva) → se asume siempre el fee **taker del nivel 1: 0.25%**
+(`COMISION_CRIPTO_ALPACA_PCT`), tanto en la compra como en la venta (round
+trip ≈ 0.5%). `estimar_comision_cripto_alpaca(valor_operado)` centraliza
+este cálculo.
+
+### Umbral de beneficio para vender: 0.3% (neto, tras comisión)
+
+Igual que en IBKR (misma decisión del usuario), el umbral para cripto es
+más bajo que el de acciones: `UMBRAL_BENEFICIO_CRYPTO_PCT = 0.3`. A
+diferencia de acciones (donde se ignora la comisión, ver más arriba), en
+`revisar_ventas_cripto()` el beneficio SÍ se calcula neto de la comisión
+estimada (compra + venta) antes de compararlo con el umbral — porque aquí
+la comisión no es insignificante y sí puede convertir una venta
+aparentemente rentable en pérdida.
+
+### Tipo de orden y `time_in_force`: solo IOC (no DAY)
+
+Verificado contra la documentación de Alpaca: las órdenes cripto en Alpaca
+**no admiten `TimeInForce.DAY`**, solo `GTC` o `IOC`. Se eligió `IOC`
+(Immediate-Or-Cancel) para ambos lados:
+- **Compras**: `MarketOrderRequest(symbol=ticker, notional=importe_usd,
+  time_in_force=TimeInForce.IOC)` — órdenes a mercado por importe en
+  dólares (no por cantidad), igual que las compras de acciones.
+- **Ventas**: `LimitOrderRequest(symbol=ticker, qty=cantidad,
+  limit_price=precio_actual, time_in_force=TimeInForce.IOC)` — orden
+  limitada al precio exacto del momento, cantidad fraccionaria nativa (sin
+  redondeo a incrementos, a diferencia de IBKR — Alpaca admite decimales
+  libremente en cripto).
+
+### Límite de exposición TOTAL en cripto: 20% de la cartera completa
+
+Petición explícita del usuario: *"que el límite de la cantidad con la que
+se puede operar en cripto sea del 20% del total de la cuenta
+(acciones+cash+cripto)"*. Implementado en `revisar_compras_cripto()` como
+una segunda comprobación, ADEMÁS del límite normal por posición que ya
+existía (`LIMITE_EXPOSICION_PCT`, ~15% por activo):
+
+```python
+LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT = 20
+exposicion_total_cripto = calcular_exposicion_total_cripto_usd(posiciones)
+limite_total = cuenta.portfolio_value * LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT / 100
+if exposicion_total_cripto + importe_nueva_compra > limite_total:
+    # se omite la compra
+```
+
+Detalle clave: `cuenta.portfolio_value` (de `get_account()` de Alpaca) ya
+representa el valor TOTAL de la cuenta — acciones + cash + cripto, todo
+junto — así que el "20% del total de la cuenta (acciones+cash+cripto)"
+pedido por el usuario se cumple literalmente sin ningún cálculo adicional,
+a diferencia de IBKR donde hubo que construir esa suma a mano.
+`calcular_exposicion_total_cripto_usd(posiciones)` es una función genérica
+que suma el valor a coste de las posiciones cuyo ticker es cripto
+(`es_cripto`), ignorando las de acciones — la misma función sirve también
+para excluir cripto de `revisar_ventas()` (ver más abajo).
+
+### Datos de mercado: cliente y peticiones separadas
+
+Alpaca separa los datos de acciones (`StockHistoricalDataClient`) de los
+de cripto (`CryptoHistoricalDataClient`) — son clases y endpoints
+distintos, aunque el resto de la forma de la petición
+(`CryptoBarsRequest`) es igual que `StockBarsRequest`. Se añadieron
+funciones paralelas dedicadas a cripto en vez de intentar generalizar las
+de acciones dentro de la misma función: `pedir_velas_lote_cripto()`,
+`analizar_todos_los_activos_cripto()`, `precio_actual_ticker_cripto()`,
+`macd_5min_bajista_cripto()`. **No requiere ninguna suscripción de datos
+de pago ni permiso adicional** en Alpaca (a diferencia de IBKR, donde el
+mercado de cripto exigió toda una cadena de permisos de datos aparte) —
+sí conviene verificar que la cuenta tenga el trading de cripto habilitado
+en el dashboard de Alpaca si nunca se ha operado cripto ahí antes.
+
+### Ciclo del bot: sin horario, 24/7
+
+A diferencia de acciones (premercado/regular/postmercado/cerrado), cripto
+cotiza 24/7 sin horario de mercado. Se quitó por completo la puerta de
+`if not es_horario_operativo(): sleep varias horas; continue` que tenía
+antes el bucle principal (`main()`) — código ahora muerto y eliminado:
+`segundos_hasta_apertura()`, `esperar_en_tramos()`,
+`TRAMO_ESPERA_LARGA_SEGUNDOS`. El bucle principal ahora siempre, en cada
+vuelta: revisa ventas de acciones (`revisar_ventas()`, que se autolimita
+por horario), revisa compras de acciones (`revisar_compras()`, igual), y
+SIEMPRE revisa ventas y compras de cripto (`revisar_ventas_cripto()`,
+`revisar_compras_cripto()`, sin ninguna puerta de horario), cada bloque en
+su propio `try/except` para que un fallo en cripto no pare las acciones ni
+viceversa.
+
+### Separación de `revisar_ventas()` (acciones) y cripto
+
+`revisar_ventas()` (acciones) ahora filtra explícitamente las posiciones
+de cripto (`if not es_cripto(p.symbol)`) para no aplicarles por error la
+lógica de acciones (comisión cero, umbral 0.5%, horario, forzado de venta
+antes del cierre...) — cripto tiene su propia función dedicada,
+`revisar_ventas_cripto()`, con su propia comisión, umbral y sin ninguna
+lógica de horario ni de venta forzada (no tiene sentido "forzar venta
+antes del cierre" en un mercado que nunca cierra).
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).
