@@ -91,11 +91,28 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
 ## Reglas de compra (`analizar_activo` + `revisar_compras`)
 
 1. **Señal de compra**: MACD en 7 temporalidades (1min, 5min, 15min, 30min, 1h, 1día, 1semana).
-   - Cortas (hasta 1h): a favor si MACD > línea de señal.
+   - Cortas (hasta 1h): a favor si MACD > línea de señal. Se piden en cada ciclo, sin caché.
    - Largas (día, semana): a favor si el histograma de las últimas 3 velas está **creciendo**
      (momentum acelerando — importante: una tendencia de pendiente *constante* no basta,
      matemáticamente el histograma decrece aunque el precio siga subiendo; solo una
      aceleración real lo activa).
+     - **Caché con vela en curso condicional** (`_detalle_larga_cacheado`, añadido sept.
+       2026, petición del usuario — con un horizonte de trading de HORAS, día/semana se
+       usan como filtro de fondo, no como señal de entrada, así que no hace falta pedirlas
+       en cada ciclo): por debajo de `UMBRAL_FRACCION_VELA_EN_CURSO` (40%) del día/semana
+       transcurrido, se usan SOLO barras ya CERRADAS (`histograma.iloc[-2]` vs `iloc[-4]`,
+       nunca la última vela, que sigue formándose y es ruido puro al principio del
+       periodo) y se cachea una única vez al día (no puede cambiar, son datos cerrados).
+       Por encima del 40%, SÍ se incluye la vela en curso (`iloc[-1]` vs `iloc[-3]`, ya
+       tiene suficiente información real), pero refrescando cada
+       `INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS` (1h) en vez de en cada ciclo — sigue
+       ahorrando peticiones sin quedarse con un dato de horas atrás. La fracción
+       transcurrida se calcula con `_fraccion_transcurrida_del_dia`/`_de_la_semana`
+       (sesión 4:00-20:00 ET para US, horario propio para HK/KR, día/semana de calendario
+       UTC completo para CRYPTO, que no tiene "cierre"). Con 47 activos × 7 temporalidades
+       cada pocos minutos, esto reduce las peticiones a IBKR en torno a un 25-30% (2 de 7
+       temporalidades dejan de pedirse en la mayoría de ciclos), evitando pacing
+       violations que antes se camuflaban como "sin datos en el intento 1/3".
    - `COMPRA` si las 7 están a favor, o como mucho 1 de 7 en contra.
    - **Atajo añadido**: si las 4 más cortas (1min/5min/15min/30min) están todas a favor →
      `COMPRA` directa, sin mirar el resto. Efecto colateral: el viejo resultado `BLOQUEADO`

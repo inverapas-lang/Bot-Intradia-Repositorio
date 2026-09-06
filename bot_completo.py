@@ -49,7 +49,7 @@ import math
 import os
 import threading
 import time
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time, timedelta, timezone
 from collections import defaultdict
 from zoneinfo import ZoneInfo
 
@@ -1014,6 +1014,107 @@ def atajo_cripto_alcista(ib, contrato, un_minuto_alcista):
     return True
 
 
+# Cache de las temporalidades LARGAS (dia/semana): peticion del usuario,
+# sept. 2026. Con un horizonte de trading de HORAS, la tendencia diaria y
+# semanal se usa como filtro de fondo (evitar comprar contra la tendencia
+# dominante), no como señal de entrada -para eso ya estan las temporalidades
+# cortas (1min-1h), que si se piden en cada ciclo-. Como una vela diaria o
+# semanal solo cambia de verdad cuando CIERRA (una vez al dia / una vez a la
+# semana), pedirla de nuevo cada pocos minutos no aporta nada y consume
+# cuota de peticiones a IBKR sin necesidad (ver NOTES.md).
+#
+# Matiz (peticion del usuario): la vela de HOY/ESTA SEMANA (todavia en
+# formacion) SI se tiene en cuenta una vez que lleva al menos un
+# UMBRAL_FRACCION_VELA_EN_CURSO de su periodo transcurrido -antes de eso, es
+# ruido puro (un lunes a las 9:35 la vela diaria lleva 5 minutos de datos).
+# Por debajo del umbral se usan solo barras CERRADAS (iloc[-2] vs iloc[-4])
+# y se cachea una unica vez al dia (no puede cambiar, son datos cerrados).
+# Por encima del umbral se incluye la vela en curso (iloc[-1] vs iloc[-3]),
+# pero como esa vela SI cambia con el precio, se refresca cada
+# INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS en vez de en cada ciclo -sigue
+# ahorrando peticiones frente a pedirla cada 2-4 minutos, sin quedarse con
+# un dato obsoleto durante horas-.
+UMBRAL_FRACCION_VELA_EN_CURSO = 0.4
+INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS = 60 * 60  # 1 hora
+
+VENTANA_DIA_POR_MERCADO = {
+    "US": (ZONA_NY, HORA_INICIO_US, HORA_CIERRE_EXTENDIDO_US),
+    "HK": (ZONA_HK, HORA_INICIO_HK, HORA_CIERRE_HK),
+    "KR": (ZONA_KR, HORA_INICIO_KR, HORA_CIERRE_KR),
+}
+
+
+def _fraccion_transcurrida_del_dia(mercado):
+    """Fraccion (0.0-1.0) de la sesion de HOY ya transcurrida. CRYPTO no
+    tiene sesion (opera 24/7): se usa el dia de calendario UTC completo
+    (00:00-24:00) como referencia -no hace falta mas precision que esa para
+    decidir si la vela diaria en curso ya tiene suficiente informacion-."""
+    if mercado == "CRYPTO":
+        ahora_utc = datetime.now(timezone.utc)
+        segundos_transcurridos = ahora_utc.hour * 3600 + ahora_utc.minute * 60 + ahora_utc.second
+        return segundos_transcurridos / 86400
+
+    zona, inicio, cierre = VENTANA_DIA_POR_MERCADO.get(mercado, (ZONA_NY, HORA_INICIO_US, HORA_CIERRE_EXTENDIDO_US))
+    ahora = datetime.now(zona)
+    duracion_seg = (datetime.combine(ahora.date(), cierre) - datetime.combine(ahora.date(), inicio)).total_seconds()
+    if duracion_seg <= 0:
+        return 1.0
+    transcurrido_seg = (datetime.combine(ahora.date(), ahora.time()) - datetime.combine(ahora.date(), inicio)).total_seconds()
+    return max(0.0, min(1.0, transcurrido_seg / duracion_seg))
+
+
+def _fraccion_transcurrida_de_la_semana(mercado):
+    """Igual que _fraccion_transcurrida_del_dia pero para la semana
+    (lunes-viernes en acciones, semana de calendario completa en cripto)."""
+    if mercado == "CRYPTO":
+        ahora = datetime.now(timezone.utc)
+        dias_transcurridos = ahora.weekday() + (ahora.hour * 3600 + ahora.minute * 60 + ahora.second) / 86400
+        return dias_transcurridos / 7
+
+    if datetime.now(ZONA_NY).weekday() > 4:  # sabado/domingo: semana ya cerrada a estos efectos
+        return 1.0
+    dias_completos = datetime.now(ZONA_NY).weekday()  # 0 lunes, ..., 4 viernes
+    return (dias_completos + _fraccion_transcurrida_del_dia(mercado)) / 5
+
+
+_cache_temporalidades_largas = {}  # ticker -> {"<nombre tf>": {"fecha", "modo", "resultado", "ultima_actualizacion"}}
+
+
+def _detalle_larga_cacheado(ib, contrato, ticker, tf, mercado):
+    hoy = datetime.now().date()
+    fraccion = (_fraccion_transcurrida_del_dia(mercado) if tf['nombre'] == "1 dia"
+                else _fraccion_transcurrida_de_la_semana(mercado))
+    modo = "en_curso" if fraccion >= UMBRAL_FRACCION_VELA_EN_CURSO else "cerrada"
+
+    cache_tf = _cache_temporalidades_largas.get(ticker, {}).get(tf['nombre'])
+    if cache_tf is not None and cache_tf["fecha"] == hoy and cache_tf["modo"] == modo:
+        if modo == "cerrada":
+            return cache_tf["resultado"]
+        if time.monotonic() - cache_tf["ultima_actualizacion"] < INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS:
+            return cache_tf["resultado"]
+
+    velas = pedir_velas(ib, contrato, tf['duration'], tf['barSize'])
+    if len(velas) < 35:
+        resultado = None
+    else:
+        # modo "cerrada": solo barras YA CERRADAS (la ULTIMA vela de la serie
+        # -el dia/semana en curso- sigue formandose en tiempo real y es ruido
+        # puro al principio del periodo). modo "en_curso": ya ha pasado
+        # suficiente del periodo como para que la vela en formacion aporte
+        # señal de verdad, se incluye.
+        cierres = pd.Series([v.close for v in velas])
+        _, _, histograma = calcular_macd(cierres)
+        if modo == "cerrada":
+            resultado = bool(histograma.iloc[-2] > histograma.iloc[-4])
+        else:
+            resultado = bool(histograma.iloc[-1] > histograma.iloc[-3])
+
+    _cache_temporalidades_largas.setdefault(ticker, {})[tf['nombre']] = {
+        "fecha": hoy, "modo": modo, "resultado": resultado, "ultima_actualizacion": time.monotonic(),
+    }
+    return resultado
+
+
 def analizar_activo(ib, activo):
     contrato = crear_contrato(ib, activo)
     ib.qualifyContracts(contrato)
@@ -1024,21 +1125,21 @@ def analizar_activo(ib, activo):
         # gastar reintentos en pedir datos historicos de un contrato invalido.
         return contrato, "SIMBOLO_NO_RESUELTO"
 
+    ticker = activo["ticker"]
     detalle = {}
     for tf in TEMPORALIDADES:
+        if tf['tipo'] == 'larga':
+            detalle[tf['nombre']] = _detalle_larga_cacheado(ib, contrato, ticker, tf, activo["mercado"])
+            continue
+
         velas = pedir_velas(ib, contrato, tf['duration'], tf['barSize'])
         if len(velas) < 35:
             detalle[tf['nombre']] = None
             continue
 
         cierres = pd.Series([v.close for v in velas])
-        macd, linea_senal, histograma = calcular_macd(cierres)
-
-        if tf['tipo'] == 'corta':
-            detalle[tf['nombre']] = bool(macd.iloc[-1] > linea_senal.iloc[-1])
-        else:
-            ultimas_3 = histograma.iloc[-3:]
-            detalle[tf['nombre']] = bool(ultimas_3.iloc[2] > ultimas_3.iloc[0])
+        macd, linea_senal, _ = calcular_macd(cierres)
+        detalle[tf['nombre']] = bool(macd.iloc[-1] > linea_senal.iloc[-1])
 
     # Atajo: si las 4 temporalidades mas cortas (1min, 5min, 15min, 30min)
     # estan todas alcistas, se compra directamente, sin mirar 1h/dia/semana

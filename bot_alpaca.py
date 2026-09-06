@@ -40,7 +40,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -375,17 +375,30 @@ def decidir_senal(detalle):
     return "SIN_SENAL"
 
 
-def macd_alcista_o_bajista(velas, tipo):
+def macd_alcista_o_bajista(velas, tipo, modo="cerrada"):
     """Devuelve True/False/None (None si faltan datos) para UNA temporalidad,
-    a partir de la lista de barras de Alpaca ya ordenada cronologicamente."""
+    a partir de la lista de barras de Alpaca ya ordenada cronologicamente.
+    Para temporalidades 'larga', `modo` decide si se usa la vela EN CURSO
+    (dia/semana todavia sin cerrar) o solo barras ya cerradas -ver
+    _resultados_largas_cacheados()-."""
     if len(velas) < 35:
         return None
     cierres = pd.Series([float(v.close) for v in velas])
     macd, linea_senal, histograma = calcular_macd(cierres)
     if tipo == "corta":
         return bool(macd.iloc[-1] > linea_senal.iloc[-1])
-    ultimas_3 = histograma.iloc[-3:]
-    return bool(ultimas_3.iloc[2] > ultimas_3.iloc[0])
+    if modo == "en_curso":
+        # Ya ha pasado suficiente del periodo (ver UMBRAL_FRACCION_VELA_EN_CURSO)
+        # como para que la vela en formacion aporte señal real -se incluye.
+        return bool(histograma.iloc[-1] > histograma.iloc[-3])
+    # modo "cerrada" (por defecto): solo barras YA CERRADAS. La ULTIMA vela
+    # de la serie (el dia/semana en curso) sigue formandose en tiempo real
+    # -un lunes por la mañana esa barra puede tener minutos de datos- y
+    # mezclarla con barras cerradas es ruido, ademas de impedir cachear el
+    # resultado con seguridad (cambiaria en cada ciclo). Se compara la
+    # penultima vela cerrada contra la de 2 barras atras (iloc[-2] vs
+    # iloc[-4]), nunca la ultima (iloc[-1], en formacion).
+    return bool(histograma.iloc[-2] > histograma.iloc[-4])
 
 
 # --- Datos de mercado: UNA peticion por temporalidad para TODOS los
@@ -428,12 +441,101 @@ def pedir_velas_lote(tickers, timeframe, duration_dias):
     return {t: [] for t in tickers}
 
 
+# Cache de las temporalidades LARGAS (dia/semana): peticion del usuario,
+# sept. 2026. Con un horizonte de trading de HORAS, dia/semana se usan como
+# filtro de fondo (evitar comprar contra la tendencia dominante), no como
+# señal de entrada -para eso ya estan las cortas (1min-1h), que se piden en
+# cada ciclo sin cache-. Como esas velas solo cambian de verdad una vez al
+# dia/una vez a la semana (cuando CIERRA la barra), pedirlas de nuevo cada
+# pocos minutos no aporta nada.
+#
+# Matiz (peticion del usuario): la vela de HOY/ESTA SEMANA (en formacion) SI
+# se tiene en cuenta una vez que lleva al menos UMBRAL_FRACCION_VELA_EN_CURSO
+# de su periodo transcurrido -antes de eso, es ruido puro-. Por debajo del
+# umbral se cachea una unica vez al dia (modo "cerrada", no puede cambiar).
+# Por encima, se incluye la vela en curso (modo "en_curso"), refrescando
+# cada INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS en vez de en cada ciclo -
+# sigue ahorrando peticiones sin quedarse con un dato obsoleto-. Acciones y
+# cripto COMPARTEN este cache sin colision de claves entre tf (los simbolos
+# de cripto llevan "/" y los de acciones no, pero aqui se cachea por tf, no
+# por ticker suelto, asi que ni hace falta esa distincion).
+UMBRAL_FRACCION_VELA_EN_CURSO = 0.4
+INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS = 60 * 60  # 1 hora
+
+VENTANA_DIA_POR_MERCADO = {
+    "US": (ZONA_NY, HORA_INICIO_US, HORA_CIERRE_EXTENDIDO_US),
+}
+
+
+def _fraccion_transcurrida_del_dia(mercado):
+    """Fraccion (0.0-1.0) de la sesion de HOY ya transcurrida. CRYPTO no
+    tiene sesion (opera 24/7): se usa el dia de calendario UTC completo."""
+    if mercado == "CRYPTO":
+        ahora_utc = datetime.now(timezone.utc)
+        return (ahora_utc.hour * 3600 + ahora_utc.minute * 60 + ahora_utc.second) / 86400
+
+    zona, inicio, cierre = VENTANA_DIA_POR_MERCADO.get(mercado, (ZONA_NY, HORA_INICIO_US, HORA_CIERRE_EXTENDIDO_US))
+    ahora = datetime.now(zona)
+    duracion_seg = (datetime.combine(ahora.date(), cierre) - datetime.combine(ahora.date(), inicio)).total_seconds()
+    if duracion_seg <= 0:
+        return 1.0
+    transcurrido_seg = (datetime.combine(ahora.date(), ahora.time()) - datetime.combine(ahora.date(), inicio)).total_seconds()
+    return max(0.0, min(1.0, transcurrido_seg / duracion_seg))
+
+
+def _fraccion_transcurrida_de_la_semana(mercado):
+    """Igual que _fraccion_transcurrida_del_dia pero para la semana
+    (lunes-viernes en acciones, semana de calendario completa en cripto)."""
+    if mercado == "CRYPTO":
+        ahora = datetime.now(timezone.utc)
+        dias_transcurridos = ahora.weekday() + (ahora.hour * 3600 + ahora.minute * 60 + ahora.second) / 86400
+        return dias_transcurridos / 7
+
+    if datetime.now(ZONA_NY).weekday() > 4:  # sabado/domingo: semana ya cerrada a estos efectos
+        return 1.0
+    dias_completos = datetime.now(ZONA_NY).weekday()  # 0 lunes, ..., 4 viernes
+    return (dias_completos + _fraccion_transcurrida_del_dia(mercado)) / 5
+
+
+_cache_largas_por_dia = {}  # {"<tf nombre>": {"fecha", "modo", "ultima_actualizacion", "valores": {ticker: bool|None}}}
+
+
+def _resultados_largas_cacheados(tickers, tf, pedir_fn, mercado):
+    hoy = datetime.now(ZONA_NY).date()
+    fraccion = (_fraccion_transcurrida_del_dia(mercado) if tf["nombre"] == "1 dia"
+                else _fraccion_transcurrida_de_la_semana(mercado))
+    modo = "en_curso" if fraccion >= UMBRAL_FRACCION_VELA_EN_CURSO else "cerrada"
+
+    cache_tf = _cache_largas_por_dia.get(tf["nombre"])
+    valido = (
+        cache_tf is not None and cache_tf["fecha"] == hoy and cache_tf["modo"] == modo
+        and all(t in cache_tf["valores"] for t in tickers)
+        and (modo == "cerrada"
+             or time.monotonic() - cache_tf["ultima_actualizacion"] < INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS)
+    )
+    if valido:
+        return {t: cache_tf["valores"][t] for t in tickers}
+
+    velas_por_ticker = pedir_fn(tickers, tf["timeframe"], tf["duration_dias"])
+    valores = {t: macd_alcista_o_bajista(velas_por_ticker.get(t, []), tf["tipo"], modo) for t in tickers}
+    _cache_largas_por_dia[tf["nombre"]] = {
+        "fecha": hoy, "modo": modo, "ultima_actualizacion": time.monotonic(), "valores": valores,
+    }
+    return valores
+
+
 def analizar_todos_los_activos(tickers):
-    """Pide las 7 temporalidades para TODOS los tickers (7 peticiones en
-    total) y devuelve {ticker: decision} + {ticker: precio_actual (ultimo
-    cierre de 1 minuto)}."""
+    """Pide las temporalidades CORTAS para TODOS los tickers en lote (una
+    peticion por temporalidad); las LARGAS (dia/semana) se sirven del cache
+    diario en vez de pedirse en cada ciclo (ver _resultados_largas_cacheados).
+    Devuelve {ticker: decision} + {ticker: precio_actual (ultimo cierre de
+    1 minuto)}."""
     velas_por_temporalidad = {}
+    resultados_largas = {}
     for tf in TEMPORALIDADES:
+        if tf["tipo"] == "larga":
+            resultados_largas[tf["nombre"]] = _resultados_largas_cacheados(tickers, tf, pedir_velas_lote, "US")
+            continue
         velas_por_temporalidad[tf["nombre"]] = pedir_velas_lote(tickers, tf["timeframe"], tf["duration_dias"])
 
     decisiones = {}
@@ -441,6 +543,9 @@ def analizar_todos_los_activos(tickers):
     for ticker in tickers:
         detalle = {}
         for tf in TEMPORALIDADES:
+            if tf["tipo"] == "larga":
+                detalle[tf["nombre"]] = resultados_largas[tf["nombre"]].get(ticker)
+                continue
             velas = velas_por_temporalidad[tf["nombre"]].get(ticker, [])
             detalle[tf["nombre"]] = macd_alcista_o_bajista(velas, tf["tipo"])
         decisiones[ticker] = decidir_senal(detalle)
@@ -495,9 +600,17 @@ def pedir_velas_lote_cripto(tickers, timeframe, duration_dias):
 
 
 def analizar_todos_los_activos_cripto(tickers):
-    """Version de analizar_todos_los_activos() para cripto."""
+    """Version de analizar_todos_los_activos() para cripto: las LARGAS
+    (dia/semana) tambien usan el cache diario compartido (ver
+    _resultados_largas_cacheados) - cripto no tiene "cierre" de mercado,
+    pero tampoco tiene sentido recalcular la tendencia semanal en cada
+    ciclo de 1 minuto."""
     velas_por_temporalidad = {}
+    resultados_largas = {}
     for tf in TEMPORALIDADES:
+        if tf["tipo"] == "larga":
+            resultados_largas[tf["nombre"]] = _resultados_largas_cacheados(tickers, tf, pedir_velas_lote_cripto, "CRYPTO")
+            continue
         velas_por_temporalidad[tf["nombre"]] = pedir_velas_lote_cripto(tickers, tf["timeframe"], tf["duration_dias"])
 
     decisiones = {}
@@ -505,6 +618,9 @@ def analizar_todos_los_activos_cripto(tickers):
     for ticker in tickers:
         detalle = {}
         for tf in TEMPORALIDADES:
+            if tf["tipo"] == "larga":
+                detalle[tf["nombre"]] = resultados_largas[tf["nombre"]].get(ticker)
+                continue
             velas = velas_por_temporalidad[tf["nombre"]].get(ticker, [])
             detalle[tf["nombre"]] = macd_alcista_o_bajista(velas, tf["tipo"])
         decisiones[ticker] = decidir_senal(detalle)

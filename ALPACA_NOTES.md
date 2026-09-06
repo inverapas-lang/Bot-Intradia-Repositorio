@@ -133,7 +133,37 @@ gratuita es de 200 peticiones/minuto, y el análisis completo son 7
 temporalidades × 30 tickers = 210 peticiones si se hiciera una por ticker
 (se pasaría del límite), `bot_alpaca.py` pide **cada temporalidad una sola
 vez para TODOS los tickers a la vez** (`pedir_velas_lote`) — solo 7
-peticiones por ciclo de compras, muy por debajo del límite.
+peticiones por ciclo de compras, muy por debajo del límite. Alpaca no tiene
+el problema de pacing de IBKR (no hace falta cachear por eso), pero la
+caché de temporalidades largas de abajo se comparte con IBKR por
+consistencia de señal entre ambos bots.
+
+### Caché de temporalidades LARGAS (día/semana), con vela en curso condicional
+
+Añadido sept. 2026, petición del usuario: con un horizonte de trading de
+HORAS, día y semana se usan como filtro de fondo (evitar comprar contra la
+tendencia dominante), no como señal de entrada — para eso ya están las
+cortas (1min-1h), que se piden en lote en cada ciclo sin caché.
+`_resultados_largas_cacheados()` (compartida por `analizar_todos_los_activos()`
+y `analizar_todos_los_activos_cripto()`) implementa dos modos:
+
+- **Modo "cerrada"** (por debajo de `UMBRAL_FRACCION_VELA_EN_CURSO` = 40%
+  del día/semana transcurrido): usa solo barras YA CERRADAS
+  (`histograma.iloc[-2]` vs `iloc[-4]`, nunca la última vela — la de
+  hoy/esta semana, que sigue formándose y es ruido puro al principio del
+  periodo, p.ej. un lunes a primera hora). Se cachea una única vez al día
+  (no puede cambiar, son datos cerrados).
+- **Modo "en_curso"** (a partir del 40%): SÍ se incluye la vela en
+  formación (`histograma.iloc[-1]` vs `iloc[-3]`, ya tiene información
+  real de sobra), pero se refresca cada `INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS`
+  (1h) en vez de en cada ciclo de 1-2 minutos — sigue ahorrando peticiones
+  sin quedarse con un dato de horas atrás.
+
+La fracción transcurrida (`_fraccion_transcurrida_del_dia`/`_de_la_semana`)
+usa la sesión 4:00-20:00 ET para acciones (`VENTANA_DIA_POR_MERCADO`) y el
+día/semana de calendario UTC completo para cripto (que no tiene "cierre"
+de mercado). Acciones y cripto comparten el mismo caché sin colisión: se
+indexa por nombre de temporalidad ("1 dia"/"1 semana"), no por ticker.
 
 ### Vigilante de congelación / archivos de estado
 

@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 import types
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -352,6 +352,7 @@ bot.ACTIVOS = ["AAPL"]
 bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
 bot._data_client = _fake_data_client_alcista()
 try:
+    bot._cache_largas_por_dia = {}
     con_reloj_fijo(miercoles_regular, bot.revisar_compras)
 finally:
     ordenes_regular = bot._trading_client.ordenes
@@ -372,6 +373,7 @@ if ordenes_regular:
 bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
 bot._data_client = _fake_data_client_alcista()
 try:
+    bot._cache_largas_por_dia = {}
     con_reloj_fijo(premercado, bot.revisar_compras)
 finally:
     ordenes_premercado = bot._trading_client.ordenes
@@ -396,6 +398,7 @@ bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
 bot._data_client = _fake_data_client_alcista()
 postmercado = datetime(2026, 8, 12, 18, 0, tzinfo=bot.ZONA_NY)
 try:
+    bot._cache_largas_por_dia = {}
     con_reloj_fijo(postmercado, bot.revisar_compras)
 finally:
     ordenes_postmercado = bot._trading_client.ordenes
@@ -605,6 +608,7 @@ bot.ACTIVOS_CRYPTO = ["BTC/USD"]
 bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
 bot._crypto_data_client = _fake_crypto_data_client_alcista()
 try:
+    bot._cache_largas_por_dia = {}
     bot.revisar_compras_cripto()
 finally:
     ordenes_compra_cripto = bot._trading_client.ordenes
@@ -634,6 +638,7 @@ bot._trading_client = _TradingClientFalso(portfolio_value=portfolio_value_prueba
                                             posiciones=[posicion_cripto_cerca_del_limite])
 bot._crypto_data_client = _fake_crypto_data_client_alcista()
 try:
+    bot._cache_largas_por_dia = {}
     bot.revisar_compras_cripto()
 finally:
     ordenes_compra_cripto_limite = bot._trading_client.ordenes
@@ -663,6 +668,7 @@ bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000,
                                             posiciones=_posiciones_falsas(bot.MAX_POSICIONES_ABIERTAS))
 bot._data_client = _fake_data_client_alcista()
 try:
+    bot._cache_largas_por_dia = {}
     con_reloj_fijo(miercoles_regular, bot.revisar_compras)
 finally:
     ordenes_lleno = bot._trading_client.ordenes
@@ -677,6 +683,7 @@ bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000,
                                             posiciones=_posiciones_falsas(bot.MAX_POSICIONES_ABIERTAS - 1))
 bot._data_client = _fake_data_client_alcista()
 try:
+    bot._cache_largas_por_dia = {}
     con_reloj_fijo(miercoles_regular, bot.revisar_compras)
 finally:
     ordenes_con_hueco = bot._trading_client.ordenes
@@ -691,6 +698,7 @@ check("revisar_compras: con hueco libre bajo MAX_POSICIONES_ABIERTAS, SI compra 
 bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000, cash=1.0)
 bot._data_client = _fake_data_client_alcista()
 try:
+    bot._cache_largas_por_dia = {}
     con_reloj_fijo(miercoles_regular, bot.revisar_compras)
 finally:
     ordenes_sin_caja = bot._trading_client.ordenes
@@ -706,6 +714,7 @@ bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000, cash=None)
 bot._data_client = _fake_data_client_alcista()
 excepcion_sin_cash = None
 try:
+    bot._cache_largas_por_dia = {}
     con_reloj_fijo(miercoles_regular, bot.revisar_compras)
 except Exception as e:
     excepcion_sin_cash = e
@@ -718,6 +727,112 @@ finally:
 check("revisar_compras: si 'cash' no esta disponible en la cuenta, no lanza excepcion y sigue comprando",
       excepcion_sin_cash is None and len(ordenes_sin_atributo_cash) == 1,
       f"excepcion={excepcion_sin_cash}, ordenes={len(ordenes_sin_atributo_cash)}")
+
+
+# ---------------------------------------------------------------------------
+# 11. Cache de temporalidades LARGAS (dia/semana): peticion del usuario,
+#     sept. 2026 - se calcula una vez por dia natural (modo "cerrada") y se
+#     reutiliza el resto del dia; a partir de UMBRAL_FRACCION_VELA_EN_CURSO
+#     (40%) del periodo, se incluye la vela en curso (modo "en_curso"),
+#     refrescando cada hora en vez de en cada ciclo.
+# ---------------------------------------------------------------------------
+_nombre_por_timeframe = {tf["timeframe"]: tf["nombre"] for tf in bot.TEMPORALIDADES}
+
+
+class _DataClientContadorPeticiones:
+    def __init__(self, precios_por_nombre):
+        self.precios_por_nombre = precios_por_nombre
+        self.peticiones_por_nombre = {}
+
+    def get_stock_bars(self, peticion):
+        nombre = _nombre_por_timeframe[peticion.timeframe]
+        self.peticiones_por_nombre[nombre] = self.peticiones_por_nombre.get(nombre, 0) + 1
+        precios = self.precios_por_nombre[nombre]
+        return _BarSetFalso({t: [_VelaFalsa(p) for p in precios] for t in peticion.symbol_or_symbols})
+
+
+SERIE_BAJISTA_ALPACA = [100 - i * 0.3 for i in range(60)]
+SERIE_ACELERANDO_BAJA_ALPACA = [300 - 100 * (1.02 ** i) for i in range(60)]
+precios_por_nombre_cache = {
+    "1 minuto": SERIE_BAJISTA_ALPACA, "5 minutos": SERIE_BAJISTA_ALPACA, "15 minutos": SERIE_BAJISTA_ALPACA,
+    "30 minutos": SERIE_BAJISTA_ALPACA, "1 hora": SERIE_BAJISTA_ALPACA,
+    "1 dia": SERIE_ACELERANDO_BAJA_ALPACA, "1 semana": SERIE_ACELERANDO_BAJA_ALPACA,
+}
+
+fraccion_dia_original_alpaca = bot._fraccion_transcurrida_del_dia
+fraccion_semana_original_alpaca = bot._fraccion_transcurrida_de_la_semana
+
+# modo "cerrada" (periodo recien empezado): comportamiento de "una vez al dia".
+bot._fraccion_transcurrida_del_dia = lambda mercado: 0.1
+bot._fraccion_transcurrida_de_la_semana = lambda mercado: 0.1
+try:
+    bot._cache_largas_por_dia = {}
+    data_client_cache = _DataClientContadorPeticiones(precios_por_nombre_cache)
+    bot._data_client = data_client_cache
+    try:
+        bot.analizar_todos_los_activos(["CACHE_TEST"])
+        bot.analizar_todos_los_activos(["CACHE_TEST"])
+    finally:
+        bot._data_client = data_client_original
+
+    check("cache temporalidades largas (modo cerrada): '1 dia' solo se pide UNA vez (2 llamadas)",
+          data_client_cache.peticiones_por_nombre.get("1 dia") == 1,
+          f"peticiones={data_client_cache.peticiones_por_nombre}")
+    check("cache temporalidades largas (modo cerrada): '1 semana' solo se pide UNA vez (2 llamadas)",
+          data_client_cache.peticiones_por_nombre.get("1 semana") == 1,
+          f"peticiones={data_client_cache.peticiones_por_nombre}")
+    check("cache temporalidades largas: las CORTAS (p.ej. '1 minuto') SI se piden en cada llamada",
+          data_client_cache.peticiones_por_nombre.get("1 minuto") == 2,
+          f"peticiones={data_client_cache.peticiones_por_nombre}")
+
+    # Cambio de dia -> se vuelve a pedir.
+    bot._cache_largas_por_dia["1 dia"]["fecha"] = date(2000, 1, 1)
+    bot._cache_largas_por_dia["1 semana"]["fecha"] = date(2000, 1, 1)
+    bot._data_client = data_client_cache
+    try:
+        bot.analizar_todos_los_activos(["CACHE_TEST"])
+    finally:
+        bot._data_client = data_client_original
+    check("cache temporalidades largas: al cambiar de dia, se vuelve a pedir '1 dia'/'1 semana'",
+          data_client_cache.peticiones_por_nombre.get("1 dia") == 2
+          and data_client_cache.peticiones_por_nombre.get("1 semana") == 2,
+          f"peticiones={data_client_cache.peticiones_por_nombre}")
+finally:
+    bot._fraccion_transcurrida_del_dia = fraccion_dia_original_alpaca
+    bot._fraccion_transcurrida_de_la_semana = fraccion_semana_original_alpaca
+
+# modo "en_curso" (>=40% del periodo): incluye la vela en formacion y
+# refresca cada hora en vez de en cada ciclo.
+bot._fraccion_transcurrida_del_dia = lambda mercado: 0.5
+bot._fraccion_transcurrida_de_la_semana = lambda mercado: 0.5
+try:
+    bot._cache_largas_por_dia = {}
+    data_client_en_curso = _DataClientContadorPeticiones(precios_por_nombre_cache)
+    bot._data_client = data_client_en_curso
+    try:
+        resultado_en_curso_1, _ = bot.analizar_todos_los_activos(["CACHE_TEST"])
+        resultado_en_curso_2, _ = bot.analizar_todos_los_activos(["CACHE_TEST"])
+    finally:
+        bot._data_client = data_client_original
+
+    check("cache temporalidades largas (modo en_curso): una segunda llamada INMEDIATA no vuelve a "
+          "pedir '1 dia' (throttle de 1h)",
+          data_client_en_curso.peticiones_por_nombre.get("1 dia") == 1,
+          f"peticiones={data_client_en_curso.peticiones_por_nombre}")
+
+    bot._cache_largas_por_dia["1 dia"]["ultima_actualizacion"] = (
+        bot.time.monotonic() - bot.INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS - 1)
+    bot._data_client = data_client_en_curso
+    try:
+        bot.analizar_todos_los_activos(["CACHE_TEST"])
+    finally:
+        bot._data_client = data_client_original
+    check("cache temporalidades largas (modo en_curso): pasada 1h desde la ultima actualizacion, se refresca",
+          data_client_en_curso.peticiones_por_nombre.get("1 dia") == 2,
+          f"peticiones={data_client_en_curso.peticiones_por_nombre}")
+finally:
+    bot._fraccion_transcurrida_del_dia = fraccion_dia_original_alpaca
+    bot._fraccion_transcurrida_de_la_semana = fraccion_semana_original_alpaca
 
 
 # ---------------------------------------------------------------------------

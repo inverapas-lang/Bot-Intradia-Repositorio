@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import types
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -279,6 +279,7 @@ activo_prueba = {"ticker": "TEST", "exchange": "SMART", "currency": "USD", "merc
 # en cuanto las cortas estan alineadas, el atajo compra antes de llegar ahi.
 precios_lineal = [100 + i * 0.3 for i in range(60)]
 ib_falso_lineal = _IBFalso(precios_lineal)
+bot._cache_temporalidades_largas = {}
 _, decision_lineal = bot.analizar_activo(ib_falso_lineal, activo_prueba)
 check("analizar_activo: 4 cortas alcistas (aunque las largas no aceleren) -> COMPRA por atajo",
       decision_lineal == "COMPRA", f"decision={decision_lineal}")
@@ -287,6 +288,7 @@ check("analizar_activo: 4 cortas alcistas (aunque las largas no aceleren) -> COM
 # atajo Y por la regla larga, ambas coinciden aqui).
 precios_compra = [100 * (1.02 ** i) for i in range(60)]
 ib_falso_compra = _IBFalso(precios_compra)
+bot._cache_temporalidades_largas = {}
 _, decision_compra = bot.analizar_activo(ib_falso_compra, activo_prueba)
 check("analizar_activo: tendencia alcista ACELERANDO -> decision COMPRA",
       decision_compra == "COMPRA", f"decision={decision_compra}")
@@ -335,6 +337,7 @@ series_atajo = {
     "30 mins": SERIE_ALCISTA,
     "1 hour": SERIE_BAJISTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
 }
+bot._cache_temporalidades_largas = {}
 _, decision_atajo = bot.analizar_activo(_IBPorTemporalidad(series_atajo), activo_prueba)
 check("analizar_activo: 4 cortas alcistas + 1h/dia/semana bajistas -> COMPRA (el atajo manda)",
       decision_atajo == "COMPRA", f"decision={decision_atajo}")
@@ -348,6 +351,7 @@ series_sin_atajo = {
     "30 mins": SERIE_ALCISTA,
     "1 hour": SERIE_ALCISTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
 }
+bot._cache_temporalidades_largas = {}
 _, decision_sin_atajo = bot.analizar_activo(_IBPorTemporalidad(series_sin_atajo), activo_prueba)
 check("analizar_activo: si UNA de las 4 cortas esta bajista (y 3 de 7 en contra "
       "en total) -> el atajo no se activa y tampoco compra por la regla vieja",
@@ -370,6 +374,7 @@ series_atajo_cripto = {
     "1 hour": SERIE_BAJISTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
     "3 mins": SERIE_ALCISTA, "10 mins": SERIE_ALCISTA, "20 mins": SERIE_ALCISTA,
 }
+bot._cache_temporalidades_largas = {}
 _, decision_atajo_cripto = bot.analizar_activo(_IBPorTemporalidad(series_atajo_cripto), activo_cripto_prueba)
 check("analizar_activo CRYPTO: atajo propio (1/3/10/20 min) todas alcistas -> COMPRA, "
       "aunque el analisis de 7 temporalidades por si solo daria SIN_SENAL",
@@ -380,6 +385,7 @@ check("analizar_activo CRYPTO: atajo propio (1/3/10/20 min) todas alcistas -> CO
 # decision cae en la misma SIN_SENAL de siempre.
 series_sin_atajo_cripto = dict(series_atajo_cripto, **{"10 mins": SERIE_BAJISTA})
 bot._exchange_cripto_cache = None
+bot._cache_temporalidades_largas = {}
 _, decision_sin_atajo_cripto = bot.analizar_activo(_IBPorTemporalidad(series_sin_atajo_cripto), activo_cripto_prueba)
 check("analizar_activo CRYPTO: si UNA de las 4 del atajo propio esta bajista (10 min), "
       "no se activa -> SIN_SENAL",
@@ -388,6 +394,7 @@ check("analizar_activo CRYPTO: si UNA de las 4 del atajo propio esta bajista (10
 # El atajo de cripto NUNCA se comprueba para acciones (activo_prueba, US):
 # reutiliza el mismo series_atajo_cripto (que SI tiene 3/10/20 min alcistas)
 # pero al ser mercado US no debe importar -> misma SIN_SENAL de antes.
+bot._cache_temporalidades_largas = {}
 _, decision_no_cripto = bot.analizar_activo(_IBPorTemporalidad(series_atajo_cripto), activo_prueba)
 check("analizar_activo: el atajo de 1/3/10/20 min NUNCA se aplica a acciones (mercado US)",
       decision_no_cripto == "SIN_SENAL", f"decision={decision_no_cripto}")
@@ -430,6 +437,7 @@ check("atajo_cripto_alcista: menos de 35 velas en una temporalidad -> None",
 
 # Muy pocas velas (menos de 35) -> SIN_DATOS
 ib_falso_pocos_datos = _IBFalso([100, 101, 102])
+bot._cache_temporalidades_largas = {}
 _, decision_pocos = bot.analizar_activo(ib_falso_pocos_datos, activo_prueba)
 check("analizar_activo: menos de 35 velas -> decision SIN_DATOS",
       decision_pocos == "SIN_DATOS", f"decision={decision_pocos}")
@@ -437,6 +445,7 @@ check("analizar_activo: menos de 35 velas -> decision SIN_DATOS",
 # Serie bajista sostenida -> no deberia ser COMPRA
 precios_venta = [100 - i * 0.3 for i in range(60)]
 ib_falso_venta = _IBFalso(precios_venta)
+bot._cache_temporalidades_largas = {}
 _, decision_venta = bot.analizar_activo(ib_falso_venta, activo_prueba)
 check("analizar_activo: serie bajista sostenida -> decision distinta de COMPRA",
       decision_venta != "COMPRA", f"decision={decision_venta}")
@@ -456,6 +465,7 @@ class _ContratoSinResolver:
 orig_stock = bot.Stock
 bot.Stock = lambda *a, **k: _ContratoSinResolver(*a, **k)
 try:
+    bot._cache_temporalidades_largas = {}
     _, decision_no_resuelto = bot.analizar_activo(_IBFalsoNoResuelto([]), activo_prueba)
 finally:
     bot.Stock = orig_stock
@@ -772,6 +782,7 @@ bot.en_ventana_sin_compra = lambda mercado: False
 ib_falso_compras = _IBFalsoCompras()
 excepcion_compras = None
 try:
+    bot._cache_temporalidades_largas = {}
     bot.revisar_compras(ib_falso_compras)
 except Exception as e:
     excepcion_compras = e
@@ -953,6 +964,7 @@ try:
     check("obtener_apertura_registrada: NUEVA sin registro previo -> None",
           bot.obtener_apertura_registrada("US", "NUEVA") is None)
     try:
+        bot._cache_temporalidades_largas = {}
         bot.revisar_compras(_IBFalsoCompraFilled())
     finally:
         bot.ACTIVOS = activos_originales
@@ -1640,6 +1652,7 @@ bot._exchange_cripto_cache = None  # sin posiciones previas (positions() -> []),
 
 ib_falso_compras_cripto = _IBFalsoComprasCripto()
 try:
+    bot._cache_temporalidades_largas = {}
     bot.revisar_compras(ib_falso_compras_cripto)
 finally:
     bot.ACTIVOS = activos_originales_compras
@@ -1686,6 +1699,7 @@ bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPR
 bot._exchange_cripto_cache = None
 ib_falso_cerca_del_limite = _IBFalsoComprasCriptoCercaDelLimite()
 try:
+    bot._cache_temporalidades_largas = {}
     bot.revisar_compras(ib_falso_cerca_del_limite)
 finally:
     bot.ACTIVOS = activos_originales_compras
@@ -1761,6 +1775,7 @@ bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPR
 bot._exchange_cripto_cache = None
 ib_falso_incremento = _IBFalsoComprasCriptoConIncremento()
 try:
+    bot._cache_temporalidades_largas = {}
     bot.revisar_compras(ib_falso_incremento)
 finally:
     bot.ACTIVOS = activos_originales_compras
@@ -1899,6 +1914,7 @@ bot._exchange_cripto_cache = None
 
 ib_falso_compras_filtro = _IBFalsoComprasCripto()
 try:
+    bot._cache_temporalidades_largas = {}
     bot.revisar_compras(ib_falso_compras_filtro, mercados={"CRYPTO"})
 finally:
     bot.ACTIVOS = activos_originales_filtro
@@ -2043,12 +2059,14 @@ try:
     # Ya hay MAX_POSICIONES_ABIERTAS posiciones distintas abiertas -> un
     # ticker NUEVO (que no es ninguna de esas) debe omitirse.
     ib_lleno = _IBFalsoLimitesAgregados(bot.MAX_POSICIONES_ABIERTAS, available_funds_usd=100000)
+    bot._cache_temporalidades_largas = {}
     bot.revisar_compras(ib_lleno)
     check("revisar_compras: con MAX_POSICIONES_ABIERTAS ya alcanzado, NO compra un ticker nuevo",
           ib_lleno.ordenes_colocadas == [], f"ordenes={ib_lleno.ordenes_colocadas}")
 
     # Con hueco libre (menos posiciones que el limite), SI compra.
     ib_con_hueco = _IBFalsoLimitesAgregados(bot.MAX_POSICIONES_ABIERTAS - 1, available_funds_usd=100000)
+    bot._cache_temporalidades_largas = {}
     bot.revisar_compras(ib_con_hueco)
     check("revisar_compras: con hueco libre bajo MAX_POSICIONES_ABIERTAS, SI compra el ticker nuevo",
           "NUEVO" in ib_con_hueco.ordenes_colocadas, f"ordenes={ib_con_hueco.ordenes_colocadas}")
@@ -2056,6 +2074,7 @@ try:
     # AvailableFunds insuficiente (menos que el importe de la operacion) ->
     # se omite aunque haya hueco de posiciones y margen de exposicion.
     ib_sin_caja = _IBFalsoLimitesAgregados(0, available_funds_usd=1.0)
+    bot._cache_temporalidades_largas = {}
     bot.revisar_compras(ib_sin_caja)
     check("revisar_compras: con AvailableFunds insuficiente, NO compra aunque haya señal y hueco",
           ib_sin_caja.ordenes_colocadas == [], f"ordenes={ib_sin_caja.ordenes_colocadas}")
@@ -2065,6 +2084,7 @@ try:
     ib_sin_tag = _IBFalsoLimitesAgregados(0, available_funds_usd=None)
     excepcion_sin_tag = None
     try:
+        bot._cache_temporalidades_largas = {}
         bot.revisar_compras(ib_sin_tag)
     except Exception as e:
         excepcion_sin_tag = e
@@ -2075,6 +2095,123 @@ finally:
     bot.ACTIVOS = activos_originales_limites
     bot.es_horario_operativo = es_horario_original_limites
     bot.en_ventana_sin_compra = en_ventana_sin_compra_original_limites
+
+
+# ---------------------------------------------------------------------------
+# 12. Cache de temporalidades LARGAS (dia/semana): peticion del usuario,
+#     sept. 2026 - con un horizonte de trading de horas, la tendencia
+#     diaria/semanal se usa como filtro de fondo, no como señal de entrada,
+#     asi que no hace falta pedirla de nuevo en cada ciclo: se calcula una
+#     vez por dia natural y se reutiliza el resto del dia.
+# ---------------------------------------------------------------------------
+class _IBContadorPeticiones:
+    """Cuenta cuantas veces se pide CADA barSize por separado, para poder
+    comprobar que 'dia'/'semana' NO se vuelven a pedir en la segunda
+    llamada (cache), mientras que las cortas SI se piden de nuevo cada
+    vez."""
+
+    def __init__(self, precios_por_barsize):
+        self.precios_por_barsize = precios_por_barsize
+        self.peticiones_por_barsize = {}
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 12345
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        barsize = kwargs["barSizeSetting"]
+        self.peticiones_por_barsize[barsize] = self.peticiones_por_barsize.get(barsize, 0) + 1
+        return [_Vela(p) for p in self.precios_por_barsize[barsize]]
+
+    def sleep(self, segundos):
+        pass
+
+
+activo_cache_largas = {"ticker": "CACHE_TEST", "exchange": "SMART", "currency": "USD", "mercado": "US"}
+precios_por_barsize_cache = {
+    "1 min": SERIE_BAJISTA, "5 mins": SERIE_BAJISTA, "15 mins": SERIE_BAJISTA,
+    "30 mins": SERIE_BAJISTA, "1 hour": SERIE_BAJISTA,
+    "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
+}
+TF_DIA = {"nombre": "1 dia", "barSize": "1 day", "duration": "1 Y", "tipo": "larga"}
+
+fraccion_dia_original = bot._fraccion_transcurrida_del_dia
+fraccion_semana_original = bot._fraccion_transcurrida_de_la_semana
+
+# Primero, con el periodo recien EMPEZADO (fraccion baja, modo "cerrada"):
+# comportamiento identico al de un cache normal de "una vez al dia".
+bot._fraccion_transcurrida_del_dia = lambda mercado: 0.1
+bot._fraccion_transcurrida_de_la_semana = lambda mercado: 0.1
+try:
+    bot._cache_temporalidades_largas = {}
+    ib_cache_largas = _IBContadorPeticiones(precios_por_barsize_cache)
+    bot.analizar_activo(ib_cache_largas, activo_cache_largas)
+    bot.analizar_activo(ib_cache_largas, activo_cache_largas)
+
+    check("cache temporalidades largas (modo cerrada): '1 dia' solo se pide UNA vez (2 llamadas)",
+          ib_cache_largas.peticiones_por_barsize.get("1 day") == 1,
+          f"peticiones={ib_cache_largas.peticiones_por_barsize}")
+    check("cache temporalidades largas (modo cerrada): '1 week' solo se pide UNA vez (2 llamadas)",
+          ib_cache_largas.peticiones_por_barsize.get("1 week") == 1,
+          f"peticiones={ib_cache_largas.peticiones_por_barsize}")
+    check("cache temporalidades largas: las CORTAS (p.ej. '1 min') SI se piden en cada llamada (sin cache)",
+          ib_cache_largas.peticiones_por_barsize.get("1 min") == 2,
+          f"peticiones={ib_cache_largas.peticiones_por_barsize}")
+
+    # Si cambia el dia (cache de otra fecha), se vuelve a pedir.
+    for nombre_tf in ("1 dia", "1 semana"):
+        bot._cache_temporalidades_largas["CACHE_TEST"][nombre_tf]["fecha"] = date(2000, 1, 1)
+    bot.analizar_activo(ib_cache_largas, activo_cache_largas)
+    check("cache temporalidades largas: al cambiar de dia, se vuelve a pedir '1 dia'/'1 semana'",
+          ib_cache_largas.peticiones_por_barsize.get("1 day") == 2
+          and ib_cache_largas.peticiones_por_barsize.get("1 week") == 2,
+          f"peticiones={ib_cache_largas.peticiones_por_barsize}")
+
+    # modo "cerrada": usa SOLO barras CERRADAS (iloc[-2] vs iloc[-4], no
+    # iloc[-1] vs iloc[-3]) - bug real corregido (sept. 2026): antes se
+    # comparaba con la barra del dia/semana EN CURSO, ruido puro al
+    # principio del periodo (p.ej. un lunes por la mañana).
+    bot._cache_temporalidades_largas = {}
+    detalle_larga = bot._detalle_larga_cacheado(ib_cache_largas, None, "OTRO_TICKER", TF_DIA, "US")
+    check("cache temporalidades largas (modo cerrada): usa barras cerradas "
+          "(SERIE_ACELERANDO_BAJA -> bajista/False)",
+          detalle_larga is False, f"detalle_larga={detalle_larga}")
+finally:
+    bot._fraccion_transcurrida_del_dia = fraccion_dia_original
+    bot._fraccion_transcurrida_de_la_semana = fraccion_semana_original
+
+# --- Peticion del usuario: a partir del 40% del periodo transcurrido, SI se
+#     tiene en cuenta la vela en curso (iloc[-1] vs iloc[-3]), refrescando
+#     cada hora en vez de en cada ciclo -sigue ahorrando peticiones, pero ya
+#     no se queda con un dato de hace horas una vez hay suficiente
+#     informacion real del dia/semana en marcha-. ---
+bot._fraccion_transcurrida_del_dia = lambda mercado: 0.5  # 50%: por encima del umbral del 40%
+bot._fraccion_transcurrida_de_la_semana = lambda mercado: 0.5
+try:
+    bot._cache_temporalidades_largas = {}
+    ib_cache_en_curso = _IBContadorPeticiones(precios_por_barsize_cache)
+    detalle_en_curso_1 = bot._detalle_larga_cacheado(ib_cache_en_curso, None, "TICKER_EN_CURSO", TF_DIA, "US")
+    check("cache temporalidades largas (modo en_curso, >=40%): usa la vela en curso (iloc[-1] vs iloc[-3])",
+          detalle_en_curso_1 is False, f"detalle={detalle_en_curso_1}")
+
+    # Segunda llamada INMEDIATA (mismo dia, sigue en_curso): no deberia
+    # volver a pedir datos (throttle de 1h), reutiliza el resultado.
+    bot._detalle_larga_cacheado(ib_cache_en_curso, None, "TICKER_EN_CURSO", TF_DIA, "US")
+    check("cache temporalidades largas (modo en_curso): una segunda llamada INMEDIATA no vuelve a pedir "
+          "datos (throttle de 1h)",
+          ib_cache_en_curso.peticiones_por_barsize.get("1 day") == 1,
+          f"peticiones={ib_cache_en_curso.peticiones_por_barsize}")
+
+    # Si ha pasado mas de 1 hora desde la ultima actualizacion, SI se
+    # refresca (aunque sea el mismo dia y siga en modo en_curso).
+    bot._cache_temporalidades_largas["TICKER_EN_CURSO"]["1 dia"]["ultima_actualizacion"] = (
+        time.monotonic() - bot.INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS - 1)
+    bot._detalle_larga_cacheado(ib_cache_en_curso, None, "TICKER_EN_CURSO", TF_DIA, "US")
+    check("cache temporalidades largas (modo en_curso): pasada 1h desde la ultima actualizacion, se refresca",
+          ib_cache_en_curso.peticiones_por_barsize.get("1 day") == 2,
+          f"peticiones={ib_cache_en_curso.peticiones_por_barsize}")
+finally:
+    bot._fraccion_transcurrida_del_dia = fraccion_dia_original
+    bot._fraccion_transcurrida_de_la_semana = fraccion_semana_original
 
 
 # ---------------------------------------------------------------------------
