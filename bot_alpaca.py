@@ -155,14 +155,55 @@ BENEFICIO_MAX_VENTA_FORZADA_PCT = 2.0
 UMBRAL_BENEFICIO_PCT = 0.5
 MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2
 
-# Criterio de venta de ACCIONES: trailing stop + refuerzo de 2 velas
-# (peticion del usuario, sept. 2026) -no aplica a CRYPTO, que sigue con su
-# propio criterio de umbral neto + 1 vela bajista-. UMBRAL_BENEFICIO_PCT ya
-# esta en NETO (sin comision, ver "Sin comision" mas abajo -Alpaca no cobra
-# en acciones-), asi que el trailing stop arma sobre beneficio neto de
-# verdad.
+# Criterio de venta: trailing stop + refuerzo de 2 velas + salida parcial
+# (peticion del usuario, sept. 2026). Al principio solo se aplico a
+# ACCIONES; luego se extendio a CRYPTO tambien (mismo mecanismo, cada
+# mercado usa su propio umbral de entrada: UMBRAL_BENEFICIO_PCT para
+# acciones, UMBRAL_BENEFICIO_CRYPTO_PCT para cripto). UMBRAL_BENEFICIO_PCT
+# ya esta en NETO (sin comision, Alpaca no cobra en acciones), asi que el
+# trailing stop arma sobre beneficio neto de verdad.
 TRAILING_STOP_VENTA_PCT = 0.3  # puntos de retroceso desde el maximo neto alcanzado
 _maximo_beneficio_neto_por_posicion = {}  # ticker -> % neto maximo visto en la posicion actual
+
+# Salida parcial (peticion del usuario, sept. 2026): en cuanto una posicion
+# alcanza por primera vez su umbral minimo, se vende PORCENTAJE_SCALE_OUT de
+# la posicion para asegurar beneficio ya, dejando el resto corriendo con el
+# trailing stop -mejora el beneficio medio por operacion sin cambiar el
+# perfil de riesgo, en vez del viejo "todo o nada"-. Solo se hace UNA vez
+# por posicion (_scale_out_realizado), no en cada ciclo tras la primera vez.
+PORCENTAJE_SCALE_OUT = 0.5
+_scale_out_realizado = set()  # tickers ya con su venta parcial hecha
+
+
+def decidir_accion_venta(clave, beneficio_pct, umbral):
+    """Logica compartida de venta (trailing stop + salida parcial),
+    identica a la de bot_completo.py -ver ahi la explicacion completa-.
+    Devuelve (accion, motivo), accion en
+    {"MANTENER","VENTA_PARCIAL","VENTA_TOTAL"}. NO decide por si sola el
+    refuerzo de 2 velas -eso lo comprueba el llamador solo si beneficio_pct
+    ya supera el umbral, para no gastar una peticion de datos de mas-."""
+    maximo_anterior = _maximo_beneficio_neto_por_posicion.get(clave, beneficio_pct)
+    maximo_neto = max(maximo_anterior, beneficio_pct)
+    _maximo_beneficio_neto_por_posicion[clave] = maximo_neto
+
+    trailing_armado = maximo_neto >= umbral
+    retroceso_pct = maximo_neto - beneficio_pct
+    disparo_trailing = trailing_armado and retroceso_pct >= TRAILING_STOP_VENTA_PCT
+    info = f"(maximo alcanzado {maximo_neto:.2f}%, retroceso {retroceso_pct:.2f} pts)"
+
+    if disparo_trailing:
+        return "VENTA_TOTAL", f"trailing stop: retrocedio {retroceso_pct:.2f} pts desde el maximo de {maximo_neto:.2f}%"
+    if trailing_armado and clave not in _scale_out_realizado:
+        _scale_out_realizado.add(clave)
+        return "VENTA_PARCIAL", f"objetivo alcanzado ({beneficio_pct:.2f}% >= {umbral}%): asegurando el {PORCENTAJE_SCALE_OUT*100:.0f}%"
+    return "MANTENER", info
+
+
+def cerrar_seguimiento_venta(clave):
+    """Olvida el maximo trackeado y la marca de salida parcial de una
+    posicion (llamar tras confirmar una venta TOTAL)."""
+    _maximo_beneficio_neto_por_posicion.pop(clave, None)
+    _scale_out_realizado.discard(clave)
 
 INTERVALO_SEGUNDOS = 130  # 2 min 10 s (ajustado tras pruebas en paper, ago 2026) - solo acciones
 CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto, en su propia cadencia (peticion
@@ -360,9 +401,19 @@ def calcular_macd(cierres, rapida=12, lenta=26, senal=9):
 def decidir_senal(detalle):
     """Misma logica de decision que analizar_activo() en bot_completo.py,
     a partir de un dict {nombre_temporalidad: True/False/None}."""
+    # Peticion del usuario (sept. 2026): el atajo de "4 cortas alcistas"
+    # tambien respeta que ninguna larga (dia/semana) este en contra -antes
+    # las ignoraba por completo, así que bastaba con las 4 cortas alcistas
+    # para comprar aunque la tendencia diaria o semanal fuera claramente
+    # bajista (la peor categoria de entrada). Bug real corregido: la regla
+    # de "1 de 7 en contra" de mas abajo nunca llegaba a aplicarse en este
+    # caso, porque el atajo la adelantaba siempre que las 4 cortas
+    # estuvieran alcistas (lo mas habitual).
+    largas_en_contra = any(detalle[tf["nombre"]] is False for tf in TEMPORALIDADES if tf["tipo"] == "larga")
     cuatro_cortas_alcistas = (
         all(detalle[n] is not None for n in NOMBRES_4_CORTAS)
         and all(detalle[n] for n in NOMBRES_4_CORTAS)
+        and not largas_en_contra
     )
     faltan_datos = any(detalle[tf["nombre"]] is None for tf in TEMPORALIDADES)
     total_false = sum(1 for tf in TEMPORALIDADES if detalle[tf["nombre"]] is False)
@@ -370,6 +421,10 @@ def decidir_senal(detalle):
                      if tf["tipo"] == "corta" and detalle[tf["nombre"]] is not None)
     largas_ok = all(detalle[tf["nombre"]] for tf in TEMPORALIDADES
                      if tf["tipo"] == "larga" and detalle[tf["nombre"]] is not None)
+    # La UNICA temporalidad en contra (si hay exactamente 1) - usado para
+    # distinguir si es una corta (retroceso normal, sigue siendo buena
+    # entrada) o una larga (contra la tendencia dominante, mala entrada).
+    tf_en_contra = next((tf for tf in TEMPORALIDADES if detalle[tf["nombre"]] is False), None)
 
     if cuatro_cortas_alcistas:
         return "COMPRA"
@@ -378,7 +433,16 @@ def decidir_senal(detalle):
     if total_false == 0:
         return "COMPRA"
     if total_false == 1:
-        return "COMPRA"
+        # Peticion del usuario (sept. 2026): la excepcion de "1 de 7 en
+        # contra" solo vale si la discrepancia es en una temporalidad CORTA
+        # (1min-1h) -un retroceso normal, a menudo mejor precio de entrada-.
+        # Si la unica en contra es la diaria o semanal, NO se compra: seria
+        # entrar contra la tendencia dominante, la peor categoria de
+        # entrada (antes esto se trataba igual que un "1 minuto en contra",
+        # bug real corregido aqui).
+        if tf_en_contra is not None and tf_en_contra["tipo"] == "corta":
+            return "COMPRA"
+        return "BLOQUEADO_TF_LARGA"
     if cortas_ok and not largas_ok:
         return "BLOQUEADO"
     return "SIN_SENAL"
@@ -657,6 +721,21 @@ def macd_5min_bajista_cripto(ticker):
     return bool(macd.iloc[-1] < linea_senal.iloc[-1])
 
 
+def macd_5min_bajista_cripto_2_velas(ticker):
+    """Version 'reforzada' de macd_5min_bajista_cripto(): exige que las DOS
+    ultimas velas de 5 min (no solo la ultima) tengan MACD por debajo de su
+    linea de señal - ver macd_5min_bajista_2_velas() (acciones) y
+    TRAILING_STOP_VENTA_PCT/UMBRAL_BENEFICIO_CRYPTO_PCT mas abajo (peticion
+    del usuario, sept. 2026: extender el trailing stop + refuerzo a cripto)."""
+    resultado = pedir_velas_lote_cripto([ticker], TimeFrame(5, TimeFrameUnit.Minute), 5)
+    velas = resultado.get(ticker, [])
+    if len(velas) < 36:
+        return None
+    cierres = pd.Series([float(v.close) for v in velas])
+    macd, linea_senal, _ = calcular_macd(cierres)
+    return bool(macd.iloc[-1] < linea_senal.iloc[-1] and macd.iloc[-2] < linea_senal.iloc[-2])
+
+
 def estimar_comision_cripto_alpaca(valor_operacion):
     """Comision REAL de Alpaca para cripto (a diferencia de acciones, sin
     comision). Ver COMISION_CRIPTO_ALPACA_PCT."""
@@ -871,14 +950,18 @@ def revisar_ventas():
         log("VENTAS: fuera de horario operativo (4:00-20:00 ET), no se intenta vender nada este ciclo.")
         return
 
-    # Poda del maximo de beneficio neto trackeado por posicion (ver
-    # TRAILING_STOP_VENTA_PCT mas abajo): si un ticker ya no esta entre las
-    # posiciones abiertas (se vendio del todo), se olvida su maximo -si se
-    # vuelve a comprar mas adelante, empieza de cero-.
+    # Poda del maximo de beneficio neto y de la marca de salida parcial
+    # trackeados por posicion (ver TRAILING_STOP_VENTA_PCT/PORCENTAJE_SCALE_OUT
+    # mas arriba): si un ticker de ACCION ya no esta entre las posiciones
+    # abiertas (se vendio del todo), se olvida -si se vuelve a comprar mas
+    # adelante, el trailing empieza de cero-. Los tickers de CRIPTO (con
+    # "/") se ignoran aqui aposta -su propia poda vive en
+    # revisar_ventas_cripto()-, ya que ambas funciones comparten el mismo
+    # dict/set y esta corre en un ciclo distinto (130s vs 60s de cripto).
     tickers_vivos = {p.symbol for p in posiciones}
     for ticker_viejo in list(_maximo_beneficio_neto_por_posicion.keys()):
-        if ticker_viejo not in tickers_vivos:
-            del _maximo_beneficio_neto_por_posicion[ticker_viejo]
+        if not es_cripto(ticker_viejo) and ticker_viejo not in tickers_vivos:
+            cerrar_seguimiento_venta(ticker_viejo)
 
     log(f"\n########## VENTAS ##########")
     for pos in sorted(posiciones, key=lambda p: p.symbol):
@@ -902,70 +985,65 @@ def revisar_ventas():
             fuera_sesion = fuera_de_sesion_regular_us()
 
             if en_ventana_venta_forzada() and UMBRAL_BENEFICIO_PCT <= beneficio_pct <= BENEFICIO_MAX_VENTA_FORZADA_PCT:
-                precio_limite = calcular_precio_limite_venta(precio_actual)
                 log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, "
                     f"dentro de los ultimos {MINUTOS_VENTA_FORZADA_ANTES_CIERRE} min antes del "
-                    f"cierre -> VENTA FORZADA (orden limitada a {precio_limite} USD).")
+                    f"cierre -> VENTA FORZADA (orden a mercado).")
+                # A mercado, no limitada (peticion del usuario, sept. 2026):
+                # el objetivo de la venta forzada es GARANTIZAR la salida
+                # antes del cierre, y una orden limitada corria el riesgo de
+                # no ejecutarse a tiempo si el precio se alejaba del limite.
                 cancelar_ordenes_abiertas(ticker)
-                orden = LimitOrderRequest(symbol=ticker, qty=cantidad, limit_price=precio_limite,
-                                           side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
+                orden = MarketOrderRequest(symbol=ticker, qty=cantidad, side=OrderSide.SELL,
+                                            time_in_force=TimeInForce.DAY)
                 trade = _trading_client.submit_order(order_data=orden)
                 estado = esperar_estado_final_orden(trade.id)
-                log(f"VENTAS: {ticker} - orden limitada, estado: {estado}")
+                log(f"VENTAS: {ticker} - orden a mercado, estado: {estado}")
                 if estado == "filled":
-                    cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_limite)
+                    cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_actual)
                     registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
                     notificar_telegram(f"🔴 VENTA FORZADA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
                                         f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
                                         f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
-                    _maximo_beneficio_neto_por_posicion.pop(ticker, None)
+                    cerrar_seguimiento_venta(ticker)
                 continue
 
             # Criterio de venta: trailing stop (principal) + 2 velas de 5min
-            # bajistas seguidas (refuerzo) -peticion del usuario, sept. 2026-.
-            # El trailing stop solo se "arma" una vez el beneficio neto
-            # alcanza el minimo deseado (UMBRAL_BENEFICIO_PCT): a partir de
-            # ahi, si el beneficio retrocede TRAILING_STOP_VENTA_PCT puntos
-            # desde el maximo neto visto en esta posicion, se vende, sea cual
-            # sea el beneficio en ese momento (incluso si ya ha caido a
-            # perdida: una vez armado, protege lo ganado sin limite inferior).
-            # El refuerzo (2 velas de 5min bajistas seguidas) solo puede
-            # disparar la venta si el beneficio neto YA esta en el minimo
-            # deseado o por encima -nunca vende por debajo de
-            # UMBRAL_BENEFICIO_PCT solo por el refuerzo-.
-            maximo_anterior = _maximo_beneficio_neto_por_posicion.get(ticker, beneficio_pct)
-            maximo_neto = max(maximo_anterior, beneficio_pct)
-            _maximo_beneficio_neto_por_posicion[ticker] = maximo_neto
+            # bajistas seguidas (refuerzo) + salida parcial al alcanzar el
+            # objetivo (peticion del usuario, sept. 2026) -ver
+            # decidir_accion_venta()/PORCENTAJE_SCALE_OUT mas arriba-.
+            accion, motivo = decidir_accion_venta(ticker, beneficio_pct, UMBRAL_BENEFICIO_PCT)
 
-            trailing_armado = maximo_neto >= UMBRAL_BENEFICIO_PCT
-            retroceso_pct = maximo_neto - beneficio_pct
-            disparo_trailing = trailing_armado and retroceso_pct >= TRAILING_STOP_VENTA_PCT
+            if accion == "MANTENER" and beneficio_pct >= UMBRAL_BENEFICIO_PCT:
+                if macd_5min_bajista_2_velas(ticker):
+                    accion, motivo = "VENTA_TOTAL", "2 velas de 5min bajistas seguidas"
 
-            disparo_refuerzo = False
-            if beneficio_pct >= UMBRAL_BENEFICIO_PCT:
-                disparo_refuerzo = bool(macd_5min_bajista_2_velas(ticker))
-
-            if not (disparo_trailing or disparo_refuerzo):
-                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}% "
-                    f"(maximo alcanzado {maximo_neto:.2f}%, retroceso {retroceso_pct:.2f} pts) -> se mantiene.")
+            if accion == "MANTENER":
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}% {motivo} -> se mantiene.")
                 continue
 
-            motivo = ("trailing stop: retrocedio "
-                      f"{retroceso_pct:.2f} pts desde el maximo de {maximo_neto:.2f}%" if disparo_trailing
-                      else "2 velas de 5min bajistas seguidas")
+            cantidad_a_vender = cantidad
+            if accion == "VENTA_PARCIAL":
+                parcial = round(cantidad * PORCENTAJE_SCALE_OUT, DECIMALES_FRACCION)
+                if parcial <= 0 or parcial >= cantidad:
+                    accion, cantidad_a_vender = "VENTA_TOTAL", cantidad
+                else:
+                    cantidad_a_vender = parcial
+
+            etiqueta_accion = "VENTA PARCIAL" if accion == "VENTA_PARCIAL" else "VENTA"
 
             if fuera_sesion:
                 precio_limite = precio_actual
                 log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, "
-                    f"{motivo} -> VENDIENDO (orden limitada al precio exacto, "
+                    f"{motivo} -> {etiqueta_accion} de {cantidad_a_vender:g} (orden limitada al precio exacto, "
                     f"fuera de sesion regular).")
-                orden = LimitOrderRequest(symbol=ticker, qty=cantidad, limit_price=precio_limite,
+                orden = LimitOrderRequest(symbol=ticker, qty=cantidad_a_vender, limit_price=precio_limite,
                                            side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
                                            extended_hours=True)
             else:
-                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, {motivo} -> VENDIENDO (orden a mercado).")
-                orden = MarketOrderRequest(symbol=ticker, qty=cantidad, side=OrderSide.SELL,
+                log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, {motivo} -> "
+                    f"{etiqueta_accion} de {cantidad_a_vender:g} (orden a mercado).")
+                orden = MarketOrderRequest(symbol=ticker, qty=cantidad_a_vender, side=OrderSide.SELL,
                                             time_in_force=TimeInForce.DAY)
 
             cancelar_ordenes_abiertas(ticker)
@@ -973,13 +1051,14 @@ def revisar_ventas():
             estado = esperar_estado_final_orden(trade.id)
             log(f"VENTAS: {ticker} - orden colocada, estado: {estado}")
             if estado == "filled":
-                cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_actual)
+                cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_a_vender, precio_actual)
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct)
-                notificar_telegram(f"🔴 VENTA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
+                notificar_telegram(f"🔴 {etiqueta_accion} <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
                                     f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
                                     f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
-                _maximo_beneficio_neto_por_posicion.pop(ticker, None)
+                if accion == "VENTA_TOTAL":
+                    cerrar_seguimiento_venta(ticker)
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
 
@@ -1019,6 +1098,16 @@ def revisar_ventas_cripto():
     (estimar_comision_cripto_alpaca), a diferencia de las acciones (sin
     comision, ver mas arriba)."""
     posiciones = [p for p in obtener_posiciones() if es_cripto(p.symbol)]
+
+    # Poda del maximo/salida-parcial trackeados, solo para tickers de CRIPTO
+    # (ver el comentario equivalente en revisar_ventas() - acciones-; ambas
+    # funciones comparten el mismo dict/set pero podan cada una su propio
+    # subconjunto, en su propio ciclo).
+    tickers_cripto_vivos = {p.symbol for p in posiciones}
+    for ticker_viejo in list(_maximo_beneficio_neto_por_posicion.keys()):
+        if es_cripto(ticker_viejo) and ticker_viejo not in tickers_cripto_vivos:
+            cerrar_seguimiento_venta(ticker_viejo)
+
     if not posiciones:
         return  # silencioso: se llama cada ciclo, no tiene sentido repetir "no hay posiciones"
 
@@ -1046,37 +1135,51 @@ def revisar_ventas_cripto():
             info_posicion = (f"{cantidad:g} unidades, precio medio {coste_medio:.4f} USD, "
                               f"comision estimada {comision_total:.2f} USD")
 
-            if beneficio_pct < UMBRAL_BENEFICIO_CRYPTO_PCT:
+            # Mismo criterio que acciones (trailing stop + refuerzo de 2
+            # velas + salida parcial, peticion del usuario, sept. 2026), con
+            # el umbral y la comision propios de cripto.
+            accion, motivo = decidir_accion_venta(ticker, beneficio_pct, UMBRAL_BENEFICIO_CRYPTO_PCT)
+
+            if accion == "MANTENER" and beneficio_pct >= UMBRAL_BENEFICIO_CRYPTO_PCT:
+                if macd_5min_bajista_cripto_2_velas(ticker):
+                    accion, motivo = "VENTA_TOTAL", "2 velas de 5min bajistas seguidas"
+
+            if accion == "MANTENER":
                 log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
+                    f"(bruto {beneficio_pct_bruto:.2f}%) {motivo} -> se mantiene.")
                 continue
 
-            bajista = macd_5min_bajista_cripto(ticker)
-            if bajista is None:
-                log(f"VENTAS: {ticker} - {info_posicion} - datos insuficientes para MACD 5min, se mantiene por precaucion.")
-                continue
+            cantidad_a_vender = cantidad
+            if accion == "VENTA_PARCIAL":
+                parcial = round(cantidad * PORCENTAJE_SCALE_OUT, DECIMALES_FRACCION_CRIPTO)
+                valor_parcial = parcial * precio_actual
+                if parcial <= 0 or parcial >= cantidad or valor_parcial < VALOR_MINIMO_OPERACION_CRIPTO_USD:
+                    # Cantidad/importe demasiado pequeños para dividir con
+                    # sentido: se vende todo de una vez en su lugar.
+                    accion, cantidad_a_vender = "VENTA_TOTAL", cantidad
+                else:
+                    cantidad_a_vender = parcial
 
-            if not bajista:
-                log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
-                continue
-
+            etiqueta_accion = "VENTA PARCIAL" if accion == "VENTA_PARCIAL" else "VENTA"
             precio_limite = calcular_precio_limite_venta(precio_actual)
             log(f"VENTAS: {ticker} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden limitada IOC).")
+                f"(bruto {beneficio_pct_bruto:.2f}%), {motivo} -> {etiqueta_accion} de {cantidad_a_vender:g} "
+                f"(orden limitada IOC).")
             cancelar_ordenes_abiertas(ticker)
-            orden = LimitOrderRequest(symbol=ticker, qty=cantidad, limit_price=precio_limite,
+            orden = LimitOrderRequest(symbol=ticker, qty=cantidad_a_vender, limit_price=precio_limite,
                                        side=OrderSide.SELL, time_in_force=TimeInForce.IOC)
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"VENTAS: {ticker} - orden limitada IOC a {precio_limite} USD, estado: {estado}")
             if estado == "filled":
-                cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_limite)
+                cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_a_vender, precio_limite)
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct)
-                notificar_telegram(f"🔴 VENTA <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "
+                notificar_telegram(f"🔴 {etiqueta_accion} <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "
                                     f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
                                     f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
+                if accion == "VENTA_TOTAL":
+                    cerrar_seguimiento_venta(ticker)
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion cripto: {type(e).__name__}: {e}. Se omite.")
 

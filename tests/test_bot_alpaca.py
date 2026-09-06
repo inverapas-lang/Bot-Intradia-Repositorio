@@ -54,10 +54,10 @@ todas_alcistas = {tf["nombre"]: True for tf in bot.TEMPORALIDADES}
 check("decidir_senal: las 7 temporalidades alcistas -> COMPRA",
       bot.decidir_senal(todas_alcistas) == "COMPRA")
 
-cuatro_cortas_alcistas_resto_bajista = {tf["nombre"]: (tf["nombre"] in bot.NOMBRES_4_CORTAS)
-                                         for tf in bot.TEMPORALIDADES}
-check("decidir_senal: atajo de 4 cortas alcistas (resto bajista) -> COMPRA directa",
-      bot.decidir_senal(cuatro_cortas_alcistas_resto_bajista) == "COMPRA")
+cuatro_cortas_alcistas_1h_bajista = dict(todas_alcistas)
+cuatro_cortas_alcistas_1h_bajista["1 hora"] = False  # fuera del atajo (no esta en NOMBRES_4_CORTAS)
+check("decidir_senal: atajo de 4 cortas alcistas (1h bajista, largas OK) -> COMPRA directa",
+      bot.decidir_senal(cuatro_cortas_alcistas_1h_bajista) == "COMPRA")
 
 falta_una_temporalidad = dict(todas_alcistas)
 falta_una_temporalidad["1 semana"] = None
@@ -65,10 +65,29 @@ falta_una_temporalidad["1 minuto"] = False  # rompe el atajo de 4 cortas
 check("decidir_senal: falta un dato (no en las 4 cortas) -> SIN_DATOS",
       bot.decidir_senal(falta_una_temporalidad) == "SIN_DATOS")
 
-una_en_contra = dict(todas_alcistas)
-una_en_contra["1 dia"] = False
-check("decidir_senal: 1 de 7 en contra (fuera del atajo, resto ok) -> COMPRA",
-      bot.decidir_senal(una_en_contra) == "COMPRA")
+una_corta_en_contra = dict(todas_alcistas)
+una_corta_en_contra["1 minuto"] = False  # rompe el atajo de 4 cortas, pero es un retroceso normal
+check("decidir_senal: 1 de 7 en contra y es CORTA (retroceso normal) -> COMPRA",
+      bot.decidir_senal(una_corta_en_contra) == "COMPRA")
+
+# --- Bug real corregido (sept. 2026, petición del usuario): antes, el
+# atajo de "4 cortas alcistas" ignoraba por completo dia/semana, asi que
+# compraba igual aunque la tendencia diaria o semanal fuera claramente
+# bajista -la peor categoria de entrada, contra la tendencia dominante-. Y
+# como el atajo se adelanta a la regla de "1 de 7 en contra", esta ultima
+# NUNCA llegaba a aplicarse en este caso exacto (con las 4 cortas alcistas,
+# lo mas habitual). Ahora el atajo TAMBIEN exige que ninguna larga este en
+# contra. ---
+una_larga_en_contra = dict(todas_alcistas)
+una_larga_en_contra["1 dia"] = False  # las 4 cortas siguen alcistas, pero la diaria no
+check("decidir_senal: 1 de 7 en contra y es LARGA (dia) -> BLOQUEADO_TF_LARGA, NO compra "
+      "(antes: bug que compraba igual via el atajo de 4 cortas)",
+      bot.decidir_senal(una_larga_en_contra) == "BLOQUEADO_TF_LARGA")
+
+una_semana_en_contra = dict(todas_alcistas)
+una_semana_en_contra["1 semana"] = False
+check("decidir_senal: 1 de 7 en contra y es LARGA (semana) -> BLOQUEADO_TF_LARGA, NO compra",
+      bot.decidir_senal(una_semana_en_contra) == "BLOQUEADO_TF_LARGA")
 
 # NOTA: "BLOQUEADO" (cortas ok, largas no) es un resultado que, con las 4
 # cortas dentro de NOMBRES_4_CORTAS, en la practica ya no puede darse: el
@@ -524,49 +543,103 @@ finally:
 check("criterio de venta: por debajo de UMBRAL_BENEFICIO_PCT, NO vende aunque el refuerzo este activo",
       ordenes_bajo_umbral == [], f"ordenes={ordenes_bajo_umbral}")
 
-# El refuerzo (2 velas bajistas) SI puede vender por si solo, en el umbral
-# exacto (retroceso=0).
+# Salida parcial (peticion del usuario, sept. 2026): la PRIMERA vez que se
+# alcanza el umbral (retroceso=0, sin refuerzo necesario), se vende
+# PORCENTAJE_SCALE_OUT de la posicion, dejando el resto corriendo.
+bot.macd_5min_bajista_2_velas = lambda ticker: False  # refuerzo inactivo: la parcial no depende de el
 bot._maximo_beneficio_neto_por_posicion = {}
-bot._trading_client = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._scale_out_realizado = set()
+cliente_parcial = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._trading_client = cliente_parcial
 bot._data_client = _DataClientPrecioFijo(100.5)  # justo en el umbral, retroceso=0
 try:
     con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
 finally:
-    ordenes_refuerzo = bot._trading_client.ordenes
     bot._trading_client = trading_client_original
     bot._data_client = data_client_original
-check("criterio de venta: en el umbral exacto (retroceso=0) el refuerzo de 2 velas SI puede vender",
-      len(ordenes_refuerzo) == 1, f"ordenes={ordenes_refuerzo}")
-check("criterio de venta: tras una venta confirmada, se olvida el maximo trackeado de esa posicion",
+check("criterio de venta: primera vez en el umbral (retroceso=0) -> SALIDA PARCIAL, sin refuerzo ni retroceso",
+      len(cliente_parcial.ordenes) == 1, f"ordenes={cliente_parcial.ordenes}")
+if cliente_parcial.ordenes:
+    check("criterio de venta: la salida parcial vende la MITAD (5 de 10 acciones)",
+          abs(cliente_parcial.ordenes[0].qty - 5) < 1e-9, f"qty={cliente_parcial.ordenes[0].qty}")
+check("criterio de venta: tras la salida parcial, el maximo SIGUE trackeado (queda posicion corriendo)",
+      "TRAIL" in bot._maximo_beneficio_neto_por_posicion,
+      f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# Refuerzo (2 velas bajistas) SI puede disparar la VENTA TOTAL del resto, ya
+# con la parcial hecha, sin necesidad de retroceso del trailing.
+bot.macd_5min_bajista_2_velas = lambda ticker: True  # refuerzo activo otra vez
+bot._trading_client = cliente_parcial
+bot._data_client = _DataClientPrecioFijo(100.5)  # mismo precio, sin retroceso
+cliente_parcial.ordenes = []
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+check("criterio de venta: con la parcial ya hecha, el refuerzo de 2 velas SI vende el resto (total)",
+      len(cliente_parcial.ordenes) == 1, f"ordenes={cliente_parcial.ordenes}")
+check("criterio de venta: tras la venta total del resto, se olvida el maximo trackeado",
       "TRAIL" not in bot._maximo_beneficio_neto_por_posicion,
       f"cache={bot._maximo_beneficio_neto_por_posicion}")
 
-# El trailing stop SI puede vender por si solo, sin refuerzo, cuando el
-# beneficio retrocede TRAILING_STOP_VENTA_PCT puntos desde el maximo.
+# El trailing stop SI puede vender el resto por si solo, sin refuerzo,
+# cuando el beneficio retrocede TRAILING_STOP_VENTA_PCT puntos desde el
+# maximo (despues de que la salida parcial ya se hiciera).
 bot.macd_5min_bajista_2_velas = lambda ticker: False  # refuerzo siempre "inactivo"
 bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 cliente_trailing = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
 bot._trading_client = cliente_trailing
 try:
-    bot._data_client = _DataClientPrecioFijo(100.5)  # +0.5%: arma el trailing, retroceso=0
+    bot._data_client = _DataClientPrecioFijo(100.5)  # +0.5%: arma el trailing -> SALIDA PARCIAL
     con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
-    check("criterio de venta: al armar el trailing (retroceso=0) sin refuerzo, NO vende todavia",
-          cliente_trailing.ordenes == [], f"ordenes={cliente_trailing.ordenes}")
+    check("criterio de venta: al armar el trailing (retroceso=0) sin refuerzo, hace la SALIDA PARCIAL (no total)",
+          len(cliente_trailing.ordenes) == 1, f"ordenes={cliente_trailing.ordenes}")
 
+    cliente_trailing.ordenes = []
     bot._data_client = _DataClientPrecioFijo(101.02)  # +1.02%: nuevo maximo, sigue sin retroceso
     con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
-    check("criterio de venta: nuevo maximo alcanzado (+1.02%), sigue sin retroceso -> NO vende",
+    check("criterio de venta: nuevo maximo alcanzado (+1.02%), sigue sin retroceso -> NO vende mas",
           cliente_trailing.ordenes == [], f"ordenes={cliente_trailing.ordenes}")
 
     bot._data_client = _DataClientPrecioFijo(100.71)  # +0.71%: retroceso de 0.31 pts desde el maximo -> dispara
     con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
-    check("criterio de venta: retrocede >=0.3 pts desde el maximo (1.02% -> 0.71%) -> SI vende (trailing stop)",
+    check("criterio de venta: retrocede >=0.3 pts desde el maximo (1.02% -> 0.71%) -> SI vende el resto (trailing stop)",
           len(cliente_trailing.ordenes) == 1, f"ordenes={cliente_trailing.ordenes}")
 finally:
     bot._trading_client = trading_client_original
     bot._data_client = data_client_original
     bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
     bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+
+# ---------------------------------------------------------------------------
+# 8c. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.
+#     2026) -antes usaba una orden limitada, ahora prioriza la ejecucion
+#     garantizada antes del cierre-.
+# ---------------------------------------------------------------------------
+en_venta_forzada_original_alpaca = bot.en_ventana_venta_forzada
+bot.en_ventana_venta_forzada = lambda: True  # forzar "dentro de los ultimos 15 min antes del cierre"
+bot._maximo_beneficio_neto_por_posicion = {}
+cliente_venta_forzada = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._trading_client = cliente_venta_forzada
+bot._data_client = _DataClientPrecioFijo(101.0)  # +1.0% bruto: dentro del rango 0.5%-2%
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.en_ventana_venta_forzada = en_venta_forzada_original_alpaca
+    bot._maximo_beneficio_neto_por_posicion = {}
+
+check("venta forzada: coloca exactamente una orden",
+      len(cliente_venta_forzada.ordenes) == 1, f"ordenes={cliente_venta_forzada.ordenes}")
+if cliente_venta_forzada.ordenes:
+    check("venta forzada: la orden es A MERCADO, no limitada",
+          cliente_venta_forzada.ordenes[0].type.value == "market",
+          f"type={cliente_venta_forzada.ordenes[0].type}")
 
 
 # ---------------------------------------------------------------------------
@@ -627,18 +700,24 @@ def _fake_crypto_data_client_alcista():
 
 crypto_data_client_original = bot._crypto_data_client
 macd_5min_bajista_cripto_original = bot.macd_5min_bajista_cripto
+macd_5min_bajista_cripto_2_velas_original = bot.macd_5min_bajista_cripto_2_velas
 
-# --- revisar_ventas_cripto: beneficio neto claramente por encima del umbral -> vende ---
+# --- revisar_ventas_cripto: beneficio neto claramente por encima del umbral
+#     -> primera vez en el umbral (retroceso=0): SALIDA PARCIAL (50%), no el
+#     100% (peticion del usuario, sept. 2026: mismo trailing stop + salida
+#     parcial que acciones, extendido a cripto). ---
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 bot._trading_client = _TradingClientFalso(posiciones=[posicion_cripto_btc])
 bot._crypto_data_client = _fake_crypto_data_client_precio(55000.0)  # +10% sobre coste medio (50000)
-bot.macd_5min_bajista_cripto = lambda ticker: True
+bot.macd_5min_bajista_cripto_2_velas = lambda ticker: False  # refuerzo inactivo: la parcial no depende de el
 try:
     bot.revisar_ventas_cripto()
 finally:
     ordenes_venta_cripto = bot._trading_client.ordenes
     bot._trading_client = trading_client_original
     bot._crypto_data_client = crypto_data_client_original
-    bot.macd_5min_bajista_cripto = macd_5min_bajista_cripto_original
+    bot.macd_5min_bajista_cripto_2_velas = macd_5min_bajista_cripto_2_velas_original
 
 check("revisar_ventas_cripto: coloca exactamente una orden",
       len(ordenes_venta_cripto) == 1, f"ordenes={ordenes_venta_cripto}")
@@ -648,8 +727,13 @@ if ordenes_venta_cripto:
           orden_venta_cripto.type.value == "limit", f"type={orden_venta_cripto.type}")
     check("revisar_ventas_cripto: time_in_force es IOC (Alpaca no admite DAY en cripto)",
           orden_venta_cripto.time_in_force.value == "ioc", f"tif={orden_venta_cripto.time_in_force}")
-    check("revisar_ventas_cripto: usa qty fraccionario nativo (0.01)",
-          abs(orden_venta_cripto.qty - 0.01) < 1e-9, f"qty={orden_venta_cripto.qty}")
+    check("revisar_ventas_cripto: primera vez en el umbral -> SALIDA PARCIAL (0.005, la mitad de 0.01)",
+          abs(orden_venta_cripto.qty - 0.005) < 1e-9, f"qty={orden_venta_cripto.qty}")
+    check("revisar_ventas_cripto: tras la salida parcial, el maximo SIGUE trackeado",
+          "BTC/USD" in bot._maximo_beneficio_neto_por_posicion,
+          f"cache={bot._maximo_beneficio_neto_por_posicion}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 
 # --- revisar_ventas_cripto: beneficio bruto pequeño que, tras la comision
 #     REAL de Alpaca (0.25% x 2), queda neto por debajo del umbral -> NO
@@ -658,16 +742,20 @@ posicion_cripto_umbral = types.SimpleNamespace(
     symbol="BTC/USD", qty="0.01", avg_entry_price="50000.0", market_value="500.0",
     unrealized_pl="0.0", unrealized_plpc="0.0",
 )
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 bot._trading_client = _TradingClientFalso(posiciones=[posicion_cripto_umbral])
 bot._crypto_data_client = _fake_crypto_data_client_precio(50050.0)  # +0.1% bruto
-bot.macd_5min_bajista_cripto = lambda ticker: True
+bot.macd_5min_bajista_cripto_2_velas = lambda ticker: True
 try:
     bot.revisar_ventas_cripto()
 finally:
     ordenes_venta_cripto_bajo_umbral = bot._trading_client.ordenes
     bot._trading_client = trading_client_original
     bot._crypto_data_client = crypto_data_client_original
-    bot.macd_5min_bajista_cripto = macd_5min_bajista_cripto_original
+    bot.macd_5min_bajista_cripto_2_velas = macd_5min_bajista_cripto_2_velas_original
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
 
 check("revisar_ventas_cripto: con beneficio neto por debajo del umbral tras comision real, NO vende",
       len(ordenes_venta_cripto_bajo_umbral) == 0, f"ordenes={ordenes_venta_cripto_bajo_umbral}")

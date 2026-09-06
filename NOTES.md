@@ -113,10 +113,22 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
        cada pocos minutos, esto reduce las peticiones a IBKR en torno a un 25-30% (2 de 7
        temporalidades dejan de pedirse en la mayoría de ciclos), evitando pacing
        violations que antes se camuflaban como "sin datos en el intento 1/3".
-   - `COMPRA` si las 7 están a favor, o como mucho 1 de 7 en contra.
-   - **Atajo añadido**: si las 4 más cortas (1min/5min/15min/30min) están todas a favor →
-     `COMPRA` directa, sin mirar el resto. Efecto colateral: el viejo resultado `BLOQUEADO`
-     (cortas ok, largas no) ya no puede darse, porque el atajo dispara antes.
+   - `COMPRA` si las 7 están a favor, o como mucho 1 de 7 en contra **y esa única discrepancia
+     es una temporalidad CORTA** (1min-1h) — **bug real corregido (sept. 2026, petición del
+     usuario)**: antes, si la única en contra era la diaria o semanal, se compraba igual
+     (se trataba exactamente igual que "1 minuto en contra"), es decir, se entraba
+     **contra la tendencia dominante**, la peor categoría de entrada posible. Ahora, si la
+     única discrepancia es una larga (día o semana), la decisión es `BLOQUEADO_TF_LARGA` en
+     vez de `COMPRA`.
+   - **Atajo de 4 cortas alcistas, con el mismo arreglo**: si las 4 más cortas
+     (1min/5min/15min/30min) están todas a favor → `COMPRA` directa, sin mirar 1h ni la
+     regla de "1 de 7 en contra" — **pero solo si ninguna larga (día/semana) está en
+     contra**. Antes el atajo ignoraba día/semana por completo, así que este era el caso
+     MÁS habitual en el que el bug de arriba pasaba desapercibido: con las 4 cortas
+     alineadas (lo normal en una entrada), el atajo se adelantaba siempre a la regla de "1
+     de 7", que nunca llegaba a aplicarse de verdad. Con las 4 cortas alcistas pero una
+     larga en contra, ahora cae en `BLOQUEADO` (cortas_ok=True, largas_ok=False) o en
+     `BLOQUEADO_TF_LARGA` (si solo 1 larga falla), nunca en `COMPRA`.
    - Si faltan datos en alguna temporalidad → `SIN_DATOS`, no opera.
 2. Solo se analiza si el mercado de ese valor está en horario operativo.
 3. **Ventana de no-compra** (últimos 90 min antes del cierre): no compra nada salvo que ya
@@ -155,35 +167,45 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
   cripto, pero de momento solo se aplicó el trailing stop de abajo, y solo a acciones).
 - Solo actúa si el mercado de esa posición está en horario operativo (bug corregido, ver abajo).
 - Si estás en los últimos 15 min antes del cierre y el beneficio está entre 0.5% y 2% →
-  **venta forzada** con orden límite (0.2% por debajo del precio actual) — sin cambios, este
-  mecanismo es independiente del criterio de venta normal de abajo.
-- **Criterio de venta normal — trailing stop + refuerzo de 2 velas** (sustituye al antiguo
-  "beneficio ≥0.5% neto + 1 vela de 5min bajista", cambio de sept. 2026 a petición del
-  usuario: *"quiero modificar el criterio de venta: trailing stop de 0,3% como criterio
-  principal, con la vela de 5 min bajista como señal secundaria de refuerzo (2 velas
-  seguidas en bajista)"*. Solo se aplica a ACCIONES (US/HK/KR); CRIPTO sigue con su
-  criterio propio sin cambios (umbral neto 0.3% + 1 vela bajista), decisión explícita del
-  usuario al confirmar el alcance del cambio):
-  - Se trackea en memoria (`_maximo_beneficio_neto_por_posicion`, clave
-    `mercado:ticker`) el beneficio NETO máximo alcanzado por cada posición desde que se
-    abrió (ya descontada la comisión de compra+venta — `UMBRAL_BENEFICIO_PCT=0.5%` sigue
-    siendo neto, sin cambios en ese cálculo).
-  - **Trailing stop (principal)**: solo se "arma" una vez el máximo neto alcanza
-    `UMBRAL_BENEFICIO_PCT` (0.5%). A partir de ahí, si el beneficio actual retrocede
-    `TRAILING_STOP_VENTA_PCT` (0.3 puntos) o más desde ese máximo, vende — sea cual sea el
-    beneficio en ese momento (incluso si ya cayó a pérdida: una vez armado, protege lo
-    ganado sin límite inferior).
-  - **Refuerzo (secundario)**: si el beneficio neto actual YA está en `UMBRAL_BENEFICIO_PCT`
-    o por encima, y las **2 últimas velas de 5 min seguidas** tienen MACD bajista
-    (`macd_5min_bajista_2_velas`/`macd_5min_bajista_2_velas`, no solo la última como antes —
-    filtra el ruido de una vela bajista suelta que resulta ser solo una pausa), también
-    vende, aunque el trailing no haya retrocedido todavía.
-  - Ninguno de los dos puede vender por debajo de `UMBRAL_BENEFICIO_PCT`: el mínimo de
-    beneficio neto deseado sigue protegido en todo momento.
-  - El máximo trackeado se olvida (`.pop()`) en cuanto la venta se confirma `Filled`, y se
-    poda al principio de cada ciclo cualquier ticker que ya no esté entre las posiciones
-    abiertas (vendido del todo, dentro o fuera del bot) — si se vuelve a comprar más
-    adelante, el trailing empieza de cero.
+  **venta forzada, A MERCADO** (cambio sept. 2026, petición del usuario: antes era una orden
+  límite 0.2% por debajo del precio, arriesgándose a no ejecutarse a tiempo antes del cierre;
+  ahora prioriza la ejecución garantizada sobre el pequeño margen de precio) — este mecanismo
+  es independiente del criterio de venta normal de abajo.
+- **Criterio de venta normal — trailing stop + refuerzo de 2 velas + salida parcial**
+  (sustituye al antiguo "beneficio ≥umbral neto + 1 vela de 5min bajista", cambio de sept.
+  2026 a petición del usuario. Se aplica por igual a ACCIONES (US/HK/KR, umbral
+  `UMBRAL_BENEFICIO_PCT=0.5%`) y a CRIPTO (umbral `UMBRAL_BENEFICIO_CRYPTO_PCT=0.3%`, extendido
+  después de haberlo probado primero solo en acciones) — misma lógica compartida vía
+  `decidir_accion_venta()`, cada mercado con su propio umbral y su propia comisión ya
+  restada del beneficio neto:
+  - Se trackea en memoria (`_maximo_beneficio_neto_por_posicion`, clave `mercado:ticker`) el
+    beneficio NETO máximo alcanzado por cada posición desde que se abrió.
+  - **Salida parcial** (nueva, petición del usuario: *"vender la mitad al primer objetivo,
+    dejar correr el resto con trailing stop"*): la PRIMERA vez que el máximo neto alcanza el
+    umbral (`_scale_out_realizado`, una sola vez por posición), se vende
+    `PORCENTAJE_SCALE_OUT` (50%) de la posición para asegurar beneficio ya, dejando el resto
+    corriendo — mejora el beneficio medio por operación sin cambiar el perfil de riesgo, en
+    vez del viejo "todo o nada". Si la cantidad/importe restante es demasiado pequeño para
+    dividir con sentido (por debajo del incremento/mínimo del exchange en cripto, o ≥ la
+    cantidad total en acciones), se vende todo de una vez en su lugar.
+  - **Trailing stop (principal, vende el 100% de lo que quede)**: una vez armado (máximo neto
+    ≥ umbral), si el beneficio actual retrocede `TRAILING_STOP_VENTA_PCT` (0.3 puntos) o más
+    desde ese máximo, vende TODO lo que quede — sea cual sea el beneficio en ese momento
+    (incluso si ya cayó a pérdida: una vez armado, protege lo ganado sin límite inferior).
+  - **Refuerzo (secundario, también vende el 100% de lo que quede)**: si el beneficio neto
+    actual YA está en el umbral o por encima, y las **2 últimas velas de 5 min seguidas**
+    tienen MACD bajista (`macd_5min_bajista_2_velas`/`macd_5min_bajista_cripto_2_velas`, no
+    solo la última como antes — filtra el ruido de una vela bajista suelta que resulta ser
+    solo una pausa), también vende TODO lo que quede, aunque el trailing no haya
+    retrocedido todavía.
+  - Ninguno de los tres (parcial, trailing, refuerzo) puede vender por debajo del umbral: el
+    mínimo de beneficio neto deseado sigue protegido en todo momento.
+  - El máximo trackeado y la marca de salida parcial se olvidan (`cerrar_seguimiento_venta()`)
+    SOLO tras una venta TOTAL (trailing o refuerzo), nunca tras una parcial — y se podan al
+    principio de cada ciclo para cualquier ticker que ya no esté entre las posiciones
+    abiertas. En Alpaca, acciones y cripto comparten el mismo dict/set (dos cadencias
+    distintas, 130s vs 60s) sin colisión de claves, y cada función poda solo su propio
+    subconjunto (por `es_cripto()`) para no borrarle el seguimiento a la otra.
 - Si el estado de la orden no confirma `Filled`, igual que en compras: se reconsulta la
   posición real para dar un veredicto fiable en el log.
 - En **postmercado de US** SÍ se vende con normalidad (con orden límite, ver sección dedicada

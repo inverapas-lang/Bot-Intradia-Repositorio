@@ -272,17 +272,21 @@ class _IBFalso:
 activo_prueba = {"ticker": "TEST", "exchange": "SMART", "currency": "USD", "mercado": "US"}
 
 # Serie alcista LINEAL (pendiente constante), 60 puntos: las 5 temporalidades
-# cortas (incluida 1h) dan alcista, así que el atajo de las "4 cortas
-# alcistas" (1min/5min/15min/30min) ya compra directamente, SIN mirar si las
-# largas (dia/semana) confirman con momentum acelerando. Con esta regla, el
-# viejo resultado "BLOQUEADO" (cortas ok pero largas no) ya no puede darse:
-# en cuanto las cortas estan alineadas, el atajo compra antes de llegar ahi.
+# cortas (incluida 1h) dan alcista, pero la pendiente CONSTANTE (sin
+# acelerar) hace que el histograma de las largas (dia/semana) salga
+# "decreciente" -> bajista (ver SERIE_ACELERANDO_ALTA/BAJA mas abajo).
+# Peticion del usuario (sept. 2026): el atajo de "4 cortas alcistas" TAMBIEN
+# exige que ninguna larga este en contra, asi que aqui NO debe activarse
+# (bug real corregido: antes el atajo ignoraba las largas por completo y
+# compraba igual). Con las 4 cortas alineadas pero las largas en contra,
+# cae en BLOQUEADO (cortas_ok=True, largas_ok=False).
 precios_lineal = [100 + i * 0.3 for i in range(60)]
 ib_falso_lineal = _IBFalso(precios_lineal)
 bot._cache_temporalidades_largas = {}
 _, decision_lineal = bot.analizar_activo(ib_falso_lineal, activo_prueba)
-check("analizar_activo: 4 cortas alcistas (aunque las largas no aceleren) -> COMPRA por atajo",
-      decision_lineal == "COMPRA", f"decision={decision_lineal}")
+check("analizar_activo: 4 cortas alcistas pero largas en contra (lineal, sin acelerar) -> "
+      "BLOQUEADO, NO compra por el atajo (bug corregido)",
+      decision_lineal == "BLOQUEADO", f"decision={decision_lineal}")
 
 # Serie alcista que ACELERA (curva exponencial): tambien COMPRA (por el
 # atajo Y por la regla larga, ambas coinciden aqui).
@@ -306,6 +310,10 @@ SERIE_BAJISTA = [100 - i * 0.3 for i in range(60)]
 # pendiente constante, asi que una caida lineal puede dar histograma
 # "creciente" igual que una subida lineal).
 SERIE_ACELERANDO_BAJA = [300 - 100 * (1.02 ** i) for i in range(60)]
+# Para las temporalidades largas, "a favor" tampoco basta con una simple
+# subida lineal (mismo motivo que arriba, en sentido contrario): hace falta
+# aceleracion ALCISTA real para que el histograma salga "creciente".
+SERIE_ACELERANDO_ALTA = [100 * (1.02 ** i) for i in range(60)]
 
 
 class _IBPorTemporalidad:
@@ -329,17 +337,18 @@ class _IBPorTemporalidad:
         return []
 
 
-# Las 4 cortas alcistas, pero 1 hora y las largas BAJISTAS: el atajo debe
-# ganar y dar COMPRA, aunque con la logica antigua (sin atajo) esto habria
-# dado SIN_SENAL (cortas_ok=False porque 1h esta en contra).
+# Las 4 cortas alcistas y 1 hora BAJISTA, pero dia/semana ALCISTAS (sin
+# tendencia larga en contra): el atajo debe ganar y dar COMPRA, aunque con
+# la logica antigua (sin atajo) esto habria dado SIN_SENAL (cortas_ok=False
+# porque 1h esta en contra).
 series_atajo = {
     "1 min": SERIE_ALCISTA, "5 mins": SERIE_ALCISTA, "15 mins": SERIE_ALCISTA,
     "30 mins": SERIE_ALCISTA,
-    "1 hour": SERIE_BAJISTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
+    "1 hour": SERIE_BAJISTA, "1 day": SERIE_ACELERANDO_ALTA, "1 week": SERIE_ACELERANDO_ALTA,
 }
 bot._cache_temporalidades_largas = {}
 _, decision_atajo = bot.analizar_activo(_IBPorTemporalidad(series_atajo), activo_prueba)
-check("analizar_activo: 4 cortas alcistas + 1h/dia/semana bajistas -> COMPRA (el atajo manda)",
+check("analizar_activo: 4 cortas alcistas + 1h bajista, dia/semana OK -> COMPRA (el atajo manda)",
       decision_atajo == "COMPRA", f"decision={decision_atajo}")
 
 # Si SOLO una de las 4 cortas requeridas esta bajista (p.ej. 1 minuto), el
@@ -356,6 +365,25 @@ _, decision_sin_atajo = bot.analizar_activo(_IBPorTemporalidad(series_sin_atajo)
 check("analizar_activo: si UNA de las 4 cortas esta bajista (y 3 de 7 en contra "
       "en total) -> el atajo no se activa y tampoco compra por la regla vieja",
       decision_sin_atajo == "SIN_SENAL", f"decision={decision_sin_atajo}")
+
+# --- Bug real corregido (sept. 2026, petición del usuario): antes, el
+# atajo de "4 cortas alcistas" ignoraba por completo dia/semana, asi que
+# compraba igual aunque la tendencia diaria o semanal fuera claramente
+# bajista -la peor categoria de entrada, contra la tendencia dominante-. Y
+# como el atajo se adelanta a la regla de "1 de 7 en contra", esta ultima
+# NUNCA llegaba a aplicarse en este caso exacto (con las 4 cortas alcistas,
+# lo mas habitual). Ahora el atajo TAMBIEN exige que ninguna larga este en
+# contra. ---
+series_larga_en_contra = {
+    "1 min": SERIE_ALCISTA, "5 mins": SERIE_ALCISTA, "15 mins": SERIE_ALCISTA,
+    "30 mins": SERIE_ALCISTA,
+    "1 hour": SERIE_ACELERANDO_ALTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_ALTA,
+}
+bot._cache_temporalidades_largas = {}
+_, decision_larga_en_contra = bot.analizar_activo(_IBPorTemporalidad(series_larga_en_contra), activo_prueba)
+check("analizar_activo: 4 cortas alcistas pero 'dia' bajista -> BLOQUEADO_TF_LARGA, NO compra "
+      "(antes: bug que compraba igual via el atajo de 4 cortas)",
+      decision_larga_en_contra == "BLOQUEADO_TF_LARGA", f"decision={decision_larga_en_contra}")
 
 
 # ---------------------------------------------------------------------------
@@ -1446,12 +1474,12 @@ macd_2velas_original = bot.macd_5min_bajista_2_velas
 bot.es_horario_operativo = lambda mercado: True
 bot.en_ventana_venta_forzada = lambda mercado: False  # aislar del mecanismo de venta forzada, no es lo que se prueba aqui
 
-# --- El trailing stop SOLO se arma a partir de UMBRAL_BENEFICIO_PCT (0.5%):
-#     por debajo de eso, ni el trailing ni el refuerzo pueden vender, aunque
-#     el refuerzo "diga que si" -nunca se vende con perdida o beneficio
-#     insuficiente solo por 2 velas bajistas-.
+# --- El trailing/salida parcial SOLO se arma a partir de UMBRAL_BENEFICIO_PCT
+#     (0.5%): por debajo de eso, nada puede vender, ni el refuerzo "diga que
+#     si" -nunca se vende con perdida o beneficio insuficiente-.
 bot.macd_5min_bajista_2_velas = lambda ib, contrato: True  # refuerzo siempre "activo"
 bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 # Precios elegidos para que el beneficio NETO (ya descontada la comision de
 # compra+venta que aplica revisar_ventas) de exactamente el % querido, no
 # el bruto -ver el calculo real en el comentario de cada caso-.
@@ -1463,44 +1491,119 @@ finally:
 check("criterio de venta: por debajo de UMBRAL_BENEFICIO_PCT, NO vende aunque el refuerzo este activo",
       ib_bajo_umbral.ordenes_colocadas == [], f"ordenes={ib_bajo_umbral.ordenes_colocadas}")
 
-# --- Refuerzo (2 velas bajistas) SI puede vender por si solo, sin
-#     retroceso del trailing, en cuanto se alcanza el minimo neto. ---
+# --- Salida parcial (peticion del usuario, sept. 2026): la PRIMERA vez que
+#     se alcanza el umbral (retroceso=0, sin refuerzo necesario), se vende
+#     PORCENTAJE_SCALE_OUT de la posicion, dejando el resto corriendo -no es
+#     una venta total-. ---
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False  # refuerzo inactivo: la parcial no depende de el
 bot._maximo_beneficio_neto_por_posicion = {}
-ib_refuerzo = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto justo por encima del umbral (+0.52%), retroceso=0
+bot._scale_out_realizado = set()
+ib_parcial = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto justo por encima del umbral (+0.52%), retroceso=0
 try:
-    bot.revisar_ventas(ib_refuerzo)
+    bot.revisar_ventas(ib_parcial)
 finally:
     pass
-check("criterio de venta: en el umbral exacto (retroceso=0) el refuerzo de 2 velas SI puede vender",
-      ib_refuerzo.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_refuerzo.ordenes_colocadas}")
-check("criterio de venta: tras una venta confirmada, se olvida el maximo trackeado de esa posicion",
+check("criterio de venta: primera vez en el umbral (retroceso=0) -> SALIDA PARCIAL, sin refuerzo ni retroceso",
+      ib_parcial.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_parcial.ordenes_colocadas}")
+check("criterio de venta: tras la salida parcial, el maximo SIGUE trackeado (queda posicion corriendo)",
+      "US:TRAIL" in bot._maximo_beneficio_neto_por_posicion,
+      f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# Una segunda llamada AL MISMO precio (ya con la parcial hecha) no debe
+# volver a vender: ni hay retroceso (sigue en el maximo) ni refuerzo activo.
+ib_parcial.ordenes_colocadas = []
+bot.revisar_ventas(ib_parcial)
+check("criterio de venta: tras la salida parcial, una segunda llamada sin retroceso NO vende otra vez",
+      ib_parcial.ordenes_colocadas == [], f"ordenes={ib_parcial.ordenes_colocadas}")
+
+# --- Refuerzo (2 velas bajistas) SI puede disparar la VENTA TOTAL del resto,
+#     ya con la parcial hecha, sin necesidad de retroceso del trailing. ---
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: True  # refuerzo activo otra vez
+bot.revisar_ventas(ib_parcial)
+check("criterio de venta: con la parcial ya hecha, el refuerzo de 2 velas SI vende el resto (total)",
+      ib_parcial.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_parcial.ordenes_colocadas}")
+check("criterio de venta: tras la venta total del resto, se olvida el maximo trackeado",
       "US:TRAIL" not in bot._maximo_beneficio_neto_por_posicion,
       f"cache={bot._maximo_beneficio_neto_por_posicion}")
 
-# --- Trailing stop SI puede vender por si solo, sin refuerzo, cuando el
-#     beneficio retrocede TRAILING_STOP_VENTA_PCT puntos desde el maximo. ---
+# --- Trailing stop SI puede vender el resto por si solo, sin refuerzo,
+#     cuando el beneficio retrocede TRAILING_STOP_VENTA_PCT puntos desde el
+#     maximo (despues de que la salida parcial ya se hiciera). ---
 bot.macd_5min_bajista_2_velas = lambda ib, contrato: False  # refuerzo siempre "inactivo": solo puede vender el trailing
 bot._maximo_beneficio_neto_por_posicion = {}
-ib_trailing = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto +0.52%: arma el trailing, retroceso=0
+bot._scale_out_realizado = set()
+ib_trailing = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto +0.52%: arma el trailing -> SALIDA PARCIAL
 try:
     bot.revisar_ventas(ib_trailing)
-    check("criterio de venta: al armar el trailing (retroceso=0) sin refuerzo, NO vende todavia",
-          ib_trailing.ordenes_colocadas == [], f"ordenes={ib_trailing.ordenes_colocadas}")
+    check("criterio de venta: al armar el trailing (retroceso=0) sin refuerzo, hace la SALIDA PARCIAL (no total)",
+          ib_trailing.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_trailing.ordenes_colocadas}")
 
+    ib_trailing.ordenes_colocadas = []
     ib_trailing.precio_actual = 101.09  # neto +1.02%: nuevo maximo, sigue sin retroceso
     bot.revisar_ventas(ib_trailing)
-    check("criterio de venta: nuevo maximo alcanzado (+1.02%), sigue sin retroceso -> NO vende",
+    check("criterio de venta: nuevo maximo alcanzado (+1.02%), sigue sin retroceso -> NO vende mas",
           ib_trailing.ordenes_colocadas == [], f"ordenes={ib_trailing.ordenes_colocadas}")
 
     ib_trailing.precio_actual = 100.78  # neto +0.71%: 0.31 pts desde el maximo de 1.02% -> dispara
     bot.revisar_ventas(ib_trailing)
-    check("criterio de venta: retrocede >=0.3 pts desde el maximo (1.02% -> 0.71%) -> SI vende (trailing stop)",
+    check("criterio de venta: retrocede >=0.3 pts desde el maximo (1.02% -> 0.71%) -> SI vende el resto (trailing stop)",
           ib_trailing.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_trailing.ordenes_colocadas}")
 finally:
     bot.es_horario_operativo = es_horario_original_trailing
     bot.en_ventana_venta_forzada = en_venta_forzada_original
     bot.macd_5min_bajista_2_velas = macd_2velas_original
     bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+
+# ---------------------------------------------------------------------------
+# 8d. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.
+#     2026) -antes usaba una orden limitada 0.2% por debajo del precio para
+#     intentar mejorar la salida, a cambio de arriesgarse a no ejecutarse a
+#     tiempo antes del cierre; ahora prioriza la ejecucion garantizada-.
+# ---------------------------------------------------------------------------
+class _IBFalsoVentaForzada:
+    def __init__(self, avgCost, precio_actual):
+        self.ordenes_colocadas = []
+        self._posiciones = [_Posicion("FORZADA", 10, avgCost)]
+        self.precio_actual = precio_actual
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(self.precio_actual)]
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"), isDone=lambda: True)
+
+
+es_horario_original_forzada = bot.es_horario_operativo
+en_venta_forzada_original_2 = bot.en_ventana_venta_forzada
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: True  # forzar "dentro de los ultimos 15 min antes del cierre"
+bot._maximo_beneficio_neto_por_posicion = {}
+ib_venta_forzada = _IBFalsoVentaForzada(avgCost=100, precio_actual=101.0)  # +1.0% bruto: dentro del rango 0.5%-2%
+try:
+    bot.revisar_ventas(ib_venta_forzada)
+finally:
+    bot.es_horario_operativo = es_horario_original_forzada
+    bot.en_ventana_venta_forzada = en_venta_forzada_original_2
+    bot._maximo_beneficio_neto_por_posicion = {}
+
+check("venta forzada: coloca exactamente una orden",
+      len(ib_venta_forzada.ordenes_colocadas) == 1, f"ordenes={ib_venta_forzada.ordenes_colocadas}")
+if ib_venta_forzada.ordenes_colocadas:
+    check("venta forzada: la orden es A MERCADO (MKT), no limitada",
+          ib_venta_forzada.ordenes_colocadas[0].orderType == "MKT",
+          f"orderType={ib_venta_forzada.ordenes_colocadas[0].orderType}")
 
 
 # ---------------------------------------------------------------------------
@@ -1929,6 +2032,12 @@ pos_venta_btc = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCo
 macd_bajista_original_cripto = bot.macd_5min_bajista
 bot.macd_5min_bajista = lambda ib, contrato: True  # forzar señal de venta
 
+# Peticion del usuario (sept. 2026): cripto ahora usa el mismo criterio de
+# venta que acciones (trailing stop + refuerzo + SALIDA PARCIAL) - en la
+# PRIMERA vez que se alcanza el umbral (aqui +10%, muy por encima), se
+# vende solo la mitad (PORCENTAJE_SCALE_OUT), no el 100%.
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 ib_falso_ventas_cripto = _IBFalsoVentasCripto([pos_venta_btc])
 try:
     bot.revisar_ventas(ib_falso_ventas_cripto)
@@ -1942,11 +2051,37 @@ if ib_falso_ventas_cripto.ordenes_colocadas:
     orden_venta_cripto = ib_falso_ventas_cripto.ordenes_colocadas[0]
     check("revisar_ventas CRYPTO: la orden es LIMITADA (no a mercado)",
           orden_venta_cripto.orderType == "LMT", f"orderType={orden_venta_cripto.orderType}")
-    check("revisar_ventas CRYPTO: usa totalQuantity fraccionario nativo (no cashQty)",
-          abs(orden_venta_cripto.totalQuantity - 0.01) < 1e-9,
+    check("revisar_ventas CRYPTO: primera vez en el umbral -> SALIDA PARCIAL, "
+          "usa totalQuantity fraccionario nativo (no cashQty) por la MITAD de la posicion",
+          abs(orden_venta_cripto.totalQuantity - 0.005) < 1e-9,
           f"totalQuantity={orden_venta_cripto.totalQuantity}")
     check("revisar_ventas CRYPTO: accion de venta (SELL)",
           orden_venta_cripto.action == "SELL", f"action={orden_venta_cripto.action}")
+    check("revisar_ventas CRYPTO: tras la salida parcial, el maximo SIGUE trackeado "
+          "(no se olvida, queda la mitad restante corriendo con el trailing)",
+          "CRYPTO:BTC" in bot._maximo_beneficio_neto_por_posicion,
+          f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# Un segundo ciclo con el precio retrocediendo (dispara el trailing stop):
+# ahora SI debe vender la posicion COMPLETA restante (0.01, la posicion no
+# ha cambiado en este doble de prueba) y olvidar el seguimiento.
+class _IBFalsoVentasCriptoRetroceso(_IBFalsoVentasCripto):
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(50350.0)]  # +0.7% sobre 50000: retroceso claro desde el +10% maximo
+
+
+ib_falso_retroceso_cripto = _IBFalsoVentasCriptoRetroceso([pos_venta_btc])
+try:
+    bot.revisar_ventas(ib_falso_retroceso_cripto)
+finally:
+    pass
+check("revisar_ventas CRYPTO: tras retroceder, VENTA TOTAL de lo que queda (trailing stop)",
+      len(ib_falso_retroceso_cripto.ordenes_colocadas) == 1
+      and abs(ib_falso_retroceso_cripto.ordenes_colocadas[0].totalQuantity - 0.01) < 1e-9,
+      f"ordenes={ib_falso_retroceso_cripto.ordenes_colocadas}")
+check("revisar_ventas CRYPTO: tras la venta total, se olvida el seguimiento",
+      "CRYPTO:BTC" not in bot._maximo_beneficio_neto_por_posicion,
+      f"cache={bot._maximo_beneficio_neto_por_posicion}")
 
 # Bug real de produccion (sept. 2026): el contrato de una posicion CRYPTO
 # que llega de ib.positions() viene con exchange="" (a diferencia de las
@@ -1977,6 +2112,8 @@ class _IBFalsoVentasCriptoUmbral(_IBFalsoVentasCripto):
 
 pos_venta_btc_umbral = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCost=50000.0)
 bot.macd_5min_bajista = lambda ib, contrato: True
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 ib_falso_umbral = _IBFalsoVentasCriptoUmbral([pos_venta_btc_umbral])
 try:
     bot.revisar_ventas(ib_falso_umbral)
@@ -2019,6 +2156,8 @@ check("revisar_compras con mercados={'CRYPTO'}: solo opera BTC, ignora AAPL (mer
 pos_venta_aapl_filtro = _Posicion("AAPL", 5, 190.0)
 pos_venta_btc_filtro = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCost=50000.0)
 bot.macd_5min_bajista = lambda ib, contrato: True
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 ib_falso_ventas_filtro = _IBFalsoVentasCripto([pos_venta_aapl_filtro, pos_venta_btc_filtro])
 try:
     bot.revisar_ventas(ib_falso_ventas_filtro, mercados={"CRYPTO"})

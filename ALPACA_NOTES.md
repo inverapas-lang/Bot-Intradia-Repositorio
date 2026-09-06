@@ -114,27 +114,49 @@ Consecuencias implementadas:
   ventas fraccionarias fuera de sesión regular) está en el historial de
   git si hace falta consultarlo.
 
-### Criterio de venta de acciones: trailing stop + refuerzo de 2 velas (sept. 2026)
+### Criterio de venta: trailing stop + refuerzo de 2 velas + salida parcial (sept. 2026)
 
 Cambio a petición del usuario, idéntico en concepto al de `bot_completo.py` (misma lógica de
-MACD, no depende del bróker) — sustituye al antiguo "beneficio ≥0.5% + 1 vela de 5min
-bajista". Solo afecta a `revisar_ventas()` (acciones); `revisar_ventas_cripto()` sigue con su
-propio criterio sin cambios (umbral neto 0.3% + 1 vela bajista), por decisión explícita del
-usuario al confirmar el alcance de este cambio.
+MACD, no depende del bróker) — sustituye al antiguo "beneficio ≥umbral + 1 vela de 5min
+bajista". Se aplicó primero solo a `revisar_ventas()` (acciones), y después se **extendió
+también a `revisar_ventas_cripto()`** (petición explícita del usuario) — ambas comparten la
+misma función `decidir_accion_venta()`, cada una con su propio umbral (`UMBRAL_BENEFICIO_PCT`
+0.5% en acciones, `UMBRAL_BENEFICIO_CRYPTO_PCT` 0.3% en cripto) y su propia comisión ya
+restada del beneficio neto (0 en acciones, real de Alpaca en cripto).
 
-- `_maximo_beneficio_neto_por_posicion` (dict en memoria, clave = ticker) trackea el
-  beneficio máximo alcanzado por cada posición desde que se abrió. Como Alpaca no cobra
-  comisión en acciones, beneficio bruto = neto aquí (a diferencia de IBKR, donde sí hay que
-  descontar comisión antes de comparar con `UMBRAL_BENEFICIO_PCT`).
-- **Trailing stop (principal)**: se arma solo cuando el máximo alcanza `UMBRAL_BENEFICIO_PCT`
-  (0.5%). Desde ahí, si el beneficio actual retrocede `TRAILING_STOP_VENTA_PCT` (0.3 puntos)
-  desde ese máximo, vende — incluso si ya cayó a pérdida.
-- **Refuerzo (secundario)**: si el beneficio actual ya está en el umbral o por encima, y las
-  2 últimas velas de 5 min seguidas son bajistas (`macd_5min_bajista_2_velas`, no solo la
-  última como antes), también vende.
-- Ninguno de los dos vende por debajo de `UMBRAL_BENEFICIO_PCT`.
-- El máximo se olvida al confirmarse la venta, y se poda al principio de cada ciclo
-  cualquier ticker ya no tenido — si se recompra más tarde, el trailing empieza de cero.
+- `_maximo_beneficio_neto_por_posicion` / `_scale_out_realizado` (dict/set en memoria,
+  clave = ticker) trackean el beneficio máximo alcanzado y si ya se hizo la salida parcial
+  de cada posición desde que se abrió. Acciones y cripto **comparten** este dict/set (sin
+  colisión de claves: los símbolos de cripto llevan "/"), pero cada función (`revisar_ventas()`
+  a 130s, `revisar_ventas_cripto()` a 60s) poda solo su propio subconjunto al principio de
+  cada ciclo (filtrando por `es_cripto()`), para no borrarle el seguimiento a la otra.
+- **Salida parcial** (nueva, petición del usuario: *"vender la mitad al primer objetivo, dejar
+  correr el resto con trailing stop"*): la PRIMERA vez que el máximo neto alcanza el umbral,
+  se vende `PORCENTAJE_SCALE_OUT` (50%) de la posición para asegurar beneficio ya, dejando el
+  resto corriendo. Si la cantidad/importe restante sale demasiado pequeño para dividir con
+  sentido (por debajo de `VALOR_MINIMO_OPERACION_CRIPTO_USD` en cripto, o ≥ la cantidad total
+  en acciones), se vende todo de una vez en su lugar.
+- **Trailing stop (principal, vende el 100% de lo que quede)**: se arma solo cuando el máximo
+  alcanza el umbral. Desde ahí, si el beneficio actual retrocede `TRAILING_STOP_VENTA_PCT`
+  (0.3 puntos) desde ese máximo, vende TODO lo que quede — incluso si ya cayó a pérdida.
+- **Refuerzo (secundario, también vende el 100% de lo que quede)**: si el beneficio actual ya
+  está en el umbral o por encima, y las 2 últimas velas de 5 min seguidas son bajistas
+  (`macd_5min_bajista_2_velas` en acciones, `macd_5min_bajista_cripto_2_velas` en cripto, no
+  solo la última como antes), también vende TODO lo que quede.
+- Ninguno de los tres (parcial, trailing, refuerzo) vende por debajo del umbral.
+- El máximo y la marca de parcial se olvidan (`cerrar_seguimiento_venta()`) SOLO tras una
+  venta TOTAL, nunca tras una parcial, y se podan al principio de cada ciclo para cualquier
+  ticker ya no tenido — si se recompra más tarde, el trailing empieza de cero.
+
+### Venta forzada: a mercado, no limitada (sept. 2026)
+
+Cambio a petición del usuario: antes la venta forzada (últimos 15 min antes del cierre,
+beneficio entre 0.5% y 2%) usaba una orden LIMITADA 0.2% por debajo del precio actual, para
+intentar mejorar el precio de salida. Ahora usa una orden A MERCADO — el objetivo de la venta
+forzada es garantizar la salida antes del cierre, y la orden límite corría el riesgo de no
+ejecutarse a tiempo si el precio se alejaba del límite. Se prioriza la ejecución garantizada
+sobre el pequeño margen de precio que daba el límite anterior. Mismo cambio en
+`bot_completo.py` (acciones US/HK/KR).
 
 ### Horario
 
@@ -675,6 +697,18 @@ deliberadamente conservador: si una orden acaba rechazada, se pierde
 margen para el resto del ciclo, pero nunca se compra de más. Si `cash` no
 se puede leer (fallo de red), se omite solo esa comprobación concreta sin
 bloquear el resto del ciclo.
+
+## Bug corregido: "1 de 7 en contra" compraba contra la tendencia larga (sept. 2026)
+
+`decidir_senal()` (idéntica en concepto a `analizar_activo()` de `bot_completo.py`, ver ahí
+la explicación completa): antes, si la única temporalidad en contra era la diaria o semanal,
+se compraba igual — se trataba exactamente igual que "1 minuto en contra". Peor aún, el
+atajo de "4 cortas alcistas" ignoraba por completo día/semana, así que este bug pasaba
+desapercibido en el caso más habitual (4 cortas alineadas, que es cuando el atajo se
+adelantaba a la regla de "1 de 7" y esta última nunca llegaba a aplicarse de verdad). Ahora:
+- La excepción de "1 de 7 en contra" solo da `COMPRA` si la temporalidad discordante es
+  CORTA (1min-1h); si es larga (día/semana), da `BLOQUEADO_TF_LARGA`.
+- El atajo de 4 cortas alcistas TAMBIÉN exige que ninguna larga esté en contra.
 
 ## Pendiente / próximos pasos
 
