@@ -328,6 +328,9 @@ def vigilante_congelacion():
                   f"ninguna señal de vida. Forzando el cierre del proceso. Si no tienes un "
                   f"supervisor externo que lo reinicie automaticamente, el bot se quedara "
                   f"parado hasta que lo reinicies tu a mano.", flush=True)
+            notificar_telegram(f"🛑 El bot de Alpaca lleva {inactividad / 60:.0f} min sin dar señal de vida "
+                               f"(congelado) y se ha forzado su cierre. Comprueba que el servicio "
+                               f"bot-alpaca se reinicie solo (systemd Restart=always) o reinicialo a mano.")
             os._exit(1)
 
 
@@ -1503,16 +1506,23 @@ def generar_resumen():
 
 
 def evitar_suspension_windows():
+    """Evita que Windows suspenda/hiberne el SISTEMA mientras el bot esta
+    activo. NO fuerza la pantalla a quedarse encendida (sin
+    ES_DISPLAY_REQUIRED, peticion del usuario sept. 2026: el bot no debe
+    apagar la pantalla, esa decision es solo de la configuracion de
+    energia de Windows -en la practica no aplica en el servidor AWS/Linux
+    donde corre el bot ahora, pero se mantiene igual que bot_completo.py
+    por si se ejecuta en Windows-)."""
     try:
         import ctypes
         ES_CONTINUOUS = 0x80000000
         ES_SYSTEM_REQUIRED = 0x00000001
-        ES_DISPLAY_REQUIRED = 0x00000002
         ES_AWAYMODE_REQUIRED = 0x00000040
         ctypes.windll.kernel32.SetThreadExecutionState(
-            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_AWAYMODE_REQUIRED
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
         )
-        log("Suspension automatica de Windows desactivada mientras el bot este en marcha.")
+        log("Suspension/hibernacion automatica de Windows desactivada mientras el bot este en "
+            "marcha (la pantalla sigue su configuracion normal de energia, sin forzarla).")
     except Exception:
         pass  # no es Windows, o no se pudo aplicar; no es critico (p.ej. en un servidor Linux)
 
@@ -1609,6 +1619,8 @@ def main():
         except Exception as e:
             log(f"ERROR FATAL fuera del ciclo principal: {type(e).__name__}: {e}. "
                 f"Reiniciando el ciclo en 15 segundos...")
+            notificar_telegram(f"⚠️ <b>ERROR FATAL</b> en el bot de Alpaca: {type(e).__name__}: {e}. "
+                               f"Reiniciando el ciclo en 15s.")
             time.sleep(15)
 
 

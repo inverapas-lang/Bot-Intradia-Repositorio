@@ -131,6 +131,7 @@ ESPERA_ENTRE_INTENTOS_SEGUNDOS = 15
 UMBRAL_FALLOS_SEGUIDOS_DATOS = 8
 _fallos_seguidos_datos = 0
 _aviso_datos_caidos_emitido = False
+_aviso_reconexion_fallida_emitido = False  # evita repetir el aviso de Telegram en cada vuelta mientras siga caida
 
 # --- Reintentos de reconexion con IB Gateway tras un corte de conexion ---
 REINTENTOS_RECONEXION = 5
@@ -515,6 +516,10 @@ def vigilante_congelacion():
                   f"un supervisor externo que lo reinicie automaticamente (script .bat en bucle, "
                   f"Tarea Programada, etc.), el bot se quedara parado hasta que lo reinicies tu "
                   f"a mano.", flush=True)
+            notificar_telegram(f"🛑 El bot de IBKR lleva {inactividad / 60:.0f} min sin dar señal de vida "
+                               f"(congelado, probablemente en una llamada a IBKR sin respuesta) y se ha "
+                               f"forzado su cierre. Comprueba que run.bot.bat/el supervisor externo lo "
+                               f"reinicie solo, o reinicialo a mano.")
             os._exit(1)
 
 
@@ -771,6 +776,9 @@ def pedir_velas(ib, contrato, duration, barSize):
             f"Probable caida de la conexion de TWS/IB Gateway con los market data farms de IBKR "
             f"(el socket API puede seguir 'conectado' aunque esto pase). Revisa TWS/IB Gateway; "
             f"mientras tanto se deja de reintentar 3 veces por valor para no perder horas.")
+        notificar_telegram(f"⚠️ {UMBRAL_FALLOS_SEGUIDOS_DATOS} valores seguidos sin ningun dato historico. "
+                           f"Probable caida de la conexion de TWS/IB Gateway con los market data farms "
+                           f"de IBKR. Revisa TWS/IB Gateway.")
         _aviso_datos_caidos_emitido = True
 
     intentos = 1 if disyuntor_activo else INTENTOS_MAXIMOS
@@ -806,6 +814,8 @@ def pedir_velas(ib, contrato, duration, barSize):
 
         if velas:
             _fallos_seguidos_datos = 0
+            if _aviso_datos_caidos_emitido:
+                notificar_telegram("✅ Los datos de mercado de IBKR han vuelto, el bot sigue operando con normalidad.")
             _aviso_datos_caidos_emitido = False
             return velas
 
@@ -2778,22 +2788,24 @@ def ciclo_completo(ib, modo_texto="?", mercados=None):
 
 
 def evitar_suspension_windows():
-    """Pide a Windows que no suspenda el sistema ni el display mientras el
-    bot esta activo. No evita un cierre de tapa forzado, pero si la mayoria
-    de mecanismos de ahorro de energia por inactividad, incluyendo el modo
-    de suspension moderna en portatiles. No tiene efecto en otros sistemas
-    operativos."""
+    """Pide a Windows que no suspenda ni hiberne el SISTEMA mientras el bot
+    esta activo (para que el bot siga corriendo sin vigilancia). NO fuerza
+    la PANTALLA a quedarse encendida (sin ES_DISPLAY_REQUIRED) -peticion
+    del usuario, sept. 2026: el bot no debe apagar la pantalla, esa
+    decision es solo de la configuracion de energia de Windows, el bot
+    unicamente evita que el equipo entero se suspenda/hiberne (lo que si
+    pararia el bot). No evita un cierre de tapa forzado. No tiene efecto en
+    otros sistemas operativos."""
     try:
         import ctypes
         ES_CONTINUOUS = 0x80000000
         ES_SYSTEM_REQUIRED = 0x00000001
-        ES_DISPLAY_REQUIRED = 0x00000002
         ES_AWAYMODE_REQUIRED = 0x00000040
         ctypes.windll.kernel32.SetThreadExecutionState(
-            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_AWAYMODE_REQUIRED
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
         )
-        log("Suspension automatica de Windows desactivada (sistema, pantalla y modo ausente) "
-            "mientras el bot este en marcha.")
+        log("Suspension/hibernacion automatica de Windows desactivada mientras el bot este en "
+            "marcha (la pantalla sigue su configuracion normal de energia, sin forzarla).")
     except Exception:
         pass  # no es Windows, o no se pudo aplicar; no es critico para el funcionamiento
 
@@ -2896,6 +2908,7 @@ def main():
                 return
 
             if not conexion_esta_viva(ib):
+                global _aviso_reconexion_fallida_emitido
                 log("Conexion con IB Gateway perdida. Intentando reconectar...")
                 reconectado = False
                 for intento in range(1, REINTENTOS_RECONEXION + 1):
@@ -2912,6 +2925,9 @@ def main():
                         log(f"Reconexion con IB Gateway completada (intento {intento}/{REINTENTOS_RECONEXION}).")
                         modo_texto = avisar_modo_cuenta(ib)
                         reconectado = True
+                        if _aviso_reconexion_fallida_emitido:
+                            notificar_telegram("✅ Reconexion con IB Gateway recuperada, el bot sigue operando con normalidad.")
+                            _aviso_reconexion_fallida_emitido = False
                         break
                     except Exception as e:
                         log(f"Fallo el intento {intento}/{REINTENTOS_RECONEXION} de reconexion: {type(e).__name__}: {e}")
@@ -2921,6 +2937,10 @@ def main():
                 if not reconectado:
                     log(f"No se pudo reconectar con IB Gateway tras {REINTENTOS_RECONEXION} intentos. "
                         f"Se reintentara en la siguiente vuelta.")
+                    if not _aviso_reconexion_fallida_emitido:
+                        notificar_telegram(f"⚠️ No se pudo reconectar con IB Gateway tras {REINTENTOS_RECONEXION} "
+                                           f"intentos. Revisa que TWS/IB Gateway siga abierto y conectado.")
+                        _aviso_reconexion_fallida_emitido = True
                     log(f"Esperando {INTERVALO_SEGUNDOS // 60} minutos hasta la siguiente revision...")
                     esperar_pumpeando(ib, INTERVALO_SEGUNDOS)
                     continue
@@ -3027,4 +3047,6 @@ if __name__ == "__main__":
         except Exception as e:
             log(f"ERROR FATAL fuera del ciclo principal: {type(e).__name__}: {e}. "
                 f"Reiniciando el bot en {SEGUNDOS_ESPERA_TRAS_FALLO} segundos...")
+            notificar_telegram(f"⚠️ <b>ERROR FATAL</b> en el bot de IBKR: {type(e).__name__}: {e}. "
+                               f"Reiniciando en {SEGUNDOS_ESPERA_TRAS_FALLO}s.")
             time.sleep(SEGUNDOS_ESPERA_TRAS_FALLO)

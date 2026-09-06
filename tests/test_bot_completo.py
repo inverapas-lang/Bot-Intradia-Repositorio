@@ -612,6 +612,13 @@ check("pedir_velas: contrato de forex (secType='CASH') pide whatToShow='MIDPOINT
 bot._fallos_seguidos_datos = 0
 bot._aviso_datos_caidos_emitido = False
 
+# Peticion del usuario (sept. 2026: "avisame si algo falla"): el aviso del
+# cortacircuitos tambien debe mandarse por Telegram, no solo quedar en el
+# log -para enterarse sin tener que mirar el log a mano-.
+notificar_telegram_original = bot.notificar_telegram
+mensajes_telegram_cortacircuitos = []
+bot.notificar_telegram = lambda mensaje: mensajes_telegram_cortacircuitos.append(mensaje)
+
 # Simula UMBRAL_FALLOS_SEGUIDOS_DATOS valores seguidos sin ningun dato
 for i in range(bot.UMBRAL_FALLOS_SEGUIDOS_DATOS):
     ib_fallo = _IBReintentos([[], [], []])
@@ -623,23 +630,33 @@ check(f"cortacircuitos: tras {bot.UMBRAL_FALLOS_SEGUIDOS_DATOS} valores seguidos
 
 # Con el cortacircuitos activo, el siguiente valor solo debe intentarlo UNA
 # vez (no 3), para no perder 45s mas en un valor que probablemente tambien
-# vaya a fallar por el mismo motivo de fondo.
+# vaya a fallar por el mismo motivo de fondo. Este es el primer valor que
+# ve disyuntor_activo=True (el contador llego al umbral al final del valor
+# anterior), asi que es aqui donde se manda el aviso por Telegram.
 ib_siguiente_fallo = _IBReintentos([[], [], []])
 bot.pedir_velas(ib_siguiente_fallo, _ContratoFalso("SIGUIENTE"), "1 D", "1 min")
 check("cortacircuitos activo: solo hace 1 intento (no 3) en el siguiente valor",
       ib_siguiente_fallo.llamadas == 1, f"llamadas={ib_siguiente_fallo.llamadas}")
+check("cortacircuitos: manda EXACTAMENTE un aviso por Telegram al activarse (no uno por cada valor)",
+      len(mensajes_telegram_cortacircuitos) == 1, f"mensajes={mensajes_telegram_cortacircuitos}")
 
-# En cuanto un valor SI trae datos, el cortacircuitos se desactiva y vuelve
-# a reintentar normalmente (3 intentos) en el siguiente que falle.
+# En cuanto un valor SI trae datos, el cortacircuitos se desactiva, avisa
+# de la recuperacion por Telegram, y vuelve a reintentar normalmente (3
+# intentos) en el siguiente que falle.
+mensajes_telegram_cortacircuitos.clear()
 ib_recupera = _IBReintentos([[_Vela(100)]])
 bot.pedir_velas(ib_recupera, _ContratoFalso("RECUPERA"), "1 D", "1 min")
 check("cortacircuitos: se desactiva en cuanto un valor trae datos",
       bot._fallos_seguidos_datos == 0, f"_fallos_seguidos_datos={bot._fallos_seguidos_datos}")
+check("cortacircuitos: avisa por Telegram de la recuperacion",
+      len(mensajes_telegram_cortacircuitos) == 1, f"mensajes={mensajes_telegram_cortacircuitos}")
 
 ib_tras_recuperar = _IBReintentos([[], [], []])
 bot.pedir_velas(ib_tras_recuperar, _ContratoFalso("TRAS_RECUPERAR"), "1 D", "1 min")
 check("tras recuperarse, vuelve a hacer los 3 intentos normales",
       ib_tras_recuperar.llamadas == bot.INTENTOS_MAXIMOS, f"llamadas={ib_tras_recuperar.llamadas}")
+
+bot.notificar_telegram = notificar_telegram_original
 
 # Se resetea para no afectar a los tests siguientes.
 bot._fallos_seguidos_datos = 0

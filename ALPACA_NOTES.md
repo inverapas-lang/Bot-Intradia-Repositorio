@@ -209,6 +209,30 @@ día/semana de calendario UTC completo para cripto (que no tiene "cierre"
 de mercado). Acciones y cripto comparten el mismo caché sin colisión: se
 indexa por nombre de temporalidad ("1 dia"/"1 semana"), no por ticker.
 
+### Avisos de Telegram ante fallos (sept. 2026, petición del usuario: "vigila el bot y avísame si algo falla")
+
+Hasta ahora `notificar_telegram()` solo se usaba para compras/ventas/resúmenes — un fallo
+real (congelación, error fatal del bucle principal) solo quedaba en el log. Se añadieron
+avisos por Telegram en:
+- **Congelación del proceso** (`vigilante_congelacion`): aviso justo antes de forzar el
+  cierre (`os._exit(1)`) — corre en su propio hilo, así que este aviso sí puede salir aunque
+  el hilo principal esté congelado.
+- **Error fatal fuera del ciclo principal**: aviso con el tipo de excepción antes de
+  reiniciar el ciclo.
+
+A diferencia de `bot_completo.py`/IBKR, aquí no hace falta un cortacircuitos de datos caídos
+(Alpaca pide en lote, muy por debajo del límite de la API) ni una reconexión explícita
+(HTTP normal, sin sesión persistente que reconectar), así que no hay avisos equivalentes a
+esos dos.
+
+### Pantalla del PC: el bot NO debe forzarla a quedarse encendida (sept. 2026)
+
+Mismo cambio que en `bot_completo.py` (ver `NOTES.md` para la explicación completa):
+`evitar_suspension_windows()` ya no incluye `ES_DISPLAY_REQUIRED`, solo evita que el SISTEMA
+se suspenda/hiberne, sin forzar la pantalla a quedarse encendida. En la práctica esto no
+aplica ahora mismo (el bot corre en el servidor AWS/Linux, donde la función no hace nada),
+pero se mantiene por si se ejecuta alguna vez en Windows.
+
 ### Vigilante de congelación / archivos de estado
 
 Mismo mecanismo que el bot de IBKR (hilo interno + archivo de latido +

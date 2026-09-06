@@ -325,6 +325,45 @@ visible con `#` de por medio, y además una marca corta `[DEMO/PAPER TRADING (cu
 `[REAL - DINERO REAL (cuenta ...)]` en la línea de "Iniciando nuevo ciclo" de cada ciclo, para
 que sea imposible perder de vista el modo con solo mirar el log reciente.
 
+## Avisos de Telegram ante fallos (sept. 2026, petición del usuario: "vigila el bot y avísame si algo falla")
+
+Hasta ahora `notificar_telegram()` solo se usaba para compras/ventas/resúmenes — cualquier
+fallo real (conexión caída, datos de mercado caídos, congelación, error fatal del bucle
+principal) solo quedaba en el log, así que había que ir a mirarlo a mano para enterarse. Se
+añadieron avisos por Telegram en los puntos donde algo va mal de verdad:
+
+- **Cortacircuitos de datos caídos** (`pedir_velas`, ver más abajo): aviso al activarse
+  (una sola vez, no uno por cada valor que falla) y aviso de recuperación en cuanto vuelve a
+  haber datos.
+- **Reconexión con IB Gateway fallida** tras `REINTENTOS_RECONEXION` intentos: aviso (una
+  sola vez mientras siga caída, `_aviso_reconexion_fallida_emitido`) y aviso de recuperación
+  al reconectar.
+- **Congelación del proceso** (`vigilante_congelacion`): aviso justo antes de forzar el
+  cierre (`os._exit(1)`) — como el vigilante corre en su propio hilo, este aviso sí puede
+  salir aunque el hilo principal esté congelado.
+- **Error fatal fuera del ciclo principal**: aviso con el tipo de excepción antes de
+  reiniciar.
+
+Los avisos de "1 sola vez mientras dure el problema" (no repetir en cada ciclo) siguen el
+mismo patrón que ya usaba el log (`_aviso_datos_caidos_emitido`), añadiendo el envío a
+Telegram en el mismo punto en que ya se ponía la bandera. Mismo tratamiento en
+`bot_alpaca.py` (fatal del bucle principal, congelación) — Alpaca no tiene un cortacircuitos
+de datos equivalente (no hace falta, ver "Peticiones de datos" en `ALPACA_NOTES.md`) ni
+reconexión explícita (usa HTTP normal, sin sesión persistente que reconectar).
+
+## Pantalla del PC: el bot NO debe forzarla a quedarse encendida (sept. 2026)
+
+Petición del usuario: *"el bot no apaga la pantalla del PC, no permitas que el PC hiberne o
+se apague mientras corre el bot, pero el bot no tiene que afectar a lo que marque el PC sobre
+la pantalla"*. `evitar_suspension_windows()` usaba `SetThreadExecutionState` con las banderas
+`ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_AWAYMODE_REQUIRED` — `ES_DISPLAY_REQUIRED`
+fuerza la pantalla a quedarse encendida, más allá de lo que pida el bot (que el sistema no se
+suspenda/hiberne, para que el bot no se pare). Se quitó `ES_DISPLAY_REQUIRED`: ahora solo se
+evita la suspensión/hibernación del SISTEMA (`ES_SYSTEM_REQUIRED` + `ES_AWAYMODE_REQUIRED`),
+la pantalla sigue la configuración de energía normal de Windows sin que el bot la fuerce.
+Mismo cambio en `bot_alpaca.py` (aunque ahí no aplica en la práctica, corre en el servidor
+AWS/Linux — se mantiene por si se ejecuta alguna vez en Windows).
+
 ## Vigilante de congelación del proceso — IMPORTANTE: requiere supervisor externo
 
 Se vio en producción un episodio real de **~10,7 horas colgado sin ningún log**, tras un
