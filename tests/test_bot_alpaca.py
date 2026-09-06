@@ -304,15 +304,18 @@ check("pedir_velas_lote: devuelve listas vacias (no lanza excepcion) si nunca ha
 #    en sesion regular y en pre/postmercado.
 # ---------------------------------------------------------------------------
 class _TradingClientFalso:
-    def __init__(self, portfolio_value=10_000, posiciones=None, ordenes_abiertas=None):
+    def __init__(self, portfolio_value=10_000, posiciones=None, ordenes_abiertas=None, cash=1_000_000.0):
         self.portfolio_value = portfolio_value
         self._posiciones = posiciones or []
         self.ordenes = []
         self._ordenes_abiertas = ordenes_abiertas or []  # simuladas, por simbolo
         self.ordenes_canceladas = []
+        self.cash = cash
 
     def get_account(self):
-        return types.SimpleNamespace(portfolio_value=str(self.portfolio_value))
+        if self.cash is None:
+            return types.SimpleNamespace(portfolio_value=str(self.portfolio_value))
+        return types.SimpleNamespace(portfolio_value=str(self.portfolio_value), cash=str(self.cash))
 
     def get_all_positions(self):
         return self._posiciones
@@ -640,6 +643,81 @@ finally:
 
 check("revisar_compras_cripto: NO compra si superaria el limite de exposicion TOTAL en cripto (20%)",
       len(ordenes_compra_cripto_limite) == 0, f"ordenes={ordenes_compra_cripto_limite}")
+
+
+# ---------------------------------------------------------------------------
+# 10. MAX_POSICIONES_ABIERTAS y caja disponible (efectivo): peticion del
+#     usuario, sept. 2026 - controles agregados de riesgo, ademas de
+#     LIMITE_EXPOSICION_PCT (por posicion).
+# ---------------------------------------------------------------------------
+def _posiciones_falsas(n):
+    return [types.SimpleNamespace(symbol=f"YA{i}", qty="1", avg_entry_price="100.0",
+                                   market_value="100.0", unrealized_pl="0.0", unrealized_plpc="0.0")
+            for i in range(n)]
+
+
+bot.ACTIVOS = ["NUEVO"]
+
+# Ya hay MAX_POSICIONES_ABIERTAS tickers distintos -> uno NUEVO se omite.
+bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000,
+                                            posiciones=_posiciones_falsas(bot.MAX_POSICIONES_ABIERTAS))
+bot._data_client = _fake_data_client_alcista()
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    ordenes_lleno = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+
+check("revisar_compras: con MAX_POSICIONES_ABIERTAS ya alcanzado, NO compra un ticker nuevo",
+      len(ordenes_lleno) == 0, f"ordenes={len(ordenes_lleno)}")
+
+# Con hueco libre (una posicion menos que el limite), SI compra.
+bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000,
+                                            posiciones=_posiciones_falsas(bot.MAX_POSICIONES_ABIERTAS - 1))
+bot._data_client = _fake_data_client_alcista()
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    ordenes_con_hueco = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+
+check("revisar_compras: con hueco libre bajo MAX_POSICIONES_ABIERTAS, SI compra el ticker nuevo",
+      len(ordenes_con_hueco) == 1, f"ordenes={len(ordenes_con_hueco)}")
+
+# Efectivo insuficiente -> se omite aunque haya señal, hueco de posiciones
+# y margen de exposicion de sobra.
+bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000, cash=1.0)
+bot._data_client = _fake_data_client_alcista()
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    ordenes_sin_caja = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+
+check("revisar_compras: con efectivo insuficiente, NO compra aunque haya señal y hueco",
+      len(ordenes_sin_caja) == 0, f"ordenes={ordenes_sin_caja}")
+
+# Sin el atributo 'cash' en absoluto (p.ej. fallo al leerlo): no debe
+# romper nada, simplemente no se aplica ese limite concreto.
+bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000, cash=None)
+bot._data_client = _fake_data_client_alcista()
+excepcion_sin_cash = None
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+except Exception as e:
+    excepcion_sin_cash = e
+finally:
+    ordenes_sin_atributo_cash = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.ACTIVOS = activos_originales
+
+check("revisar_compras: si 'cash' no esta disponible en la cuenta, no lanza excepcion y sigue comprando",
+      excepcion_sin_cash is None and len(ordenes_sin_atributo_cash) == 1,
+      f"excepcion={excepcion_sin_cash}, ordenes={len(ordenes_sin_atributo_cash)}")
 
 
 # ---------------------------------------------------------------------------

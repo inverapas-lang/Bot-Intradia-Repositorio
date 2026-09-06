@@ -116,6 +116,20 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
    veredicto fiable en el log en vez de fiarse solo del objeto `Trade` (ver bug #10).
 8. Si se confirma que la compra abrió una posición **nueva desde cero** (no una ampliación),
    se registra la fecha en `historial_compras.json` (ver sección de historial más abajo).
+9. **Límite agregado de posiciones y caja disponible** (`MAX_POSICIONES_ABIERTAS = 12`, añadido
+   sept. 2026, petición del usuario): además del límite del 15% por posición y del 25%
+   agregado de cripto, `revisar_compras()` ahora comprueba dos cosas más ANTES de intentar
+   comprar un valor NUEVO (no aplica a promediar una posición ya existente):
+   - Que no haya ya 12 tickers distintos con posición abierta a la vez (evita que un día de
+     muchas señales simultáneas dispare 15-20 posiciones nuevas sin ningún tope).
+   - Que el importe de la operación no supere el `AvailableFunds` real de la cuenta
+     (`obtener_fondos_disponibles_usd`), para no intentar comprar más de lo que hay realmente
+     disponible y encadenar rechazos de IBKR o entrar en margen sin haberlo decidido.
+   Ambos se reservan de forma OPTIMISTA en el momento de decidir la compra (no al confirmarse
+   como `Filled`), para que dos señales del mismo ciclo no se salten el límite entre ellas — es
+   deliberadamente conservador: si una orden acaba rechazada, se pierde margen para el resto
+   del ciclo, pero nunca se compra de más. Si `AvailableFunds` no se puede leer (fallo de red),
+   se omite solo esa comprobación concreta, sin bloquear el resto de compras del ciclo.
 
 ## Reglas de venta (`revisar_ventas`)
 

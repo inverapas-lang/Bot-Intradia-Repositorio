@@ -1990,6 +1990,94 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+# 11. MAX_POSICIONES_ABIERTAS y caja disponible (AvailableFunds): peticion
+#     del usuario, sept. 2026 - controles agregados de riesgo, ademas de
+#     LIMITE_EXPOSICION_PCT (por posicion) y LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT.
+# ---------------------------------------------------------------------------
+class _IBFalsoLimitesAgregados:
+    def __init__(self, num_posiciones_existentes, available_funds_usd):
+        self.ordenes_colocadas = []
+        self._num_posiciones_existentes = num_posiciones_existentes
+        self._available_funds_usd = available_funds_usd
+
+    def accountSummary(self):
+        resumen = [types.SimpleNamespace(tag='NetLiquidation', currency='USD', value='100000')]
+        if self._available_funds_usd is not None:
+            resumen.append(types.SimpleNamespace(tag='AvailableFunds', currency='USD',
+                                                   value=str(self._available_funds_usd)))
+        return resumen
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return [_Posicion(f"YA{i}", 1, 100.0) for i in range(self._num_posiciones_existentes)]
+
+    def sleep(self, segundos):
+        pass
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 999
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        # Serie acelerando -> señal de COMPRA en analizar_activo.
+        return [_Vela(100 * (1.02 ** i)) for i in range(60)]
+
+    def reqContractDetails(self, contrato):
+        return [types.SimpleNamespace(minSize=1, sizeIncrement=1)]
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Submitted"), isDone=lambda: True)
+
+
+activo_prueba_limites = [{"ticker": "NUEVO", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+
+es_horario_original_limites = bot.es_horario_operativo
+en_ventana_sin_compra_original_limites = bot.en_ventana_sin_compra
+activos_originales_limites = bot.ACTIVOS
+bot.ACTIVOS = activo_prueba_limites
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+try:
+    # Ya hay MAX_POSICIONES_ABIERTAS posiciones distintas abiertas -> un
+    # ticker NUEVO (que no es ninguna de esas) debe omitirse.
+    ib_lleno = _IBFalsoLimitesAgregados(bot.MAX_POSICIONES_ABIERTAS, available_funds_usd=100000)
+    bot.revisar_compras(ib_lleno)
+    check("revisar_compras: con MAX_POSICIONES_ABIERTAS ya alcanzado, NO compra un ticker nuevo",
+          ib_lleno.ordenes_colocadas == [], f"ordenes={ib_lleno.ordenes_colocadas}")
+
+    # Con hueco libre (menos posiciones que el limite), SI compra.
+    ib_con_hueco = _IBFalsoLimitesAgregados(bot.MAX_POSICIONES_ABIERTAS - 1, available_funds_usd=100000)
+    bot.revisar_compras(ib_con_hueco)
+    check("revisar_compras: con hueco libre bajo MAX_POSICIONES_ABIERTAS, SI compra el ticker nuevo",
+          "NUEVO" in ib_con_hueco.ordenes_colocadas, f"ordenes={ib_con_hueco.ordenes_colocadas}")
+
+    # AvailableFunds insuficiente (menos que el importe de la operacion) ->
+    # se omite aunque haya hueco de posiciones y margen de exposicion.
+    ib_sin_caja = _IBFalsoLimitesAgregados(0, available_funds_usd=1.0)
+    bot.revisar_compras(ib_sin_caja)
+    check("revisar_compras: con AvailableFunds insuficiente, NO compra aunque haya señal y hueco",
+          ib_sin_caja.ordenes_colocadas == [], f"ordenes={ib_sin_caja.ordenes_colocadas}")
+
+    # Sin el tag AvailableFunds en absoluto (p.ej. fallo al leerlo): no debe
+    # romper nada, simplemente no se aplica ese limite concreto.
+    ib_sin_tag = _IBFalsoLimitesAgregados(0, available_funds_usd=None)
+    excepcion_sin_tag = None
+    try:
+        bot.revisar_compras(ib_sin_tag)
+    except Exception as e:
+        excepcion_sin_tag = e
+    check("revisar_compras: si AvailableFunds no esta disponible, no lanza excepcion y sigue comprando",
+          excepcion_sin_tag is None and "NUEVO" in ib_sin_tag.ordenes_colocadas,
+          f"excepcion={excepcion_sin_tag}, ordenes={ib_sin_tag.ordenes_colocadas}")
+finally:
+    bot.ACTIVOS = activos_originales_limites
+    bot.es_horario_operativo = es_horario_original_limites
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original_limites
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()

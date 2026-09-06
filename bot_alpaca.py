@@ -167,6 +167,15 @@ TIPO_CAMBIO_EUR_USD = 1.14   # actualiza a mano si quieres mas precision
 DECIMALES_FRACCION = 4
 VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0
 
+# Tope de posiciones abiertas SIMULTANEAS (acciones) y comprobacion de caja
+# disponible antes de comprar (peticion del usuario, sept. 2026): sin esto,
+# un dia de tendencia fuerte con muchas señales a la vez podria intentar
+# abrir muchas posiciones nuevas sin comprobar si hay efectivo de verdad, o
+# sin ningun limite al numero de valores distintos en cartera a la vez. No
+# sustituye a LIMITE_EXPOSICION_PCT (por VALOR de cada posicion): es un
+# limite independiente, sobre el NUMERO de posiciones y la CAJA real.
+MAX_POSICIONES_ABIERTAS = 12
+
 # --- Lista de valores: misma seleccion de 30 tickers que en bot_completo.py ---
 ACTIVOS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD", "NFLX",
            "INTC", "QCOM", "CSCO", "SMCI",
@@ -703,6 +712,19 @@ def obtener_valor_total_cartera_usd():
         return None
 
 
+def obtener_efectivo_disponible_usd():
+    """Devuelve el efectivo REALMENTE disponible para nuevas compras (no el
+    valor total de la cartera), en USD. Se usa para no intentar comprar mas
+    de lo que la cuenta puede permitirse de verdad, ademas de los limites
+    por % ya existentes (peticion del usuario, sept. 2026)."""
+    try:
+        cuenta = _trading_client.get_account()
+        return float(cuenta.cash)
+    except Exception as e:
+        log(f"ERROR al obtener el efectivo disponible: {type(e).__name__}: {e}")
+        return None
+
+
 def obtener_valor_posicion_actual_usd(posiciones, ticker):
     for p in posiciones:
         if p.symbol == ticker and float(p.qty) > 0:
@@ -907,6 +929,17 @@ def revisar_compras():
     posiciones = obtener_posiciones()
     fuera_sesion = fuera_de_sesion_regular_us()
 
+    # Tope de posiciones simultaneas y caja disponible (ver
+    # MAX_POSICIONES_ABIERTAS): se calculan UNA vez al principio del ciclo y
+    # se van reservando de forma optimista segun se decide cada compra, para
+    # que varias señales dentro del MISMO ciclo no se salten el limite
+    # entre ellas.
+    posiciones_abiertas_tickers = {p.symbol for p in posiciones}
+    efectivo_disponible_usd = obtener_efectivo_disponible_usd()
+    if efectivo_disponible_usd is None:
+        log("COMPRAS: no se pudo obtener el efectivo disponible; no se aplicara el limite de caja "
+            "disponible este ciclo (el resto de limites de exposicion siguen activos).")
+
     log(f"\n########## COMPRAS ##########")
     log(f"COMPRAS: analizando {len(ACTIVOS)} valores en lote...")
     decisiones, precios = analizar_todos_los_activos(ACTIVOS)
@@ -949,6 +982,29 @@ def revisar_compras():
                     f"({importe_a_usar:.2f} USD) no llega al minimo de "
                     f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} USD por operacion, se omite.")
                 continue
+
+            # Tope de posiciones simultaneas: solo se aplica a valores NUEVOS
+            # (si ya se tiene el ticker, esto es promediar/añadir, no abrir
+            # una posicion mas) - ver MAX_POSICIONES_ABIERTAS.
+            if valor_posicion_actual <= 0 and ticker not in posiciones_abiertas_tickers \
+                    and len(posiciones_abiertas_tickers) >= MAX_POSICIONES_ABIERTAS:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero ya hay {len(posiciones_abiertas_tickers)} "
+                    f"posiciones abiertas (limite MAX_POSICIONES_ABIERTAS={MAX_POSICIONES_ABIERTAS}) y "
+                    f"este seria un valor nuevo, se omite.")
+                continue
+
+            if efectivo_disponible_usd is not None and importe_a_usar > efectivo_disponible_usd:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero el importe ({importe_a_usar:.2f} USD) "
+                    f"supera el efectivo disponible restante ({efectivo_disponible_usd:.2f} USD), se omite.")
+                continue
+
+            # Reserva optimista: se descuenta/anota AQUI, no tras confirmar la
+            # orden, para que la SIGUIENTE señal de este mismo ciclo ya vea
+            # el hueco/caja reducidos.
+            posiciones_abiertas_tickers.add(ticker)
+            if efectivo_disponible_usd is not None:
+                efectivo_disponible_usd -= importe_a_usar
+
             cantidad_estimada = round(importe_a_usar / precio_actual, DECIMALES_FRACCION)
 
             if fuera_sesion:
@@ -1004,6 +1060,16 @@ def revisar_compras_cripto():
     posiciones = obtener_posiciones()
     exposicion_cripto_actual_usd = calcular_exposicion_total_cripto_usd(posiciones)
 
+    # Caja disponible (ver MAX_POSICIONES_ABIERTAS/obtener_efectivo_disponible_usd
+    # en revisar_compras()): no hace falta un tope de NUMERO de posiciones
+    # aparte para cripto (el universo son solo 6 monedas como mucho, y el
+    # limite de exposicion TOTAL de arriba ya acota el riesgo agregado), pero
+    # SI se comprueba que haya efectivo real antes de comprar.
+    efectivo_disponible_usd = obtener_efectivo_disponible_usd()
+    if efectivo_disponible_usd is None:
+        log("COMPRAS: no se pudo obtener el efectivo disponible; no se aplicara el limite de caja "
+            "disponible este ciclo de cripto (el resto de limites de exposicion siguen activos).")
+
     log(f"\n########## COMPRAS - CRIPTO ##########")
     log(f"COMPRAS: analizando {len(ACTIVOS_CRYPTO)} criptomonedas en lote...")
     decisiones, precios = analizar_todos_los_activos_cripto(ACTIVOS_CRYPTO)
@@ -1045,6 +1111,13 @@ def revisar_compras_cripto():
                     f"({importe_a_usar:.2f} USD) no llega al minimo de "
                     f"{VALOR_MINIMO_OPERACION_CRIPTO_USD:.2f} USD por operacion, se omite.")
                 continue
+
+            if efectivo_disponible_usd is not None and importe_a_usar > efectivo_disponible_usd:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero el importe ({importe_a_usar:.2f} USD) "
+                    f"supera el efectivo disponible restante ({efectivo_disponible_usd:.2f} USD), se omite.")
+                continue
+            if efectivo_disponible_usd is not None:
+                efectivo_disponible_usd -= importe_a_usar
 
             cantidad_estimada = round(importe_a_usar / precio_actual, DECIMALES_FRACCION_CRIPTO)
 

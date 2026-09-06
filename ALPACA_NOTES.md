@@ -598,6 +598,32 @@ antes del cierre...) — cripto tiene su propia función dedicada,
 lógica de horario ni de venta forzada (no tiene sentido "forzar venta
 antes del cierre" en un mercado que nunca cierra).
 
+## Límite agregado de posiciones y caja disponible (sept. 2026, petición del usuario)
+
+Además del límite del 15% por posición y del 20% agregado de cripto, tanto
+`revisar_compras()` (acciones) como `revisar_compras_cripto()` comprueban
+dos cosas más antes de intentar comprar:
+
+- **`MAX_POSICIONES_ABIERTAS = 12`** (solo acciones — cripto no lo
+  necesita, su universo son 6 monedas como mucho y ya tiene su propio
+  límite agregado del 20%): no se abre un ticker **nuevo** si ya hay 12
+  tickers distintos con posición abierta a la vez. Promediar una posición
+  ya existente no cuenta para este límite.
+- **Efectivo disponible real** (`obtener_efectivo_disponible_usd()`, lee
+  `cuenta.cash` de Alpaca): no se compra si el importe de la operación
+  supera el efectivo realmente disponible, en ambas funciones (acciones y
+  cripto). Antes no había ningún control de caja — el bot podía intentar
+  comprar contra fondos que ya estaban comprometidos en otras posiciones.
+
+Ambos se reservan de forma OPTIMISTA en el momento de decidir la compra
+(no al confirmarse como `filled`), para que dos señales del mismo ciclo
+no se salten el límite entre ellas — igual que ya hacía
+`revisar_compras_cripto()` con `exposicion_cripto_actual_usd`. Es
+deliberadamente conservador: si una orden acaba rechazada, se pierde
+margen para el resto del ciclo, pero nunca se compra de más. Si `cash` no
+se puede leer (fallo de red), se omite solo esa comprobación concreta sin
+bloquear el resto del ciclo.
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

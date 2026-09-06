@@ -218,6 +218,17 @@ LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera (en USD equivalente
 # IBKR y encadenar rechazos en cada intento.
 LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT = 25
 
+# Tope de posiciones abiertas SIMULTANEAS (todas las abiertas a la vez, en
+# cualquier mercado) y comprobacion de caja disponible antes de comprar
+# (peticion del usuario, sept. 2026): sin esto, un dia de tendencia fuerte
+# con muchas señales a la vez podria intentar abrir muchas posiciones
+# nuevas de golpe sin comprobar si la cuenta tiene fondos de verdad, o sin
+# ningun limite al numero total de valores distintos en cartera a la vez.
+# No sustituye a LIMITE_EXPOSICION_PCT (por VALOR de cada posicion) ni a
+# LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT (agregado de cripto): es un tercer
+# limite independiente, sobre el NUMERO de posiciones y la CAJA real.
+MAX_POSICIONES_ABIERTAS = 12
+
 # --- Fracciones de accion ---
 # IBKR solo admite comprar fracciones de accion en el mercado US (y solo para
 # una parte de los valores, los que tengan ese permiso habilitado). En HK y
@@ -1631,6 +1642,26 @@ def obtener_valor_total_cartera_usd(ib):
     return None
 
 
+def obtener_fondos_disponibles_usd(ib):
+    """Devuelve el AvailableFunds (efectivo/margen realmente disponible para
+    nuevas compras, no el valor total de la cartera) en USD. Se usa en
+    revisar_compras() para no intentar comprar mas de lo que la cuenta
+    puede permitirse de verdad, ademas de los limites por % ya existentes
+    (peticion del usuario, sept. 2026)."""
+    try:
+        resumen = ib.accountSummary()
+    except Exception as e:
+        log(f"No se pudo obtener AvailableFunds de la cuenta: {type(e).__name__}: {e}")
+        return None
+    for item in resumen:
+        if item.tag == 'AvailableFunds' and item.currency == 'USD':
+            return float(item.value)
+    for item in resumen:
+        if item.tag == 'AvailableFunds':
+            return float(item.value)
+    return None
+
+
 def obtener_valor_posicion_actual_usd(posiciones, ticker, precio_actual, currency):
     """Devuelve el valor en USD de la posicion actual de un ticker (0 si no hay)."""
     for pos in posiciones:
@@ -1784,6 +1815,18 @@ def revisar_compras(ib, mercados=None):
     ib.sleep(1)  # da tiempo a que la respuesta llegue antes de leer ib.positions()
     posiciones_actuales = ib.positions()
 
+    # Tope de posiciones simultaneas y caja disponible (ver
+    # MAX_POSICIONES_ABIERTAS): se calculan UNA vez al principio del ciclo y
+    # se van reservando de forma optimista segun se decide cada compra (no
+    # hace falta esperar a que la orden se confirme como filled), para que
+    # varias señales dentro del MISMO ciclo no se salten el limite entre
+    # ellas.
+    posiciones_abiertas_tickers = {p.contract.symbol for p in posiciones_actuales if p.position > 0}
+    fondos_disponibles_usd = obtener_fondos_disponibles_usd(ib)
+    if fondos_disponibles_usd is None:
+        log("COMPRAS: no se pudo obtener AvailableFunds de la cuenta; no se aplicara el limite de "
+            "caja disponible este ciclo (el resto de limites de exposicion siguen activos).")
+
     mercados_ya_avisados = set()
     mercado_actual = None
     contadores = {"analizados": 0, "senales": 0, "errores": 0}
@@ -1909,6 +1952,33 @@ def revisar_compras(ib, mercados=None):
                 margen_disponible_moneda = 0
 
             importe_a_usar = min(presupuesto_operacion, margen_disponible_moneda)
+
+            # Tope de posiciones simultaneas: solo se aplica a valores NUEVOS
+            # (si ya se tiene el ticker, esto es promediar/añadir, no abrir
+            # una posicion mas) - ver MAX_POSICIONES_ABIERTAS.
+            ya_tiene_posicion = valor_posicion_actual_usd > 0
+            if not ya_tiene_posicion and len(posiciones_abiertas_tickers) >= MAX_POSICIONES_ABIERTAS:
+                log(f"COMPRAS: {ticker} - señal de COMPRA pero ya hay {len(posiciones_abiertas_tickers)} "
+                    f"posiciones abiertas (limite MAX_POSICIONES_ABIERTAS={MAX_POSICIONES_ABIERTAS}) y "
+                    f"este seria un valor nuevo, se omite.")
+                continue
+
+            importe_a_usar_usd = valor_en_usd(importe_a_usar, currency)
+            if fondos_disponibles_usd is not None and importe_a_usar_usd > fondos_disponibles_usd:
+                log(f"COMPRAS: {ticker} - señal de COMPRA pero el importe ({importe_a_usar_usd:.2f} USD) "
+                    f"supera los fondos disponibles restantes en la cuenta ({fondos_disponibles_usd:.2f} "
+                    f"USD), se omite.")
+                continue
+
+            # Reserva optimista: se descuenta/anota AQUI, no tras confirmar la
+            # orden, para que la SIGUIENTE señal de este mismo ciclo ya vea
+            # el hueco/caja reducidos (evita que 2+ señales del mismo ciclo
+            # se salten el limite entre ellas). Es deliberadamente
+            # conservador: si la orden acaba rechazada, se pierde margen
+            # para el resto del ciclo, pero nunca se compra de mas.
+            posiciones_abiertas_tickers.add(ticker)
+            if fondos_disponibles_usd is not None:
+                fondos_disponibles_usd -= importe_a_usar_usd
 
             if activo["mercado"] == "CRYPTO":
                 # Cripto siempre admite fracciones nativas via LMT (ver
