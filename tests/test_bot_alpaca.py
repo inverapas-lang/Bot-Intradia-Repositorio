@@ -423,17 +423,17 @@ posicion_fraccionaria = types.SimpleNamespace(
     symbol="AAPL", qty="3.544", avg_entry_price="100.0", market_value="400.0",
     unrealized_pl="10.0", unrealized_plpc="0.05",
 )
-macd_5min_bajista_original = bot.macd_5min_bajista
+macd_5min_bajista_original = bot.macd_5min_bajista_2_velas
 bot._trading_client = _TradingClientFalso(posiciones=[posicion_fraccionaria])
 bot._data_client = _DataClientPrecioFijo(105.0)  # +5% sobre el coste medio (100.0)
-bot.macd_5min_bajista = lambda ticker: True  # forzar señal de venta
+bot.macd_5min_bajista_2_velas = lambda ticker: True  # forzar señal de venta (refuerzo)
 try:
     con_reloj_fijo(postmercado, bot.revisar_ventas)
 finally:
     ordenes_venta_frac = bot._trading_client.ordenes
     bot._trading_client = trading_client_original
     bot._data_client = data_client_original
-    bot.macd_5min_bajista = macd_5min_bajista_original
+    bot.macd_5min_bajista_2_velas = macd_5min_bajista_original
 
 check("revisar_ventas: posicion FRACCIONARIA en postmercado SI coloca una orden "
       "(Alpaca admite fracciones en limitadas con extended_hours)",
@@ -455,17 +455,17 @@ posicion_en_el_umbral = types.SimpleNamespace(
     unrealized_pl="5.0", unrealized_plpc="0.005",
 )
 
-macd_5min_bajista_original = bot.macd_5min_bajista
+macd_5min_bajista_original = bot.macd_5min_bajista_2_velas
 bot._trading_client = _TradingClientFalso(posiciones=[posicion_en_el_umbral])
 bot._data_client = _DataClientPrecioFijo(100.5)  # exactamente +0.5% sobre el coste medio (100.0)
-bot.macd_5min_bajista = lambda ticker: True  # forzar señal de venta
+bot.macd_5min_bajista_2_velas = lambda ticker: True  # forzar señal de venta (refuerzo)
 try:
     con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
 finally:
     ordenes_umbral = bot._trading_client.ordenes
     bot._trading_client = trading_client_original
     bot._data_client = data_client_original
-    bot.macd_5min_bajista = macd_5min_bajista_original
+    bot.macd_5min_bajista_2_velas = macd_5min_bajista_original
 
 check("revisar_ventas sin comision: +0.5% bruto exacto (= umbral) SI vende "
       "(con comision se habria quedado por debajo y no habria vendido)",
@@ -476,18 +476,18 @@ check("revisar_ventas sin comision: +0.5% bruto exacto (= umbral) SI vende "
 # real visto en produccion: "insufficient qty available", la posicion entera
 # quedaba retenida (held_for_orders) por la orden vieja- ---
 orden_abierta_previa = types.SimpleNamespace(id="orden-vieja-META", symbol="AAPL")
-macd_5min_bajista_original = bot.macd_5min_bajista
+macd_5min_bajista_original = bot.macd_5min_bajista_2_velas
 cliente_con_orden_abierta = _TradingClientFalso(posiciones=[posicion_en_el_umbral],
                                                  ordenes_abiertas=[orden_abierta_previa])
 bot._trading_client = cliente_con_orden_abierta
 bot._data_client = _DataClientPrecioFijo(100.5)
-bot.macd_5min_bajista = lambda ticker: True
+bot.macd_5min_bajista_2_velas = lambda ticker: True
 try:
     con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
 finally:
     bot._trading_client = trading_client_original
     bot._data_client = data_client_original
-    bot.macd_5min_bajista = macd_5min_bajista_original
+    bot.macd_5min_bajista_2_velas = macd_5min_bajista_original
 
 check("revisar_ventas: cancela la orden abierta anterior antes de mandar la venta nueva",
       cliente_con_orden_abierta.ordenes_canceladas == ["orden-vieja-META"],
@@ -496,6 +496,77 @@ check("revisar_ventas: tras cancelar la orden vieja, SI coloca la venta nueva",
       len(cliente_con_orden_abierta.ordenes) == 1, f"ordenes={cliente_con_orden_abierta.ordenes}")
 
 bot.ACTIVOS = activos_originales
+
+
+# ---------------------------------------------------------------------------
+# 8b. Criterio de venta de ACCIONES: trailing stop (principal) + refuerzo de
+#     2 velas de 5min bajistas (peticion del usuario, sept. 2026). Alpaca no
+#     cobra comision en acciones, asi que aqui beneficio bruto == neto.
+# ---------------------------------------------------------------------------
+def _posicion_trailing(precio_medio, cantidad=10):
+    return types.SimpleNamespace(symbol="TRAIL", qty=str(cantidad), avg_entry_price=str(precio_medio),
+                                  market_value="0", unrealized_pl="0", unrealized_plpc="0")
+
+
+macd_2velas_original_alpaca = bot.macd_5min_bajista_2_velas
+
+# Por debajo de UMBRAL_BENEFICIO_PCT, ni el trailing ni el refuerzo venden.
+bot.macd_5min_bajista_2_velas = lambda ticker: True  # refuerzo siempre "activo"
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._trading_client = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._data_client = _DataClientPrecioFijo(100.2)  # +0.2%, por debajo del 0.5%
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    ordenes_bajo_umbral = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+check("criterio de venta: por debajo de UMBRAL_BENEFICIO_PCT, NO vende aunque el refuerzo este activo",
+      ordenes_bajo_umbral == [], f"ordenes={ordenes_bajo_umbral}")
+
+# El refuerzo (2 velas bajistas) SI puede vender por si solo, en el umbral
+# exacto (retroceso=0).
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._trading_client = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._data_client = _DataClientPrecioFijo(100.5)  # justo en el umbral, retroceso=0
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    ordenes_refuerzo = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+check("criterio de venta: en el umbral exacto (retroceso=0) el refuerzo de 2 velas SI puede vender",
+      len(ordenes_refuerzo) == 1, f"ordenes={ordenes_refuerzo}")
+check("criterio de venta: tras una venta confirmada, se olvida el maximo trackeado de esa posicion",
+      "TRAIL" not in bot._maximo_beneficio_neto_por_posicion,
+      f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# El trailing stop SI puede vender por si solo, sin refuerzo, cuando el
+# beneficio retrocede TRAILING_STOP_VENTA_PCT puntos desde el maximo.
+bot.macd_5min_bajista_2_velas = lambda ticker: False  # refuerzo siempre "inactivo"
+bot._maximo_beneficio_neto_por_posicion = {}
+cliente_trailing = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._trading_client = cliente_trailing
+try:
+    bot._data_client = _DataClientPrecioFijo(100.5)  # +0.5%: arma el trailing, retroceso=0
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+    check("criterio de venta: al armar el trailing (retroceso=0) sin refuerzo, NO vende todavia",
+          cliente_trailing.ordenes == [], f"ordenes={cliente_trailing.ordenes}")
+
+    bot._data_client = _DataClientPrecioFijo(101.02)  # +1.02%: nuevo maximo, sigue sin retroceso
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+    check("criterio de venta: nuevo maximo alcanzado (+1.02%), sigue sin retroceso -> NO vende",
+          cliente_trailing.ordenes == [], f"ordenes={cliente_trailing.ordenes}")
+
+    bot._data_client = _DataClientPrecioFijo(100.71)  # +0.71%: retroceso de 0.31 pts desde el maximo -> dispara
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+    check("criterio de venta: retrocede >=0.3 pts desde el maximo (1.02% -> 0.71%) -> SI vende (trailing stop)",
+          len(cliente_trailing.ordenes) == 1, f"ordenes={cliente_trailing.ordenes}")
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
+    bot._maximo_beneficio_neto_por_posicion = {}
 
 
 # ---------------------------------------------------------------------------

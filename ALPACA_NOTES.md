@@ -114,6 +114,28 @@ Consecuencias implementadas:
   ventas fraccionarias fuera de sesión regular) está en el historial de
   git si hace falta consultarlo.
 
+### Criterio de venta de acciones: trailing stop + refuerzo de 2 velas (sept. 2026)
+
+Cambio a petición del usuario, idéntico en concepto al de `bot_completo.py` (misma lógica de
+MACD, no depende del bróker) — sustituye al antiguo "beneficio ≥0.5% + 1 vela de 5min
+bajista". Solo afecta a `revisar_ventas()` (acciones); `revisar_ventas_cripto()` sigue con su
+propio criterio sin cambios (umbral neto 0.3% + 1 vela bajista), por decisión explícita del
+usuario al confirmar el alcance de este cambio.
+
+- `_maximo_beneficio_neto_por_posicion` (dict en memoria, clave = ticker) trackea el
+  beneficio máximo alcanzado por cada posición desde que se abrió. Como Alpaca no cobra
+  comisión en acciones, beneficio bruto = neto aquí (a diferencia de IBKR, donde sí hay que
+  descontar comisión antes de comparar con `UMBRAL_BENEFICIO_PCT`).
+- **Trailing stop (principal)**: se arma solo cuando el máximo alcanza `UMBRAL_BENEFICIO_PCT`
+  (0.5%). Desde ahí, si el beneficio actual retrocede `TRAILING_STOP_VENTA_PCT` (0.3 puntos)
+  desde ese máximo, vende — incluso si ya cayó a pérdida.
+- **Refuerzo (secundario)**: si el beneficio actual ya está en el umbral o por encima, y las
+  2 últimas velas de 5 min seguidas son bajistas (`macd_5min_bajista_2_velas`, no solo la
+  última como antes), también vende.
+- Ninguno de los dos vende por debajo de `UMBRAL_BENEFICIO_PCT`.
+- El máximo se olvida al confirmarse la venta, y se poda al principio de cada ciclo
+  cualquier ticker ya no tenido — si se recompra más tarde, el trailing empieza de cero.
+
 ### Horario
 
 Igual que en `bot_completo.py`: premercado 4:00-9:30 ET, regular

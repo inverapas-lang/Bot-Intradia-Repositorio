@@ -150,13 +150,40 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
 
 ## Reglas de venta (`revisar_ventas`)
 
-- **Nunca hay stop-loss** de pérdidas — el bot no vende nunca solo porque esté en negativo.
+- **Nunca hay stop-loss** de pérdidas — el bot no vende nunca solo porque esté en negativo
+  (decisión explícita del usuario; ver "Cosas que NO son bugs" — se planteó añadirlo para
+  cripto, pero de momento solo se aplicó el trailing stop de abajo, y solo a acciones).
 - Solo actúa si el mercado de esa posición está en horario operativo (bug corregido, ver abajo).
-- Si beneficio neto < 0.5% → se mantiene.
 - Si estás en los últimos 15 min antes del cierre y el beneficio está entre 0.5% y 2% →
-  **venta forzada** con orden límite (0.2% por debajo del precio actual).
-- Si no, y el MACD de 5 min está bajista → vende **a mercado**.
-- Si MACD de 5 min alcista → se deja correr, aunque tenga beneficio.
+  **venta forzada** con orden límite (0.2% por debajo del precio actual) — sin cambios, este
+  mecanismo es independiente del criterio de venta normal de abajo.
+- **Criterio de venta normal — trailing stop + refuerzo de 2 velas** (sustituye al antiguo
+  "beneficio ≥0.5% neto + 1 vela de 5min bajista", cambio de sept. 2026 a petición del
+  usuario: *"quiero modificar el criterio de venta: trailing stop de 0,3% como criterio
+  principal, con la vela de 5 min bajista como señal secundaria de refuerzo (2 velas
+  seguidas en bajista)"*. Solo se aplica a ACCIONES (US/HK/KR); CRIPTO sigue con su
+  criterio propio sin cambios (umbral neto 0.3% + 1 vela bajista), decisión explícita del
+  usuario al confirmar el alcance del cambio):
+  - Se trackea en memoria (`_maximo_beneficio_neto_por_posicion`, clave
+    `mercado:ticker`) el beneficio NETO máximo alcanzado por cada posición desde que se
+    abrió (ya descontada la comisión de compra+venta — `UMBRAL_BENEFICIO_PCT=0.5%` sigue
+    siendo neto, sin cambios en ese cálculo).
+  - **Trailing stop (principal)**: solo se "arma" una vez el máximo neto alcanza
+    `UMBRAL_BENEFICIO_PCT` (0.5%). A partir de ahí, si el beneficio actual retrocede
+    `TRAILING_STOP_VENTA_PCT` (0.3 puntos) o más desde ese máximo, vende — sea cual sea el
+    beneficio en ese momento (incluso si ya cayó a pérdida: una vez armado, protege lo
+    ganado sin límite inferior).
+  - **Refuerzo (secundario)**: si el beneficio neto actual YA está en `UMBRAL_BENEFICIO_PCT`
+    o por encima, y las **2 últimas velas de 5 min seguidas** tienen MACD bajista
+    (`macd_5min_bajista_2_velas`/`macd_5min_bajista_2_velas`, no solo la última como antes —
+    filtra el ruido de una vela bajista suelta que resulta ser solo una pausa), también
+    vende, aunque el trailing no haya retrocedido todavía.
+  - Ninguno de los dos puede vender por debajo de `UMBRAL_BENEFICIO_PCT`: el mínimo de
+    beneficio neto deseado sigue protegido en todo momento.
+  - El máximo trackeado se olvida (`.pop()`) en cuanto la venta se confirma `Filled`, y se
+    poda al principio de cada ciclo cualquier ticker que ya no esté entre las posiciones
+    abiertas (vendido del todo, dentro o fuera del bot) — si se vuelve a comprar más
+    adelante, el trailing empieza de cero.
 - Si el estado de la orden no confirma `Filled`, igual que en compras: se reconsulta la
   posición real para dar un veredicto fiable en el log.
 - En **postmercado de US** SÍ se vende con normalidad (con orden límite, ver sección dedicada

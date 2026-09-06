@@ -1187,6 +1187,27 @@ def macd_5min_bajista(ib, contrato):
     return bool(macd.iloc[-1] < linea_senal.iloc[-1])
 
 
+# --- Criterio de venta de ACCIONES: trailing stop + refuerzo de 2 velas
+# (peticion del usuario, sept. 2026) -no aplica a CRYPTO, que sigue con su
+# propio criterio de umbral neto + 1 vela bajista (macd_5min_bajista de
+# arriba)-.
+TRAILING_STOP_VENTA_PCT = 0.3  # puntos de retroceso desde el maximo neto alcanzado
+_maximo_beneficio_neto_por_posicion = {}  # clave_historial(mercado, ticker) -> % neto maximo visto
+
+
+def macd_5min_bajista_2_velas(ib, contrato):
+    """Version 'reforzada' de macd_5min_bajista(): exige que las DOS
+    ultimas velas de 5 min (no solo la ultima) tengan MACD por debajo de su
+    linea de señal, para filtrar el ruido de una vela bajista suelta que
+    resulta ser solo una pausa dentro de una subida mas larga."""
+    velas = pedir_velas(ib, contrato, '2 D', '5 mins')
+    if len(velas) < 36:
+        return None
+    cierres = pd.Series([v.close for v in velas])
+    macd, linea_senal, _ = calcular_macd(cierres)
+    return bool(macd.iloc[-1] < linea_senal.iloc[-1] and macd.iloc[-2] < linea_senal.iloc[-2])
+
+
 CONTRATO_EUR_USD = Forex('EURUSD')  # contrato de forex para el tipo de cambio real (ver mas abajo)
 INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS = 30 * 60  # 30 min: de sobra para un tipo de cambio
                                                           # que no varia bruscamente de un momento a otro
@@ -1482,6 +1503,15 @@ def revisar_ventas(ib, mercados=None):
             return
     posiciones_con_mercado.sort(key=lambda x: x[0])
 
+    # Poda del maximo de beneficio neto trackeado por posicion (ver
+    # TRAILING_STOP_VENTA_PCT mas abajo): si un ticker ya no esta entre las
+    # posiciones abiertas (se vendio del todo, dentro o fuera del bot), se
+    # olvida su maximo -si se vuelve a comprar mas adelante, empieza de cero-.
+    claves_vivas = {clave_historial(mercado_de_posicion(pos), pos.contract.symbol) for pos in posiciones if pos.position > 0}
+    for clave_vieja in list(_maximo_beneficio_neto_por_posicion.keys()):
+        if clave_vieja not in claves_vivas:
+            del _maximo_beneficio_neto_por_posicion[clave_vieja]
+
     mercado_actual = None
     mercados_cerrados_avisados = set()
     for mercado, pos in posiciones_con_mercado:
@@ -1652,73 +1682,97 @@ def revisar_ventas(ib, mercados=None):
                     notificar_telegram(f"🔴 VENTA FORZADA <b>{contrato.symbol}</b> ({mercado}): "
                                        f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
                                        f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
+                    _maximo_beneficio_neto_por_posicion.pop(clave_historial(mercado, contrato.symbol), None)
                 else:
                     verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
                 continue
 
-            if beneficio_pct < UMBRAL_BENEFICIO_PCT:
+            # Criterio de venta: trailing stop (principal) + 2 velas de 5min
+            # bajistas seguidas (refuerzo) -peticion del usuario, sept. 2026-.
+            # El trailing stop solo se "arma" una vez el beneficio neto
+            # alcanza el minimo deseado (UMBRAL_BENEFICIO_PCT, ya neto de
+            # comision de compra+venta -ver mas arriba-): a partir de ahi, si
+            # el beneficio retrocede TRAILING_STOP_VENTA_PCT puntos desde el
+            # maximo neto visto en esta posicion, se vende, sea cual sea el
+            # beneficio en ese momento (incluso si ya ha caido a perdida: una
+            # vez armado, protege lo ganado sin limite inferior). El refuerzo
+            # (2 velas de 5min bajistas seguidas) solo puede disparar la
+            # venta si el beneficio neto YA esta en el minimo deseado o por
+            # encima -nunca vende por debajo de UMBRAL_BENEFICIO_PCT solo por
+            # el refuerzo-.
+            clave_posicion = clave_historial(mercado, contrato.symbol)
+            maximo_anterior = _maximo_beneficio_neto_por_posicion.get(clave_posicion, beneficio_pct)
+            maximo_neto = max(maximo_anterior, beneficio_pct)
+            _maximo_beneficio_neto_por_posicion[clave_posicion] = maximo_neto
+
+            trailing_armado = maximo_neto >= UMBRAL_BENEFICIO_PCT
+            retroceso_pct = maximo_neto - beneficio_pct
+            disparo_trailing = trailing_armado and retroceso_pct >= TRAILING_STOP_VENTA_PCT
+
+            disparo_refuerzo = False
+            if beneficio_pct >= UMBRAL_BENEFICIO_PCT:
+                bajista_reforzado = macd_5min_bajista_2_velas(ib, contrato)
+                disparo_refuerzo = bool(bajista_reforzado)
+
+            if not (disparo_trailing or disparo_refuerzo):
                 log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), por debajo del umbral -> se mantiene.")
+                    f"(bruto {beneficio_pct_bruto:.2f}%, maximo alcanzado {maximo_neto:.2f}%, "
+                    f"retroceso {retroceso_pct:.2f} pts) -> se mantiene.")
                 continue
 
-            bajista = macd_5min_bajista(ib, contrato)
-            if bajista is None:
-                log(f"VENTAS: {contrato.symbol} - {info_posicion} - datos insuficientes para MACD 5min, se mantiene por precaucion.")
-                continue
+            motivo = ("trailing stop: retrocedio "
+                      f"{retroceso_pct:.2f} pts desde el maximo de {maximo_neto:.2f}%" if disparo_trailing
+                      else "2 velas de 5min bajistas seguidas")
+            # Pre o postmercado de US: liquidez mucho menor que en sesion
+            # regular, se usa orden LIMITADA al precio exacto (con
+            # outsideRth) en vez de orden a mercado.
+            usar_limite_fuera_horario = mercado == "US" and fuera_de_sesion_regular_us()
+            tipo_orden_texto = "limitada al precio exacto (fuera de sesion regular)" if usar_limite_fuera_horario else "a mercado"
+            log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
+                f"(bruto {beneficio_pct_bruto:.2f}%), {motivo} -> VENDIENDO (orden {tipo_orden_texto}).")
 
-            if bajista:
-                # Pre o postmercado de US: liquidez mucho menor que en sesion
-                # regular, se usa orden LIMITADA al precio exacto (con
-                # outsideRth) en vez de orden a mercado.
-                usar_limite_fuera_horario = mercado == "US" and fuera_de_sesion_regular_us()
-                tipo_orden_texto = "limitada al precio exacto (fuera de sesion regular)" if usar_limite_fuera_horario else "a mercado"
-                log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min BAJISTA -> VENDIENDO (orden {tipo_orden_texto}).")
+            def _orden_venta_cash(importe):
+                if usar_limite_fuera_horario:
+                    return crear_orden_limitada_cash('SELL', importe, precio_actual, fuera_horario_regular=True)
+                return crear_orden_mercado_cash('SELL', importe)
 
-                def _orden_venta_cash(importe):
-                    if usar_limite_fuera_horario:
-                        return crear_orden_limitada_cash('SELL', importe, precio_actual, fuera_horario_regular=True)
-                    return crear_orden_mercado_cash('SELL', importe)
+            def _orden_venta(cant):
+                if usar_limite_fuera_horario:
+                    return crear_orden_limitada('SELL', cant, precio_actual, fuera_horario_regular=True)
+                return crear_orden_mercado('SELL', cant)
 
-                def _orden_venta(cant):
-                    if usar_limite_fuera_horario:
-                        return crear_orden_limitada('SELL', cant, precio_actual, fuera_horario_regular=True)
-                    return crear_orden_mercado('SELL', cant)
-
-                if es_cantidad_fraccionaria(cantidad):
-                    orden = _orden_venta_cash(cantidad * precio_actual)
-                else:
-                    orden = _orden_venta(cantidad)
+            if es_cantidad_fraccionaria(cantidad):
+                orden = _orden_venta_cash(cantidad * precio_actual)
+            else:
+                orden = _orden_venta(cantidad)
+            trade = ib.placeOrder(contrato, orden)
+            estado = esperar_estado_final_orden(ib, trade)
+            log(f"VENTAS: {contrato.symbol} - orden {tipo_orden_texto}, "
+                f"estado: {estado}")
+            if (es_cantidad_fraccionaria(cantidad) and estado != 'Filled'
+                    and orden_rechazada_por_codigo(trade, {10244})):
+                # Ver Plan B en revisar_compras: la cuenta puede rechazar
+                # cashQty (10244) pero SI admitir la cantidad fraccionaria
+                # puesta directamente (confirmado a mano en cuenta real).
+                log(f"VENTAS: {contrato.symbol} - no admite el importe en efectivo (cashQty) via API "
+                    f"(error 10244); reintentando con la cantidad fraccionaria puesta directamente.")
+                orden = _orden_venta(cantidad)
                 trade = ib.placeOrder(contrato, orden)
                 estado = esperar_estado_final_orden(ib, trade)
-                log(f"VENTAS: {contrato.symbol} - orden {tipo_orden_texto}, "
+                log(f"VENTAS: {contrato.symbol} - orden {tipo_orden_texto} (cantidad fraccionaria directa), "
                     f"estado: {estado}")
-                if (es_cantidad_fraccionaria(cantidad) and estado != 'Filled'
-                        and orden_rechazada_por_codigo(trade, {10244})):
-                    # Ver Plan B en revisar_compras: la cuenta puede rechazar
-                    # cashQty (10244) pero SI admitir la cantidad fraccionaria
-                    # puesta directamente (confirmado a mano en cuenta real).
-                    log(f"VENTAS: {contrato.symbol} - no admite el importe en efectivo (cashQty) via API "
-                        f"(error 10244); reintentando con la cantidad fraccionaria puesta directamente.")
-                    orden = _orden_venta(cantidad)
-                    trade = ib.placeOrder(contrato, orden)
-                    estado = esperar_estado_final_orden(ib, trade)
-                    log(f"VENTAS: {contrato.symbol} - orden {tipo_orden_texto} (cantidad fraccionaria directa), "
-                        f"estado: {estado}")
-                if estado == 'Filled':
-                    precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
-                    cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad
-                    registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
-                                                   precio_ejecucion, comision_total, contrato.currency,
-                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
-                    notificar_telegram(f"🔴 VENTA <b>{contrato.symbol}</b> ({mercado}): "
-                                       f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
-                                       f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
-                else:
-                    verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
+            if estado == 'Filled':
+                precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
+                cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad
+                registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
+                                               precio_ejecucion, comision_total, contrato.currency,
+                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                notificar_telegram(f"🔴 VENTA <b>{contrato.symbol}</b> ({mercado}): "
+                                   f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
+                                   f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
+                _maximo_beneficio_neto_por_posicion.pop(clave_posicion, None)
             else:
-                log(f"VENTAS: {contrato.symbol} - {info_posicion} - beneficio neto {beneficio_pct:.2f}% "
-                    f"(bruto {beneficio_pct_bruto:.2f}%), MACD 5min ALCISTA -> se deja correr.")
+                verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
         except Exception as e:
             # Un fallo al procesar UNA posicion (p.ej. dato raro, error de red al
             # colocar la orden) no debe abortar la revision de las demas

@@ -1371,14 +1371,14 @@ class _IBFalsoVentasHorario:
                                       isDone=lambda: True, log=[])
 
 
-macd_bajista_original = bot.macd_5min_bajista
-bot.macd_5min_bajista = lambda ib, contrato: True  # forzar señal de venta
+macd_bajista_original = bot.macd_5min_bajista_2_velas
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: True  # forzar señal de venta (refuerzo)
 
 ib_falso_venta_postmercado = _IBFalsoVentasHorario()
 try:
     con_reloj_fijo(postmercado_instante, bot.revisar_ventas, ib_falso_venta_postmercado)
 finally:
-    bot.macd_5min_bajista = macd_bajista_original
+    bot.macd_5min_bajista_2_velas = macd_bajista_original
 
 check("revisar_ventas en postmercado US: coloca exactamente una orden (SI se puede vender)",
       len(ib_falso_venta_postmercado.ordenes_colocadas) == 1,
@@ -1394,11 +1394,11 @@ if ib_falso_venta_postmercado.ordenes_colocadas:
 # (con outsideRth), no a mercado.
 ib_falso_venta_premercado = _IBFalsoVentasHorario()
 ib_falso_venta_premercado._posiciones = [_Posicion2("PREVENTA", 10, 100)]
-bot.macd_5min_bajista = lambda ib, contrato: True
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: True
 try:
     con_reloj_fijo(premercado_instante, bot.revisar_ventas, ib_falso_venta_premercado)
 finally:
-    bot.macd_5min_bajista = macd_bajista_original
+    bot.macd_5min_bajista_2_velas = macd_bajista_original
 
 check("revisar_ventas en premercado US: coloca exactamente una orden",
       len(ib_falso_venta_premercado.ordenes_colocadas) == 1,
@@ -1409,6 +1409,98 @@ if ib_falso_venta_premercado.ordenes_colocadas:
           orden_venta_premercado.orderType == "LMT", f"orderType={orden_venta_premercado.orderType}")
     check("revisar_ventas en premercado US: la orden tiene outsideRth activado",
           orden_venta_premercado.outsideRth is True)
+
+
+# ---------------------------------------------------------------------------
+# 8c. Criterio de venta de ACCIONES: trailing stop (principal) + refuerzo de
+#     2 velas de 5min bajistas (peticion del usuario, sept. 2026). El umbral
+#     minimo (UMBRAL_BENEFICIO_PCT=0.5%) ya esta en NETO (descontada la
+#     comision de compra+venta, ver mas arriba) antes de armar el trailing.
+# ---------------------------------------------------------------------------
+class _IBFalsoTrailingStop:
+    def __init__(self, avgCost, precio_inicial):
+        self.ordenes_colocadas = []
+        self.precio_actual = precio_inicial
+        self._posiciones = [_Posicion("TRAIL", 10, avgCost)]
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(self.precio_actual)]
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"), isDone=lambda: True)
+
+
+es_horario_original_trailing = bot.es_horario_operativo
+en_venta_forzada_original = bot.en_ventana_venta_forzada
+macd_2velas_original = bot.macd_5min_bajista_2_velas
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: False  # aislar del mecanismo de venta forzada, no es lo que se prueba aqui
+
+# --- El trailing stop SOLO se arma a partir de UMBRAL_BENEFICIO_PCT (0.5%):
+#     por debajo de eso, ni el trailing ni el refuerzo pueden vender, aunque
+#     el refuerzo "diga que si" -nunca se vende con perdida o beneficio
+#     insuficiente solo por 2 velas bajistas-.
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: True  # refuerzo siempre "activo"
+bot._maximo_beneficio_neto_por_posicion = {}
+# Precios elegidos para que el beneficio NETO (ya descontada la comision de
+# compra+venta que aplica revisar_ventas) de exactamente el % querido, no
+# el bruto -ver el calculo real en el comentario de cada caso-.
+ib_bajo_umbral = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.27)  # neto +0.2%, por debajo del 0.5%
+try:
+    bot.revisar_ventas(ib_bajo_umbral)
+finally:
+    pass
+check("criterio de venta: por debajo de UMBRAL_BENEFICIO_PCT, NO vende aunque el refuerzo este activo",
+      ib_bajo_umbral.ordenes_colocadas == [], f"ordenes={ib_bajo_umbral.ordenes_colocadas}")
+
+# --- Refuerzo (2 velas bajistas) SI puede vender por si solo, sin
+#     retroceso del trailing, en cuanto se alcanza el minimo neto. ---
+bot._maximo_beneficio_neto_por_posicion = {}
+ib_refuerzo = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto justo por encima del umbral (+0.52%), retroceso=0
+try:
+    bot.revisar_ventas(ib_refuerzo)
+finally:
+    pass
+check("criterio de venta: en el umbral exacto (retroceso=0) el refuerzo de 2 velas SI puede vender",
+      ib_refuerzo.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_refuerzo.ordenes_colocadas}")
+check("criterio de venta: tras una venta confirmada, se olvida el maximo trackeado de esa posicion",
+      "US:TRAIL" not in bot._maximo_beneficio_neto_por_posicion,
+      f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# --- Trailing stop SI puede vender por si solo, sin refuerzo, cuando el
+#     beneficio retrocede TRAILING_STOP_VENTA_PCT puntos desde el maximo. ---
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False  # refuerzo siempre "inactivo": solo puede vender el trailing
+bot._maximo_beneficio_neto_por_posicion = {}
+ib_trailing = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto +0.52%: arma el trailing, retroceso=0
+try:
+    bot.revisar_ventas(ib_trailing)
+    check("criterio de venta: al armar el trailing (retroceso=0) sin refuerzo, NO vende todavia",
+          ib_trailing.ordenes_colocadas == [], f"ordenes={ib_trailing.ordenes_colocadas}")
+
+    ib_trailing.precio_actual = 101.09  # neto +1.02%: nuevo maximo, sigue sin retroceso
+    bot.revisar_ventas(ib_trailing)
+    check("criterio de venta: nuevo maximo alcanzado (+1.02%), sigue sin retroceso -> NO vende",
+          ib_trailing.ordenes_colocadas == [], f"ordenes={ib_trailing.ordenes_colocadas}")
+
+    ib_trailing.precio_actual = 100.78  # neto +0.71%: 0.31 pts desde el maximo de 1.02% -> dispara
+    bot.revisar_ventas(ib_trailing)
+    check("criterio de venta: retrocede >=0.3 pts desde el maximo (1.02% -> 0.71%) -> SI vende (trailing stop)",
+          ib_trailing.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_trailing.ordenes_colocadas}")
+finally:
+    bot.es_horario_operativo = es_horario_original_trailing
+    bot.en_ventana_venta_forzada = en_venta_forzada_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original
+    bot._maximo_beneficio_neto_por_posicion = {}
 
 
 # ---------------------------------------------------------------------------
