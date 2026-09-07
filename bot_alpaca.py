@@ -40,7 +40,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -148,6 +148,79 @@ HORA_CIERRE_US = dt_time(16, 0)            # 16:00 ET (cierre regular; sigue sie
                                             # referencia de "no comprar antes del cierre" y
                                             # "venta forzada antes del cierre")
 HORA_CIERRE_EXTENDIDO_US = dt_time(20, 0)  # 20:00 ET (fin del postmercado)
+
+# --- Festivos del mercado US (NYSE/Nasdaq) - peticion del usuario, sept.
+# 2026: "el bot puede identificar los dias festivos en US para no operar
+# ese dia?". Misma logica que bot_completo.py (ver ahi la explicacion
+# completa): calculados por REGLA, no una lista fija que haya que
+# mantener a mano cada año.
+def _domingo_pascua(year):
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, mes, dia)
+
+
+def _n_esimo_dia_semana(year, month, weekday_objetivo, n):
+    d = date(year, month, 1)
+    primero = d + timedelta(days=(weekday_objetivo - d.weekday()) % 7)
+    return primero + timedelta(weeks=n - 1)
+
+
+def _ultimo_dia_semana(year, month, weekday_objetivo):
+    siguiente_mes = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    d = siguiente_mes - timedelta(days=1)
+    while d.weekday() != weekday_objetivo:
+        d -= timedelta(days=1)
+    return d
+
+
+def _fecha_observada_nyse(d):
+    if d.weekday() == 5:
+        return d - timedelta(days=1)
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+    return d
+
+
+_cache_festivos_nyse = {}
+
+
+def festivos_nyse(year):
+    if year in _cache_festivos_nyse:
+        return _cache_festivos_nyse[year]
+    festivos = {
+        _fecha_observada_nyse(date(year, 1, 1)),               # Año Nuevo
+        _n_esimo_dia_semana(year, 1, 0, 3),                     # MLK Day
+        _n_esimo_dia_semana(year, 2, 0, 3),                     # Washington's Birthday
+        _domingo_pascua(year) - timedelta(days=2),              # Good Friday
+        _ultimo_dia_semana(year, 5, 0),                         # Memorial Day
+        _fecha_observada_nyse(date(year, 7, 4)),                # Independence Day
+        _n_esimo_dia_semana(year, 9, 0, 1),                     # Labor Day
+        _n_esimo_dia_semana(year, 11, 3, 4),                    # Thanksgiving (jueves=3)
+        _fecha_observada_nyse(date(year, 12, 25)),              # Navidad
+    }
+    if year >= 2022:
+        festivos.add(_fecha_observada_nyse(date(year, 6, 19)))  # Juneteenth (festivo NYSE desde 2022)
+    _cache_festivos_nyse[year] = festivos
+    return festivos
+
+
+def es_festivo_us(fecha):
+    """True si `fecha` (date, no datetime) es festivo de NYSE/Nasdaq."""
+    return fecha in festivos_nyse(fecha.year)
+
 
 MINUTOS_SIN_COMPRAR_ANTES_CIERRE = 90    # ultimos 90 min antes del cierre: no comprar (salvo promediar a la baja)
 MINUTOS_VENTA_FORZADA_ANTES_CIERRE = 15  # ultimos 15 min: vender lo que tenga entre +0.5% y +2% de beneficio
@@ -342,25 +415,26 @@ def log(mensaje):
 
 # --- Horarios ---
 def es_horario_operativo():
-    """True si el mercado US esta en horario extendido (4:00-20:00 ET),
-    de lunes a viernes. NOTA: igual que en bot_completo.py, no tiene en
-    cuenta festivos del mercado, solo fin de semana."""
+    """True si el mercado US esta en horario extendido (4:00-20:00 ET), de
+    lunes a viernes y sin ser festivo de NYSE/Nasdaq (ver
+    festivos_nyse()/es_festivo_us() mas arriba, peticion del usuario sept.
+    2026)."""
     ahora = datetime.now(ZONA_NY)
-    if ahora.weekday() >= 5:
+    if ahora.weekday() >= 5 or es_festivo_us(ahora.date()):
         return False
     return HORA_INICIO_US <= ahora.time() < HORA_CIERRE_EXTENDIDO_US
 
 
 def en_postmercado_us():
     ahora = datetime.now(ZONA_NY)
-    if ahora.weekday() >= 5:
+    if ahora.weekday() >= 5 or es_festivo_us(ahora.date()):
         return False
     return HORA_CIERRE_US <= ahora.time() < HORA_CIERRE_EXTENDIDO_US
 
 
 def fuera_de_sesion_regular_us():
     ahora = datetime.now(ZONA_NY)
-    if ahora.weekday() >= 5:
+    if ahora.weekday() >= 5 or es_festivo_us(ahora.date()):
         return False
     hora = ahora.time()
     en_premercado = HORA_INICIO_US <= hora < HORA_APERTURA_REGULAR_US

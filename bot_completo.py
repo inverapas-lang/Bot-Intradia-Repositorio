@@ -49,7 +49,7 @@ import math
 import os
 import threading
 import time
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from collections import defaultdict
 from zoneinfo import ZoneInfo
 
@@ -112,6 +112,95 @@ HORA_CIERRE_HK = dt_time(16, 0)    # 16:00 hora de Hong Kong
 ZONA_KR = ZoneInfo("Asia/Seoul")
 HORA_INICIO_KR = dt_time(9, 0)     # 9:00 hora de Corea
 HORA_CIERRE_KR = dt_time(15, 30)   # 15:30 hora de Corea
+
+# --- Festivos del mercado US (NYSE/Nasdaq) - peticion del usuario, sept.
+# 2026: "el bot puede identificar los dias festivos en US para no operar
+# ese dia?". Calculados por REGLA (no una lista fija que haya que
+# mantener a mano cada año) siguiendo el calendario oficial de festivos de
+# NYSE: Año Nuevo, Martin Luther King Jr. Day (3er lunes de enero),
+# Washington's Birthday (3er lunes de febrero), Good Friday (viernes antes
+# de Pascua), Memorial Day (ultimo lunes de mayo), Juneteenth (19 de junio,
+# festivo NYSE desde 2022), Independence Day (4 de julio), Labor Day (1er
+# lunes de septiembre), Thanksgiving (4o jueves de noviembre) y Navidad (25
+# de diciembre). Cuando el festivo cae en sabado se observa el viernes
+# anterior; si cae en domingo, el lunes siguiente (regla estandar de NYSE).
+# NO cubre HK ni KR (calendario lunar, no calculable por regla simple) -
+# limitacion ya documentada, esos mercados solo comprueban fin de semana.
+def _domingo_pascua(year):
+    """Domingo de Pascua (calendario gregoriano) via el algoritmo de
+    Meeus/Jones/Butcher. Necesario para Good Friday (Pascua - 2 dias)."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, mes, dia)
+
+
+def _n_esimo_dia_semana(year, month, weekday_objetivo, n):
+    """n-esima ocurrencia (1=primera) de un dia de la semana (0=lunes,
+    ..., 6=domingo) dentro de ese mes/año."""
+    d = date(year, month, 1)
+    primero = d + timedelta(days=(weekday_objetivo - d.weekday()) % 7)
+    return primero + timedelta(weeks=n - 1)
+
+
+def _ultimo_dia_semana(year, month, weekday_objetivo):
+    """Ultima ocurrencia de un dia de la semana dentro de ese mes/año."""
+    siguiente_mes = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    d = siguiente_mes - timedelta(days=1)
+    while d.weekday() != weekday_objetivo:
+        d -= timedelta(days=1)
+    return d
+
+
+def _fecha_observada_nyse(d):
+    """Si el festivo cae en fin de semana, la fecha que NYSE observa en su
+    lugar (sabado -> viernes anterior, domingo -> lunes siguiente)."""
+    if d.weekday() == 5:
+        return d - timedelta(days=1)
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+    return d
+
+
+_cache_festivos_nyse = {}
+
+
+def festivos_nyse(year):
+    """Devuelve el set de fechas (date) festivas de NYSE/Nasdaq para ese
+    año, calculadas por regla y cacheadas (no cambian una vez calculadas)."""
+    if year in _cache_festivos_nyse:
+        return _cache_festivos_nyse[year]
+    festivos = {
+        _fecha_observada_nyse(date(year, 1, 1)),               # Año Nuevo
+        _n_esimo_dia_semana(year, 1, 0, 3),                     # MLK Day
+        _n_esimo_dia_semana(year, 2, 0, 3),                     # Washington's Birthday
+        _domingo_pascua(year) - timedelta(days=2),              # Good Friday
+        _ultimo_dia_semana(year, 5, 0),                         # Memorial Day
+        _fecha_observada_nyse(date(year, 7, 4)),                # Independence Day
+        _n_esimo_dia_semana(year, 9, 0, 1),                     # Labor Day
+        _n_esimo_dia_semana(year, 11, 3, 4),                    # Thanksgiving (jueves=3)
+        _fecha_observada_nyse(date(year, 12, 25)),              # Navidad
+    }
+    if year >= 2022:
+        festivos.add(_fecha_observada_nyse(date(year, 6, 19)))  # Juneteenth (festivo NYSE desde 2022)
+    _cache_festivos_nyse[year] = festivos
+    return festivos
+
+
+def es_festivo_us(fecha):
+    """True si `fecha` (date, no datetime) es festivo de NYSE/Nasdaq."""
+    return fecha in festivos_nyse(fecha.year)
 
 # --- Reintentos ante el error 162 (sesion de datos conectada desde otra IP) ---
 INTENTOS_MAXIMOS = 3
@@ -571,10 +660,14 @@ def log(mensaje):
 
 def es_horario_operativo(mercado):
     """True si el mercado indicado ('US', 'EU', 'HK' o 'KR') esta en horario
-    operativo ahora mismo, de lunes a viernes."""
+    operativo ahora mismo, de lunes a viernes. Para US, tambien tiene en
+    cuenta los festivos de NYSE/Nasdaq (ver festivos_nyse()/es_festivo_us(),
+    peticion del usuario sept. 2026) - EU/HK/KR siguen sin esta comprobacion
+    (calendario de festivos no calculable por regla simple, limitacion ya
+    documentada)."""
     if mercado == "US":
         ahora = datetime.now(ZONA_NY)
-        if ahora.weekday() >= 5:
+        if ahora.weekday() >= 5 or es_festivo_us(ahora.date()):
             return False
         return HORA_INICIO_US <= ahora.time() < HORA_CIERRE_EXTENDIDO_US
     elif mercado == "EU":
@@ -623,7 +716,7 @@ def en_postmercado_us():
     la liquidez es mucho menor que en sesion regular, y no se quiere
     arriesgar a salir de una posicion en esas condiciones)."""
     ahora = datetime.now(ZONA_NY)
-    if ahora.weekday() >= 5:
+    if ahora.weekday() >= 5 or es_festivo_us(ahora.date()):
         return False
     return HORA_CIERRE_US <= ahora.time() < HORA_CIERRE_EXTENDIDO_US
 
@@ -636,7 +729,7 @@ def fuera_de_sesion_regular_us():
     en vez de a mercado, para no arriesgarse a una ejecucion a un precio muy
     distinto del que se vio al analizar la señal."""
     ahora = datetime.now(ZONA_NY)
-    if ahora.weekday() >= 5:
+    if ahora.weekday() >= 5 or es_festivo_us(ahora.date()):
         return False
     hora = ahora.time()
     en_premercado = HORA_INICIO_US <= hora < HORA_APERTURA_REGULAR_US
@@ -680,14 +773,15 @@ def en_ventana_venta_forzada(mercado):
 
 def proxima_apertura(mercado):
     """Devuelve el datetime (con zona horaria) de la proxima apertura de ese
-    mercado, saltando fines de semana."""
+    mercado, saltando fines de semana (y festivos de NYSE si es US -ver
+    es_festivo_us(), peticion del usuario sept. 2026-)."""
     zona, hora_apertura = APERTURA_POR_MERCADO[mercado]
     ahora = datetime.now(zona)
     candidato = ahora.replace(hour=hora_apertura.hour, minute=hora_apertura.minute,
                               second=0, microsecond=0)
     if candidato <= ahora:
         candidato += timedelta(days=1)
-    while candidato.weekday() >= 5:  # 5=sabado, 6=domingo
+    while candidato.weekday() >= 5 or (mercado == "US" and es_festivo_us(candidato.date())):
         candidato += timedelta(days=1)
     return candidato
 
@@ -2446,7 +2540,7 @@ def justo_cerro_mercado(mercado):
         return False
     zona, hora_cierre = CIERRE_POR_MERCADO[mercado]
     ahora = datetime.now(zona)
-    if ahora.weekday() >= 5:
+    if ahora.weekday() >= 5 or (mercado == "US" and es_festivo_us(ahora.date())):
         return False
     cierre_hoy = ahora.replace(hour=hora_cierre.hour, minute=hora_cierre.minute,
                                 second=0, microsecond=0)

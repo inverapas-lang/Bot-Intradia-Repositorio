@@ -189,6 +189,48 @@ sabado_us = datetime(2026, 8, 15, 10, 0, tzinfo=bot.ZONA_NY)
 check("es_horario_operativo US: sabado -> cerrado (fin de semana)",
       con_reloj_fijo(sabado_us, bot.es_horario_operativo, "US") is False)
 
+# ---------------------------------------------------------------------------
+# 4b. Festivos de NYSE/Nasdaq (peticion del usuario, sept. 2026: "el bot
+#     puede identificar los dias festivos en US para no operar ese dia?").
+#     Calculados por regla, verificados contra el calendario oficial real.
+# ---------------------------------------------------------------------------
+check("festivos_nyse 2025: coincide con el calendario oficial (10 festivos)",
+      sorted(bot.festivos_nyse(2025)) == [
+          date(2025, 1, 1), date(2025, 1, 20), date(2025, 2, 17), date(2025, 4, 18),
+          date(2025, 5, 26), date(2025, 6, 19), date(2025, 7, 4), date(2025, 9, 1),
+          date(2025, 11, 27), date(2025, 12, 25),
+      ], f"festivos={sorted(bot.festivos_nyse(2025))}")
+
+check("festivos_nyse 2026: Labor Day cae en 7 de septiembre (caso real reportado por el usuario)",
+      date(2026, 9, 7) in bot.festivos_nyse(2026))
+check("festivos_nyse 2026: Independence Day (4 jul, sabado) se observa el viernes 3",
+      date(2026, 7, 3) in bot.festivos_nyse(2026) and date(2026, 7, 4) not in bot.festivos_nyse(2026))
+
+check("es_festivo_us: 7 de septiembre de 2026 (Labor Day) -> True", bot.es_festivo_us(date(2026, 9, 7)))
+check("es_festivo_us: 8 de septiembre de 2026 (dia normal) -> False", not bot.es_festivo_us(date(2026, 9, 8)))
+
+# Lunes 7 de sept. 2026, 10:00 ET (Labor Day, horario normal de mercado) ->
+# debe dar CERRADO por festivo, aunque sea un dia de semana en horario.
+labor_day_2026 = datetime(2026, 9, 7, 10, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: Labor Day 2026 en horario normal -> cerrado por festivo",
+      con_reloj_fijo(labor_day_2026, bot.es_horario_operativo, "US") is False)
+check("en_postmercado_us: Labor Day 2026 -> cerrado por festivo (no solo mira fin de semana)",
+      con_reloj_fijo(datetime(2026, 9, 7, 17, 0, tzinfo=bot.ZONA_NY), bot.en_postmercado_us) is False)
+check("fuera_de_sesion_regular_us: Labor Day 2026 en premercado -> cerrado por festivo",
+      con_reloj_fijo(datetime(2026, 9, 7, 6, 0, tzinfo=bot.ZONA_NY), bot.fuera_de_sesion_regular_us) is False)
+
+# El dia siguiente (martes 8 sept. 2026, dia normal) -> vuelve a abrir con normalidad.
+check("es_horario_operativo US: el dia siguiente al festivo, horario normal -> abierto",
+      con_reloj_fijo(datetime(2026, 9, 8, 10, 0, tzinfo=bot.ZONA_NY), bot.es_horario_operativo, "US") is True)
+
+# proxima_apertura(): si hoy es festivo, debe saltar al dia siguiente (no
+# ofrecer una apertura el mismo dia festivo).
+proxima_tras_festivo = con_reloj_fijo(datetime(2026, 9, 7, 10, 0, tzinfo=bot.ZONA_NY), bot.proxima_apertura, "US")
+check("proxima_apertura US: si hoy es festivo (Labor Day), la proxima apertura NO es hoy",
+      proxima_tras_festivo.date() != date(2026, 9, 7), f"proxima_apertura={proxima_tras_festivo}")
+check("proxima_apertura US: tras el festivo, la proxima apertura es el dia siguiente (8 sept, dia normal)",
+      proxima_tras_festivo.date() == date(2026, 9, 8), f"proxima_apertura={proxima_tras_festivo}")
+
 # Justo en el limite del cierre REGULAR (16:00 ET): ahora sigue ABIERTO,
 # porque entra el postmercado extendido (16:00-20:00 ET) - decision del
 # usuario de poder comprar (no vender) en esa franja.

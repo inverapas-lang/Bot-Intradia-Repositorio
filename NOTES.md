@@ -246,6 +246,38 @@ Piezas clave:
   Usado tanto en `revisar_compras` como en `revisar_ventas` para decidir orden límite vs
   mercado (en ventas puede darse en cualquiera de los dos tramos, ya no solo en premercado).
 
+## Festivos del mercado US (NYSE/Nasdaq) — sept. 2026, petición del usuario
+
+Petición del usuario: *"sabes que el bot puede identificar los días que el mercado no va a
+estar abierto? por ejemplo, hoy es festivo en US"* (caso real: Labor Day, 7 de septiembre de
+2026). Antes, `es_horario_operativo("US")` solo comprobaba fin de semana — en un día festivo
+de mercado (entre semana), el bot habría seguido intentando comprar/vender con normalidad.
+
+`festivos_nyse(year)` calcula por **regla** (no una lista fija que haya que mantener a mano
+cada año) los 10 festivos anuales de NYSE/Nasdaq:
+- Año Nuevo, Martin Luther King Jr. Day (3er lunes de enero), Washington's Birthday (3er
+  lunes de febrero), Good Friday (viernes antes de Pascua — requiere calcular la fecha de
+  Pascua con el algoritmo de Meeus/Jones/Butcher), Memorial Day (último lunes de mayo),
+  Juneteenth (19 de junio, festivo NYSE solo desde 2022), Independence Day (4 de julio),
+  Labor Day (1er lunes de septiembre), Thanksgiving (4o jueves de noviembre) y Navidad (25 de
+  diciembre).
+- **Regla de observancia** si el festivo cae en fin de semana: sábado → se observa el
+  viernes anterior; domingo → se observa el lunes siguiente (regla estándar de NYSE).
+- `es_festivo_us(fecha)` consulta el resultado (cacheado por año, no se recalcula cada vez).
+
+`es_horario_operativo("US")`, `en_postmercado_us()`, `fuera_de_sesion_regular_us()`,
+`proxima_apertura("US")` y `justo_cerro_mercado("US")` ya tienen en cuenta el festivo — como
+`minutos_hasta_cierre()` (y por tanto `en_ventana_sin_compra`/`en_ventana_venta_forzada`) ya
+dependían de `es_horario_operativo()`, no hizo falta tocarlos aparte.
+
+**Limitación que sigue igual, documentada explícitamente**: esto solo cubre US. **HK y KR NO
+tienen festivos calculados** — sus calendarios dependen en buena parte del calendario lunar
+chino/coreano (Año Nuevo Lunar, Chuseok...) y no son calculables por una regla simple como la
+de NYSE; haría falta una lista mantenida a mano cada año. Si se quiere cubrir HK/KR, la forma
+más simple sería una lista estática de fechas por año (a diferencia de US, que no necesita
+mantenimiento). Verificado el cálculo de US contra el calendario oficial 2025 y 2026 completo
+(incluyendo el caso real de Labor Day 2026).
+
 **Hallazgo adicional (visto en producción, agosto 2026)**: las fracciones de acción NO
 funcionan vía API fuera de la sesión regular, **ni por `cashQty` ni por cantidad directa**
 (error 10243 "Please use desktop version to place this order" con los dos métodos, para

@@ -166,8 +166,19 @@ no se vende** (misma decisión del usuario que en el bot de IBKR). Las
 ventanas de seguridad (no comprar en los últimos 90 min, venta forzada en
 los últimos 15 min) siguen ancladas al cierre regular (16:00 ET).
 
-**No maneja festivos del mercado** (solo fin de semana) — misma limitación
-que el bot de IBKR, documentada ahí también.
+**Festivos de NYSE/Nasdaq: SÍ los detecta** (añadido sept. 2026, petición del
+usuario: *"puede el bot identificar los días que el mercado no va a estar
+abierto... hoy es festivo en US"*). `festivos_nyse(year)`/`es_festivo_us(fecha)`
+calculan por regla (no una lista fija que haya que mantener a mano cada
+año) los 10 festivos anuales de NYSE/Nasdaq: Año Nuevo, MLK Day, Washington's
+Birthday, Good Friday (requiere calcular Pascua), Memorial Day, Juneteenth
+(desde 2022), Independence Day, Labor Day, Thanksgiving y Navidad — con la
+regla de observancia estándar si caen en fin de semana (sábado → viernes
+anterior, domingo → lunes siguiente). `es_horario_operativo()`,
+`en_postmercado_us()` y `fuera_de_sesion_regular_us()` ya lo tienen en
+cuenta, así que ningún sitio del bot necesita cambios adicionales.
+Verificado contra el calendario oficial 2025/2026 (incluido el caso real
+que reportó el usuario: Labor Day 2026 cae en 7 de septiembre).
 
 ### Peticiones de datos: en LOTE, no una por ticker
 
