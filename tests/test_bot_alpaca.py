@@ -847,6 +847,73 @@ finally:
 check("revisar_compras_cripto: NO compra si superaria el limite de exposicion TOTAL en cripto (20%)",
       len(ordenes_compra_cripto_limite) == 0, f"ordenes={ordenes_compra_cripto_limite}")
 
+# --- BUG REAL DE PRODUCCION (sept. 2026): Alpaca devuelve el simbolo de
+# las posiciones de cripto YA ABIERTAS sin la barra ('LINKUSD', no
+# 'LINK/USD' como en ACTIVOS_CRYPTO y en todo el resto del codigo). Sin
+# normalizarlo, es_cripto() lo clasificaba como ACCION: revisar_ventas()
+# lo procesaba con el cliente de datos de acciones (nunca encuentra ese
+# ticker -> "no se pudo obtener precio actual" en bucle infinito) y
+# revisar_ventas_cripto() no llegaba a verlo nunca. Con esto NINGUNA
+# posicion de cripto ya abierta pasaba jamas por el trailing stop, por
+# grande que fuera el retroceso -caso real: LINK/USD retrocedio mas de 1.7
+# puntos sin que el bot vendiera nada-.
+check("_normalizar_simbolo_cripto: reconstruye la barra para un simbolo de ACTIVOS_CRYPTO",
+      bot._normalizar_simbolo_cripto("LINKUSD") == "LINK/USD")
+check("_normalizar_simbolo_cripto: no toca un simbolo que ya lleva la barra",
+      bot._normalizar_simbolo_cripto("LINK/USD") == "LINK/USD")
+check("_normalizar_simbolo_cripto: no toca un ticker de accion (no esta en ACTIVOS_CRYPTO)",
+      bot._normalizar_simbolo_cripto("AAPL") == "AAPL")
+
+posicion_cripto_sin_barra = types.SimpleNamespace(
+    symbol="LINKUSD", qty="0.42", avg_entry_price="10.0", market_value="46.20",
+    unrealized_pl="4.20", unrealized_plpc="0.10",
+)
+bot._maximo_beneficio_neto_por_posicion = {"LINK/USD": 5.24}  # maximo ya trackeado (pico previo)
+bot._scale_out_realizado = {"LINK/USD"}  # ya se hizo la salida parcial antes
+bot._trading_client = _TradingClientFalso(posiciones=[posicion_cripto_sin_barra])
+bot._crypto_data_client = _fake_crypto_data_client_precio(10.35)  # +3.5% bruto: retroceso >0.3 pts desde el 5.24% maximo
+bot.macd_5min_bajista_cripto_2_velas = lambda ticker: False
+try:
+    bot._cache_largas_por_dia = {}
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)  # NO debe tocar esta posicion (es cripto, aunque llegue sin barra)
+    ordenes_stock_linkusd = bot._trading_client.ordenes.copy()
+    bot.revisar_ventas_cripto()   # SI debe procesarla y vender (retroceso > TRAILING_STOP_VENTA_PCT)
+finally:
+    ordenes_cripto_linkusd = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._crypto_data_client = crypto_data_client_original
+    bot.macd_5min_bajista_cripto_2_velas = macd_5min_bajista_cripto_2_velas_original
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("revisar_ventas (acciones): una posicion de cripto SIN barra en el simbolo (formato real de "
+      "Alpaca) NO se procesa como accion, gracias a la normalizacion",
+      len(ordenes_stock_linkusd) == 0, f"ordenes={ordenes_stock_linkusd}")
+check("revisar_ventas_cripto: una posicion de cripto SIN barra en el simbolo SI se detecta y se "
+      "vende (trailing stop disparado por el retroceso), gracias a la normalizacion",
+      len(ordenes_cripto_linkusd) == 1, f"ordenes={ordenes_cripto_linkusd}")
+if ordenes_cripto_linkusd:
+    check("revisar_ventas_cripto: la orden de venta usa el simbolo CON barra (formato valido para "
+          "la API de ordenes/datos), no el 'LINKUSD' crudo de la posicion",
+          ordenes_cripto_linkusd[0].symbol == "LINK/USD", f"symbol={ordenes_cripto_linkusd[0].symbol}")
+
+# --- obtener_posiciones(): la normalizacion se aplica en el punto de
+# entrada, asi que TODO el codigo que consuma posiciones (venta, cartera,
+# poda) ve siempre el simbolo con barra, sin tener que acordarse de
+# normalizar en cada sitio por separado ---
+bot._trading_client = _TradingClientFalso(posiciones=[
+    types.SimpleNamespace(symbol="BCHUSD", qty="0.06", avg_entry_price="500.0", market_value="30.0",
+                          unrealized_pl="0.0", unrealized_plpc="0.0"),
+])
+try:
+    posiciones_normalizadas = bot.obtener_posiciones()
+finally:
+    bot._trading_client = trading_client_original
+
+check("obtener_posiciones: normaliza el simbolo de cripto (sin barra -> con barra) para TODOS los "
+      "consumidores (venta, cartera, poda)",
+      posiciones_normalizadas[0].symbol == "BCH/USD", f"symbol={posiciones_normalizadas[0].symbol}")
+
 
 # ---------------------------------------------------------------------------
 # 10. MAX_POSICIONES_ABIERTAS y caja disponible (efectivo): peticion del

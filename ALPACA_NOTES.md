@@ -747,6 +747,42 @@ margen para el resto del ciclo, pero nunca se compra de más. Si `cash` no
 se puede leer (fallo de red), se omite solo esa comprobación concreta sin
 bloquear el resto del ciclo.
 
+## BUG CRÍTICO corregido: el trailing stop NUNCA se aplicaba a cripto ya comprada (sept. 2026)
+
+Caso real reportado por el usuario: `/cartera` mostró LINK/USD en +5,24% a las 11:42h y en
++3,50% a las 14:23h (retroceso de 1,74 puntos, muy por encima de `TRAILING_STOP_VENTA_PCT`,
+0,3 puntos) sin que el bot vendiera nada, ni total ni parcial. Al revisar el log real del
+servicio (`journalctl -u bot-alpaca`) se vio la causa: `VENTAS: LINKUSD - no se pudo obtener
+precio actual, se omite.` repetido en TODOS los ciclos, sin excepción, desde mucho antes del
+retroceso.
+
+**Causa raíz**: Alpaca devuelve el símbolo de una posición de cripto YA ABIERTA (`Position.symbol`,
+lo que da `get_all_positions()`) **sin la barra** — `"LINKUSD"`, no `"LINK/USD"` — a diferencia de
+`ACTIVOS_CRYPTO`, las órdenes de compra y las peticiones de datos, que SIEMPRE usan la barra. Como
+`es_cripto(ticker)` decide únicamente por la presencia de `"/"`, estas posiciones se clasificaban
+por error como ACCIONES:
+- `revisar_ventas()` (acciones) NO las filtraba (su filtro es `if not es_cripto(p.symbol)`, y
+  `es_cripto("LINKUSD")` da `False`), así que intentaba pedir su precio con el cliente de datos
+  de ACCIONES (`StockHistoricalDataClient`) — que nunca encuentra un ticker "LINKUSD" válido,
+  de ahí el error en bucle infinito.
+- `revisar_ventas_cripto()` NUNCA llegaba a verlas: su filtro es `if es_cripto(p.symbol)`, que
+  también da `False` para `"LINKUSD"`.
+
+Resultado: **ninguna posición de cripto ya abierta pasaba jamás por el trailing stop** (ni por
+la salida parcial, ni por el refuerzo de 2 velas), por grande que fuera el retroceso —
+mientras que las señales de COMPRA sí funcionaban con normalidad, porque esas usan
+directamente `ACTIVOS_CRYPTO` (con barra), nunca `Position.symbol`. Este bug llevaba activo
+desde que se implementó el trailing stop de cripto (no es un efecto de un despliegue reciente).
+
+**Arreglo**: nueva función `_normalizar_simbolo_cripto(symbol)` que reconstruye la barra
+comparando contra `ACTIVOS_CRYPTO` (`"LINKUSD"` → `"LINK/USD"`; deja intacto cualquier símbolo
+que ya la lleve o que no sea de cripto). Se aplica **una sola vez, en el punto de entrada**
+(`obtener_posiciones()`, mutando `p.symbol` antes de devolver la lista), así que todo el código
+que consume posiciones — `revisar_ventas()`, `revisar_ventas_cripto()`, la poda de seguimiento,
+`cartera_alpaca.py`/`/cartera`, `/hoy`, etc. — ve siempre el formato con barra sin tener que
+acordarse de normalizar en cada sitio por separado. Como efecto secundario (positivo), `/cartera`
+ahora también muestra `LINK/USD` en vez de `LINKUSD` en la tabla de posiciones abiertas.
+
 ## Bug corregido: "1 de 7 en contra" compraba contra la tendencia larga (sept. 2026)
 
 `decidir_senal()` (idéntica en concepto a `analizar_activo()` de `bot_completo.py`, ver ahí

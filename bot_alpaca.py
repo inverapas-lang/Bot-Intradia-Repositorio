@@ -1018,6 +1018,29 @@ def calcular_precio_limite_venta(precio_actual):
     return round(precio_actual * (1 - MARGEN_ORDEN_LIMITADA_VENTA_PCT / 100), 2)
 
 
+def _normalizar_simbolo_cripto(symbol):
+    """BUG REAL DE PRODUCCION (sept. 2026): Alpaca devuelve el simbolo de
+    las posiciones de cripto ya abiertas SIN la barra (p.ej. 'LINKUSD'),
+    mientras que TODO el resto del codigo usa el formato CON barra
+    ('LINK/USD', igual que en ACTIVOS_CRYPTO, las ordenes de compra y las
+    peticiones de datos). Como es_cripto() decide por la presencia de "/",
+    estas posiciones se colaban como si fueran ACCIONES: revisar_ventas()
+    las procesaba con el cliente de datos de ACCIONES (que nunca encuentra
+    un ticker como 'LINKUSD' -> "no se pudo obtener precio actual, se
+    omite." en bucle infinito) y revisar_ventas_cripto() no llegaba a
+    verlas nunca (su filtro exige la barra). Resultado: el trailing stop de
+    cripto no se aplicaba NUNCA a una posicion ya abierta, por grande que
+    fuera el retroceso. Se reconstruye la barra comparando contra
+    ACTIVOS_CRYPTO (que siempre la lleva) antes de que el simbolo llegue a
+    ningun otro sitio del codigo."""
+    if "/" in symbol:
+        return symbol
+    for cripto in ACTIVOS_CRYPTO:
+        if cripto.replace("/", "") == symbol:
+            return cripto
+    return symbol
+
+
 def obtener_posiciones(client=None):
     """Devuelve la lista de posiciones abiertas (solo largas: este bot
     nunca abre cortos). Acepta un `client` distinto del que usa el bot para
@@ -1027,7 +1050,10 @@ def obtener_posiciones(client=None):
     usuario, sept. 2026)."""
     cliente = client or _trading_client
     try:
-        return [p for p in cliente.get_all_positions() if float(p.qty) > 0]
+        posiciones = [p for p in cliente.get_all_positions() if float(p.qty) > 0]
+        for p in posiciones:
+            p.symbol = _normalizar_simbolo_cripto(p.symbol)
+        return posiciones
     except Exception as e:
         log(f"ERROR al obtener las posiciones abiertas: {type(e).__name__}: {e}")
         return []
