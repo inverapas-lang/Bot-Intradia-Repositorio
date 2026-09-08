@@ -997,6 +997,16 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
     retroactivamente el máximo ya perdido de una posición que estuviera abierta antes de
     desplegar este arreglo — para esas, el trailing volverá a trackear desde el valor
     vigente en el siguiente reinicio, no desde el pico histórico ya olvidado.
+16. **Error 321 "Please enter exchange" al generar el resumen de cierre de CRYPTO (caso real,
+    sept. 2026)**: mismo problema de fondo que ya se había arreglado en `revisar_ventas()`
+    (ver más abajo la explicación completa del PAXOS-vs-ZEROHASH), pero sin el arreglo
+    aplicado en `generar_resumen_cierre_mercado()`: el contrato CRYPTO que devuelve
+    `ib.positions()` trae `exchange` vacío, y al pedir el precio actual con `pedir_velas()`
+    para calcular el beneficio no realizado de cada posición, IBKR rechazaba la petición con
+    el error 321, causando 3 reintentos de 15s (~90s perdidos) por cada criptomoneda en
+    cartera solo para mostrar el resumen al arrancar el bot. → se añadió el mismo
+    `ib.qualifyContracts(pos.contract)` (si `exchange` viene vacío) justo antes de pedir el
+    precio, igual que ya hacía `revisar_ventas()`.
 
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 

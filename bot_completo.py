@@ -2684,6 +2684,14 @@ def generar_resumen_cierre_mercado(ib, mercado):
 
     for pos in posiciones:
         symbol = pos.contract.symbol
+        # Igual que en revisar_ventas(): el contrato CRYPTO que devuelve
+        # ib.positions() viene con `exchange` vacio, y reqHistoricalData lo
+        # rechaza con el error 321 "Please enter exchange" (visto en
+        # produccion, causaba 3 reintentos de 15s por cada cripto en cartera
+        # solo para generar este resumen). Se deja que IBKR lo resuelva a
+        # partir de su propio conId, sin adivinar el exchange.
+        if mercado == "CRYPTO" and not pos.contract.exchange:
+            ib.qualifyContracts(pos.contract)
         # Preferimos la fecha de apertura registrada en nuestro propio
         # historial (persiste entre dias), ya que reqExecutions() de IBKR
         # solo cubre el dia actual y no sirve para posiciones abiertas en
