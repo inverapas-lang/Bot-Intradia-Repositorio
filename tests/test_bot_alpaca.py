@@ -631,6 +631,47 @@ finally:
     bot._maximo_beneficio_neto_por_posicion = {}
     bot._scale_out_realizado = set()
 
+# --- Escalones de trailing stop segun el maximo alcanzado (peticion del
+# usuario, sept. 2026): cuanto mas alto el pico, mas margen de retroceso se
+# permite antes de vender. Unidades ---
+check("_margen_trailing_stop: por debajo de 2% -> margen base (TRAILING_STOP_VENTA_PCT, 0.3 pts)",
+      bot._margen_trailing_stop(1.5) == bot.TRAILING_STOP_VENTA_PCT)
+check("_margen_trailing_stop: maximo de 2% a <3% -> margen de 0.5 pts",
+      bot._margen_trailing_stop(2.0) == 0.5 and bot._margen_trailing_stop(2.99) == 0.5)
+check("_margen_trailing_stop: maximo de 3% a <4% -> margen de 0.7 pts",
+      bot._margen_trailing_stop(3.0) == 0.7 and bot._margen_trailing_stop(3.99) == 0.7)
+check("_margen_trailing_stop: maximo de 4% a <5% -> margen de 1.0 pts",
+      bot._margen_trailing_stop(4.0) == 1.0 and bot._margen_trailing_stop(4.99) == 1.0)
+check("_margen_trailing_stop: maximo >= 5% -> margen de 1.5 pts",
+      bot._margen_trailing_stop(5.0) == 1.5 and bot._margen_trailing_stop(9.0) == 1.5)
+
+# Extremo a extremo: con un maximo trackeado de 3.5% (dentro del escalon
+# 3%-4%, margen 0.7 pts), un retroceso de 0.5 pts NO debe vender (el
+# trailing stop plano de 0.3 pts SI lo habria vendido -esto confirma que
+# el escalon esta realmente en efecto, no solo el valor base-, pero uno de
+# 0.8 pts SI debe vender.
+bot.macd_5min_bajista_2_velas = lambda ticker: False
+bot._maximo_beneficio_neto_por_posicion = {"TRAIL": 3.5}
+bot._scale_out_realizado = {"TRAIL"}  # la parcial ya se hizo antes de llegar al maximo
+cliente_escalon = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._trading_client = cliente_escalon
+try:
+    bot._data_client = _DataClientPrecioFijo(103.0)  # +3.0%: retroceso de 0.5 pts desde el maximo (3.5%)
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+    check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroceso de 0.5 pts NO vende",
+          cliente_escalon.ordenes == [], f"ordenes={cliente_escalon.ordenes}")
+
+    bot._data_client = _DataClientPrecioFijo(102.7)  # +2.7%: retroceso de 0.8 pts desde el maximo (3.5%)
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+    check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroceso de 0.8 pts SI vende",
+          len(cliente_escalon.ordenes) == 1, f"ordenes={cliente_escalon.ordenes}")
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
 
 # ---------------------------------------------------------------------------
 # 8c. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.

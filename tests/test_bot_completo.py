@@ -1615,6 +1615,40 @@ finally:
     bot._maximo_beneficio_neto_por_posicion = {}
     bot._scale_out_realizado = set()
 
+# --- Escalones de trailing stop segun el maximo alcanzado (peticion del
+# usuario, sept. 2026): cuanto mas alto el pico, mas margen de retroceso se
+# permite antes de vender -mismo cambio que en bot_alpaca.py-. ---
+check("_margen_trailing_stop: por debajo de 2% -> margen base (TRAILING_STOP_VENTA_PCT, 0.3 pts)",
+      bot._margen_trailing_stop(1.5) == bot.TRAILING_STOP_VENTA_PCT)
+check("_margen_trailing_stop: maximo de 2% a <3% -> margen de 0.5 pts",
+      bot._margen_trailing_stop(2.0) == 0.5 and bot._margen_trailing_stop(2.99) == 0.5)
+check("_margen_trailing_stop: maximo de 3% a <4% -> margen de 0.7 pts",
+      bot._margen_trailing_stop(3.0) == 0.7 and bot._margen_trailing_stop(3.99) == 0.7)
+check("_margen_trailing_stop: maximo de 4% a <5% -> margen de 1.0 pts",
+      bot._margen_trailing_stop(4.0) == 1.0 and bot._margen_trailing_stop(4.99) == 1.0)
+check("_margen_trailing_stop: maximo >= 5% -> margen de 1.5 pts",
+      bot._margen_trailing_stop(5.0) == 1.5 and bot._margen_trailing_stop(9.0) == 1.5)
+
+# Extremo a extremo sobre decidir_accion_venta() directamente (evita tener
+# que calibrar precios que den un % neto exacto tras comision, como hacen
+# los tests de arriba): con un maximo trackeado de 3.5% (escalon 3%-4%,
+# margen 0.7 pts), un retroceso de 0.5 pts NO debe vender -el trailing
+# stop plano de 0.3 pts SI lo habria vendido, esto confirma que el escalon
+# esta realmente en efecto-, pero uno de 0.8 pts SI debe vender.
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+accion, motivo = bot.decidir_accion_venta("US:ESCALON", 3.5, bot.UMBRAL_BENEFICIO_PCT)
+check("escalones trailing stop: primera vez en el umbral (3.5%) -> SALIDA PARCIAL",
+      accion == "VENTA_PARCIAL", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:ESCALON", 3.0, bot.UMBRAL_BENEFICIO_PCT)
+check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroceso de 0.5 pts NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:ESCALON", 2.7, bot.UMBRAL_BENEFICIO_PCT)
+check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroceso de 0.8 pts SI vende",
+      accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
 
 # ---------------------------------------------------------------------------
 # 8d. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.

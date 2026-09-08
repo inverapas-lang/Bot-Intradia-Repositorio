@@ -198,9 +198,26 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
     dividir con sentido (por debajo del incremento/mínimo del exchange en cripto, o ≥ la
     cantidad total en acciones), se vende todo de una vez en su lugar.
   - **Trailing stop (principal, vende el 100% de lo que quede)**: una vez armado (máximo neto
-    ≥ umbral), si el beneficio actual retrocede `TRAILING_STOP_VENTA_PCT` (0.3 puntos) o más
-    desde ese máximo, vende TODO lo que quede — sea cual sea el beneficio en ese momento
-    (incluso si ya cayó a pérdida: una vez armado, protege lo ganado sin límite inferior).
+    ≥ umbral), si el beneficio actual retrocede el margen permitido o más desde ese máximo,
+    vende TODO lo que quede — sea cual sea el beneficio en ese momento (incluso si ya cayó a
+    pérdida: una vez armado, protege lo ganado sin límite inferior).
+    - **Margen ESCALONADO según el máximo alcanzado** (`_margen_trailing_stop()`, añadido
+      sept. 2026, petición del usuario): cuanto más alto el pico de beneficio, más margen de
+      retroceso se permite antes de vender, para no cerrar una posición con una subida fuerte
+      solo por una corrección normal del precio. Por debajo del primer escalón (máximo < 2%)
+      se usa el margen base, `TRAILING_STOP_VENTA_PCT` (0.3 puntos):
+      | Máximo alcanzado | Margen de retroceso permitido |
+      |---|---|
+      | < 2% | 0.3 pts (base) |
+      | ≥ 2% | 0.5 pts |
+      | ≥ 3% | 0.7 pts |
+      | ≥ 4% | 1.0 pts |
+      | ≥ 5% | 1.5 pts |
+      Ejemplo: si el máximo trackeado llegó a 3.5%, el margen aplicable es 0.7 pts (escalón
+      "≥3%") — un retroceso de 0.5 pts NO vende, pero uno de 0.8 pts sí. El escalón se
+      recalcula en cada llamada a partir del máximo ya trackeado (`maximo_neto`), así que
+      sube solo hacia arriba conforme la posición marca nuevos máximos, igual que el propio
+      máximo trackeado.
   - **Refuerzo (secundario, también vende el 100% de lo que quede)**: si el beneficio neto
     actual YA está en el umbral o por encima, y las **2 últimas velas de 5 min seguidas**
     tienen MACD bajista (`macd_5min_bajista_2_velas`/`macd_5min_bajista_cripto_2_velas`, no

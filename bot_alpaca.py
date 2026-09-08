@@ -235,7 +235,29 @@ MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2
 # acciones, UMBRAL_BENEFICIO_CRYPTO_PCT para cripto). UMBRAL_BENEFICIO_PCT
 # ya esta en NETO (sin comision, Alpaca no cobra en acciones), asi que el
 # trailing stop arma sobre beneficio neto de verdad.
-TRAILING_STOP_VENTA_PCT = 0.3  # puntos de retroceso desde el maximo neto alcanzado
+TRAILING_STOP_VENTA_PCT = 0.3  # puntos de retroceso desde el maximo neto alcanzado (por debajo
+                                 # del primer escalon de ESCALONES_TRAILING_STOP, ver abajo)
+
+# Escalones de trailing stop segun el maximo neto alcanzado (peticion del
+# usuario, sept. 2026): cuanto mas alto el pico de beneficio, mas margen de
+# retroceso se permite antes de vender -para no vender demasiado pronto en
+# una subida fuerte solo por una correccion normal del precio-. Por debajo
+# del primer escalon se sigue usando el margen base, TRAILING_STOP_VENTA_PCT.
+# Lista ordenada de mayor a menor: el primer escalon cuyo maximo se alcanza
+# o supera es el que se aplica.
+ESCALONES_TRAILING_STOP = [
+    (5.0, 1.5),   # maximo >= 5%   -> se permite retroceder hasta 1.5 pts
+    (4.0, 1.0),   # maximo >= 4%   -> se permite retroceder hasta 1.0 pts
+    (3.0, 0.7),   # maximo >= 3%   -> se permite retroceder hasta 0.7 pts
+    (2.0, 0.5),   # maximo >= 2%   -> se permite retroceder hasta 0.5 pts
+]
+
+
+def _margen_trailing_stop(maximo_neto):
+    for umbral_maximo, margen in ESCALONES_TRAILING_STOP:
+        if maximo_neto >= umbral_maximo:
+            return margen
+    return TRAILING_STOP_VENTA_PCT
 
 # Bug real de produccion (sept. 2026): el maximo trackeado vivia SOLO en
 # memoria (un dict normal). Cada reinicio del proceso (un despliegue, una
@@ -300,12 +322,14 @@ def decidir_accion_venta(clave, beneficio_pct, umbral):
 
     trailing_armado = maximo_neto >= umbral
     retroceso_pct = maximo_neto - beneficio_pct
-    disparo_trailing = trailing_armado and retroceso_pct >= TRAILING_STOP_VENTA_PCT
-    info = f"(maximo alcanzado {maximo_neto:.2f}%, retroceso {retroceso_pct:.2f} pts)"
+    margen_trailing = _margen_trailing_stop(maximo_neto)
+    disparo_trailing = trailing_armado and retroceso_pct >= margen_trailing
+    info = f"(maximo alcanzado {maximo_neto:.2f}%, retroceso {retroceso_pct:.2f} pts, margen permitido {margen_trailing:.2f} pts)"
 
     if disparo_trailing:
         _guardar_estado_venta()
-        return "VENTA_TOTAL", f"trailing stop: retrocedio {retroceso_pct:.2f} pts desde el maximo de {maximo_neto:.2f}%"
+        return "VENTA_TOTAL", (f"trailing stop: retrocedio {retroceso_pct:.2f} pts desde el maximo de "
+                                f"{maximo_neto:.2f}% (margen permitido a ese maximo: {margen_trailing:.2f} pts)")
     if trailing_armado and clave not in _scale_out_realizado:
         _scale_out_realizado.add(clave)
         _guardar_estado_venta()

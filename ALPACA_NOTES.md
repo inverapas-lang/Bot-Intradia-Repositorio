@@ -137,8 +137,19 @@ restada del beneficio neto (0 en acciones, real de Alpaca en cripto).
   sentido (por debajo de `VALOR_MINIMO_OPERACION_CRIPTO_USD` en cripto, o ≥ la cantidad total
   en acciones), se vende todo de una vez en su lugar.
 - **Trailing stop (principal, vende el 100% de lo que quede)**: se arma solo cuando el máximo
-  alcanza el umbral. Desde ahí, si el beneficio actual retrocede `TRAILING_STOP_VENTA_PCT`
-  (0.3 puntos) desde ese máximo, vende TODO lo que quede — incluso si ya cayó a pérdida.
+  alcanza el umbral. Desde ahí, si el beneficio actual retrocede el margen permitido o más
+  desde ese máximo, vende TODO lo que quede — incluso si ya cayó a pérdida.
+  - **Margen ESCALONADO según el máximo alcanzado** (`_margen_trailing_stop()`, añadido
+    sept. 2026, petición del usuario, mismo cambio en `bot_completo.py`): cuanto más alto el
+    pico de beneficio, más margen de retroceso se permite antes de vender. Por debajo de 2% de
+    máximo se usa el margen base, `TRAILING_STOP_VENTA_PCT` (0.3 pts):
+    | Máximo alcanzado | Margen permitido |
+    |---|---|
+    | < 2% | 0.3 pts |
+    | ≥ 2% | 0.5 pts |
+    | ≥ 3% | 0.7 pts |
+    | ≥ 4% | 1.0 pts |
+    | ≥ 5% | 1.5 pts |
 - **Refuerzo (secundario, también vende el 100% de lo que quede)**: si el beneficio actual ya
   está en el umbral o por encima, y las 2 últimas velas de 5 min seguidas son bajistas
   (`macd_5min_bajista_2_velas` en acciones, `macd_5min_bajista_cripto_2_velas` en cripto, no
