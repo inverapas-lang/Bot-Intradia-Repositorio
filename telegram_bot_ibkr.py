@@ -220,6 +220,41 @@ def _numeros_a_formato_es(texto):
     return _PATRON_DECIMAL.sub(r"\1,\2", texto)
 
 
+_PATRON_LINEA_LOG = re.compile(r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\]\s?(.*)$")
+_PATRON_BANNER = re.compile(r"^=+\s*(.*[a-zA-Z0-9].*?)\s*=+$")
+
+
+def _formatear_lineas_log(lineas):
+    """Agrupa las lineas del log por fecha (una sola cabecera de fecha, no
+    repetida en cada linea) y muestra solo la hora en cada una -mucho mas
+    facil de leer en el movil que repetir 'AAAA-MM-DD HH:MM:SS' entero en
+    cada linea-. Se saltan las lineas cuyo mensaje queda vacio tras quitar
+    la marca de tiempo (los huecos en blanco que separan tramos del log,
+    p.ej. entre "Ciclo completado." y el inicio del siguiente ciclo), y las
+    cabeceras decorativas tipo '========== texto ==========' se muestran
+    sin el relleno de '=', a modo de sub-titulo de seccion."""
+    bloques = []
+    fecha_actual = None
+    for linea in lineas:
+        m = _PATRON_LINEA_LOG.match(linea)
+        fecha, hora, resto = m.groups() if m else (None, None, linea)
+        resto = resto.strip()
+        if not resto:
+            continue
+        resto = escapar_html(_numeros_a_formato_es(resto))
+        if fecha and fecha != fecha_actual:
+            bloques.append(f"📅 <b>{fecha}</b>")
+            fecha_actual = fecha
+        m_banner = _PATRON_BANNER.match(resto)
+        if m_banner:
+            bloques.append(f"▸ <b>{m_banner.group(1)}</b>")
+        elif hora:
+            bloques.append(f"• {hora} {resto}")
+        else:
+            bloques.append(f"• {resto}")
+    return "\n".join(bloques)
+
+
 def obtener_ultimas_lineas_log(n=200):
     ruta = os.path.join(RUTA_BASE, bot.ARCHIVO_LOG)
     if not os.path.exists(ruta):
@@ -233,10 +268,10 @@ def obtener_ultimas_lineas_log(n=200):
     lineas = [l.rstrip("\n") for l in todas[-n:]
               if not _es_linea_separadora(l) and not _es_linea_ruido(l)]
 
-    if not lineas:
+    lista = _formatear_lineas_log(lineas)
+    if not lista:
         return "📄 <b>ACTIVIDAD RECIENTE</b>\n(sin compras, ventas ni avisos en las últimas líneas del log)"
 
-    lista = "\n".join(f"• {escapar_html(_numeros_a_formato_es(l))}" for l in lineas)
     if len(lista) > LIMITE_CARACTERES_LOG_TELEGRAM:
         lista = "(...)\n" + lista[-LIMITE_CARACTERES_LOG_TELEGRAM:]
     return "📄 <b>ACTIVIDAD RECIENTE</b>\n" + lista

@@ -188,6 +188,31 @@ check("/log: SI conserva las lineas de accion real (VENDIENDO, orden colocada)",
 check("/log: convierte el punto decimal a coma (formato español)",
       "1,16%" in resultado_log and "1.16%" not in resultado_log, f"resultado={resultado_log!r}")
 
+# --- 5b. /log: fecha agrupada (una sola vez), solo horas, y sin huecos en
+# blanco ni banners "==== texto ====" sin procesar (sept. 2026, petición
+# del usuario: el log salia dificil de leer en Telegram) ---
+_borrar_si_existe(tib.bot.ARCHIVO_LOG)
+_escribir(tib.bot.ARCHIVO_LOG,
+          "[2026-09-07 22:52:38] \n"
+          "[2026-09-07 22:52:48] Ciclo completado.\n"
+          "[2026-09-07 22:53:36] VENTAS: BTC - beneficio -2.48% -> se mantiene.\n"
+          "[2026-09-08 07:46:12] Reinicio del bot.\n"
+          "========== RESUMEN DE CIERRE - MERCADO CRYPTO ==========\n"
+          "[2026-09-08 07:46:13] IBKR API - error 321 [BTC]: Please enter exchange\n")
+resultado_log = tib.obtener_ultimas_lineas_log()
+check("/log: la fecha aparece como cabecera, no repetida en cada linea",
+      resultado_log.count("2026-09-07") == 1 and resultado_log.count("2026-09-08") == 1,
+      f"resultado={resultado_log!r}")
+check("/log: cada linea de contenido muestra solo la hora (HH:MM:SS), sin repetir la fecha",
+      "• 22:52:48 Ciclo completado." in resultado_log and "07:46:12 Reinicio del bot." in resultado_log,
+      f"resultado={resultado_log!r}")
+check("/log: se saltan los huecos en blanco (linea con marca de tiempo pero sin mensaje)",
+      "22:52:38" not in resultado_log, f"resultado={resultado_log!r}")
+check("/log: una cabecera '==== texto ====' se muestra sin el relleno de '='",
+      "▸" in resultado_log and "RESUMEN DE CIERRE - MERCADO CRYPTO" in resultado_log
+      and "====" not in resultado_log,
+      f"resultado={resultado_log!r}")
+
 _borrar_si_existe(tib.bot.ARCHIVO_LOG)
 directorio_temporal.cleanup()
 
