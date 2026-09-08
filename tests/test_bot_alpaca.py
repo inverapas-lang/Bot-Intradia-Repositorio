@@ -801,6 +801,28 @@ if ordenes_compra_cripto:
     check("revisar_compras_cripto: time_in_force es IOC",
           orden_compra_cripto.time_in_force.value == "ioc", f"tif={orden_compra_cripto.time_in_force}")
 
+# --- Efectivo insuficiente para el importe estandar pero suficiente para
+#     uno reducido: compra el reducido, dejando el margen minimo (mismo
+#     comportamiento que en acciones, peticion del usuario sept. 2026) ---
+bot._trading_client = _TradingClientFalso(portfolio_value=10_000, cash=20.0)
+bot._crypto_data_client = _fake_crypto_data_client_alcista()
+try:
+    bot._cache_largas_por_dia = {}
+    bot.revisar_compras_cripto()
+finally:
+    ordenes_cripto_caja_reducida = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._crypto_data_client = crypto_data_client_original
+
+margen_esperado_cripto_usd = bot.MARGEN_EFECTIVO_MINIMO_EUR * bot.TIPO_CAMBIO_EUR_USD
+check("revisar_compras_cripto: con efectivo insuficiente para el importe estandar pero suficiente "
+      "para uno reducido, SI compra (reducido, dejando el margen minimo)",
+      len(ordenes_cripto_caja_reducida) == 1, f"ordenes={ordenes_cripto_caja_reducida}")
+if ordenes_cripto_caja_reducida:
+    check("revisar_compras_cripto: el importe reducido es (efectivo - margen minimo)",
+          abs(ordenes_cripto_caja_reducida[0].notional - (20.0 - margen_esperado_cripto_usd)) < 0.01,
+          f"notional={ordenes_cripto_caja_reducida[0].notional}")
+
 # --- Limite de exposicion TOTAL en cripto (peticion del usuario, 20%): con
 #     una posicion de OTRA cripto ya ocupando casi todo ese limite, NO debe
 #     comprar mas, aunque la señal de compra sea valida ---
@@ -883,6 +905,28 @@ finally:
 
 check("revisar_compras: con efectivo insuficiente, NO compra aunque haya señal y hueco",
       len(ordenes_sin_caja) == 0, f"ordenes={ordenes_sin_caja}")
+
+# Efectivo insuficiente para el importe ESTANDAR pero suficiente para un
+# importe REDUCIDO que deje el margen minimo: compra ese importe reducido
+# en vez de omitir la compra entera (peticion del usuario, sept. 2026).
+bot._trading_client = _TradingClientFalso(portfolio_value=1_000_000, cash=20.0)
+bot._data_client = _fake_data_client_alcista()
+try:
+    bot._cache_largas_por_dia = {}
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    ordenes_caja_reducida = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+
+margen_esperado_usd = bot.MARGEN_EFECTIVO_MINIMO_EUR * bot.TIPO_CAMBIO_EUR_USD
+check("revisar_compras: con efectivo insuficiente para el importe estandar pero suficiente para "
+      "un importe reducido, SI compra (reducido, dejando el margen minimo)",
+      len(ordenes_caja_reducida) == 1, f"ordenes={ordenes_caja_reducida}")
+if ordenes_caja_reducida:
+    check("revisar_compras: el importe reducido es (efectivo - margen minimo), no el estandar completo",
+          abs(ordenes_caja_reducida[0].notional - (20.0 - margen_esperado_usd)) < 0.01,
+          f"notional={ordenes_caja_reducida[0].notional}, esperado={20.0 - margen_esperado_usd}")
 
 # Sin el atributo 'cash' en absoluto (p.ej. fallo al leerlo): no debe
 # romper nada, simplemente no se aplica ese limite concreto.

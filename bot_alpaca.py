@@ -330,6 +330,12 @@ IMPORTE_EUROS = 45           # presupuesto maximo por operacion (convertido a US
                               # saldo simulado de $100.000 de la cuenta paper)
 TIPO_CAMBIO_EUR_USD = 1.14   # actualiza a mano si quieres mas precision
 
+# Peticion explicita del usuario (sept. 2026): si el importe estandar
+# (IMPORTE_EUROS) no cabe en el efectivo disponible, en vez de omitir la
+# compra entera se reduce al maximo que quepa, dejando siempre este margen
+# de seguridad en la cuenta (nunca se deja la cuenta a 0 exacto).
+MARGEN_EFECTIVO_MINIMO_EUR = 1.0
+
 DECIMALES_FRACCION = 4
 VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0
 
@@ -1389,9 +1395,18 @@ def revisar_compras():
                 continue
 
             if efectivo_disponible_usd is not None and importe_a_usar > efectivo_disponible_usd:
-                log(f"COMPRAS: {ticker} - senal de COMPRA pero el importe ({importe_a_usar:.2f} USD) "
-                    f"supera el efectivo disponible restante ({efectivo_disponible_usd:.2f} USD), se omite.")
-                continue
+                margen_minimo_usd = MARGEN_EFECTIVO_MINIMO_EUR * TIPO_CAMBIO_EUR_USD
+                importe_ajustado = efectivo_disponible_usd - margen_minimo_usd
+                if importe_ajustado < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
+                    log(f"COMPRAS: {ticker} - senal de COMPRA pero el efectivo disponible "
+                        f"({efectivo_disponible_usd:.2f} USD) menos el margen de seguridad "
+                        f"({margen_minimo_usd:.2f} USD) no llega al minimo de "
+                        f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} USD por operacion, se omite.")
+                    continue
+                log(f"COMPRAS: {ticker} - importe estandar ({importe_a_usar:.2f} USD) reducido a "
+                    f"{importe_ajustado:.2f} USD para no dejar la cuenta por debajo de "
+                    f"{margen_minimo_usd:.2f} USD (efectivo disponible: {efectivo_disponible_usd:.2f} USD).")
+                importe_a_usar = importe_ajustado
 
             # Reserva optimista: se descuenta/anota AQUI, no tras confirmar la
             # orden, para que la SIGUIENTE señal de este mismo ciclo ya vea
@@ -1508,9 +1523,18 @@ def revisar_compras_cripto():
                 continue
 
             if efectivo_disponible_usd is not None and importe_a_usar > efectivo_disponible_usd:
-                log(f"COMPRAS: {ticker} - senal de COMPRA pero el importe ({importe_a_usar:.2f} USD) "
-                    f"supera el efectivo disponible restante ({efectivo_disponible_usd:.2f} USD), se omite.")
-                continue
+                margen_minimo_usd = MARGEN_EFECTIVO_MINIMO_EUR * TIPO_CAMBIO_EUR_USD
+                importe_ajustado = efectivo_disponible_usd - margen_minimo_usd
+                if importe_ajustado < VALOR_MINIMO_OPERACION_CRIPTO_USD:
+                    log(f"COMPRAS: {ticker} - senal de COMPRA pero el efectivo disponible "
+                        f"({efectivo_disponible_usd:.2f} USD) menos el margen de seguridad "
+                        f"({margen_minimo_usd:.2f} USD) no llega al minimo de "
+                        f"{VALOR_MINIMO_OPERACION_CRIPTO_USD:.2f} USD por operacion, se omite.")
+                    continue
+                log(f"COMPRAS: {ticker} - importe estandar ({importe_a_usar:.2f} USD) reducido a "
+                    f"{importe_ajustado:.2f} USD para no dejar la cuenta por debajo de "
+                    f"{margen_minimo_usd:.2f} USD (efectivo disponible: {efectivo_disponible_usd:.2f} USD).")
+                importe_a_usar = importe_ajustado
             if efectivo_disponible_usd is not None:
                 efectivo_disponible_usd -= importe_a_usar
 

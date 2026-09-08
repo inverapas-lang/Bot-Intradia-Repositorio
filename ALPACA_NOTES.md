@@ -724,6 +724,18 @@ dos cosas más antes de intentar comprar:
   cripto). Antes no había ningún control de caja — el bot podía intentar
   comprar contra fondos que ya estaban comprometidos en otras posiciones.
 
+**Compra REDUCIDA en vez de omitida cuando el importe estándar no cabe (sept. 2026, petición
+del usuario)**: antes, si el efectivo disponible era menor que el importe estándar
+(`IMPORTE_EUROS` convertido, ~51 USD), la señal se omitía por completo aunque quedara efectivo
+de sobra para una compra más pequeña — caso real visto en producción: la cuenta se quedaba con
+~4 USD disponibles y una señal de LINK/USD (importe estándar 5.25 USD) se omitía ciclo tras
+ciclo sin comprar nada, dejando ese efectivo "muerto" sin invertir. Ahora, si el importe
+estándar supera el efectivo disponible, se reduce al máximo que quepa dejando siempre
+`MARGEN_EFECTIVO_MINIMO_EUR` (1 EUR, convertido a USD) de margen en la cuenta — solo se omite
+la señal si ni siquiera ese importe reducido llega al mínimo de la operación
+(`VALOR_MINIMO_OPERACION_FRACCIONARIA_USD` en acciones, `VALOR_MINIMO_OPERACION_CRIPTO_USD` en
+cripto). Mismo comportamiento en `revisar_compras()` y `revisar_compras_cripto()`.
+
 Ambos se reservan de forma OPTIMISTA en el momento de decidir la compra
 (no al confirmarse como `filled`), para que dos señales del mismo ciclo
 no se salten el límite entre ellas — igual que ya hacía
