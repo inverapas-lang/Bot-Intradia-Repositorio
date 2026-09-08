@@ -138,11 +138,17 @@ restada del beneficio neto (0 en acciones, real de Alpaca en cripto).
   en acciones), se vende todo de una vez en su lugar.
 - **Trailing stop (principal, vende el 100% de lo que quede)**: se arma solo cuando el máximo
   alcanza el umbral. Desde ahí, si el beneficio actual retrocede el margen permitido o más
-  desde ese máximo, vende TODO lo que quede — **pero NUNCA si el beneficio actual ya es
-  negativo** (petición explícita del usuario, sept. 2026: caso real, BCH/USD se vendió con
-  -0,57% porque antes se protegía lo ganado "sin límite inferior", incluso hasta pérdidas; ver
-  NOTES.md para el mismo cambio en `bot_completo.py`). Si el retroceso lleva el beneficio a
-  negativo, se sigue MANTENIENDO la posición en vez de cerrarla en pérdidas.
+  desde ese máximo, vende TODO lo que quede — **pero NUNCA si el beneficio actual está por
+  debajo de `MARGEN_MINIMO_VENTA_PCT` (0,5%, ni parcial ni total, ni por trailing stop ni por
+  refuerzo)**. Este suelo pasó por tres versiones, todas a petición del usuario: primero "sin
+  límite inferior" (caso real, BCH/USD se vendió con -0,57%); después "nunca vender en
+  negativo" (≥0%); y finalmente, tras el caso real de META (venta con slippage: el precio de
+  referencia usado para decidir era positivo, pero el precio REAL de ejecución resultó en
+  pérdida — ver el bug del `%` recalculado más abajo), se subió a un margen de seguridad de
+  0,5% que deja colchón frente a ese slippage. Aplica por igual a acciones y a cripto: en
+  cripto, cuyo umbral de *armado* sigue siendo más bajo (`UMBRAL_BENEFICIO_CRYPTO_PCT=0,3%`),
+  el trailing puede empezar a trackear el máximo desde 0,3%, pero **no vende de verdad hasta
+  0,5%** — mismo cambio en `bot_completo.py` (ver NOTES.md).
   - **Margen ESCALONADO según el máximo alcanzado** (`_margen_trailing_stop()`, añadido
     sept. 2026, petición del usuario, mismo cambio en `bot_completo.py`): cuanto más alto el
     pico de beneficio, más margen de retroceso se permite antes de vender. Por debajo de 2% de

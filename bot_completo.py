@@ -1416,6 +1416,20 @@ def macd_5min_bajista_2_velas(ib, contrato):
     return bool(macd.iloc[-1] < linea_senal.iloc[-1] and macd.iloc[-2] < linea_senal.iloc[-2])
 
 
+MARGEN_MINIMO_VENTA_PCT = 0.5  # peticion del usuario, sept. 2026: nunca vender (ni parcial ni
+                                 # total, ni por trailing stop ni por refuerzo) con un beneficio
+                                 # neto por debajo de este suelo, sea cual sea el umbral de
+                                 # armado propio del mercado (0.5% en acciones -coincide con
+                                 # UMBRAL_BENEFICIO_PCT, sin cambio de comportamiento-, 0.3% en
+                                 # cripto -que SI sube su suelo efectivo de venta a 0.5%-). Antes
+                                 # el suelo era simplemente "no vender en negativo" (>=0%); esto
+                                 # lo sube a un margen de seguridad real frente al slippage entre
+                                 # la decision y la ejecucion de la orden (caso real, mismo
+                                 # cambio en bot_alpaca.py: una venta parecia con beneficio
+                                 # positivo justo antes de la orden, pero se ejecuto con perdidas
+                                 # reales por la caida rapida del precio en esos segundos).
+
+
 def decidir_accion_venta(clave, beneficio_pct, umbral):
     """Logica compartida de venta (trailing stop + salida parcial),
     independiente del mercado -se llama con la misma `clave` que usa
@@ -1432,22 +1446,25 @@ def decidir_accion_venta(clave, beneficio_pct, umbral):
     trailing_armado = maximo_neto >= umbral
     retroceso_pct = maximo_neto - beneficio_pct
     margen_trailing = _margen_trailing_stop(maximo_neto)
-    # Suelo explicito: NUNCA vender con perdidas (peticion del usuario,
-    # sept. 2026). Antes, una vez armado el trailing, se vendia el 100% de
-    # lo que quedara aunque el retroceso ya hubiera llevado el beneficio a
-    # negativo -"proteger lo ganado sin limite inferior"-. Ahora, si el
-    # retroceso es tan grande que beneficio_pct ya esta en negativo, NO se
-    # vende (se sigue manteniendo, esperando a que se recupere por encima
-    # de 0% o a que el refuerzo de 2 velas bajistas decida vender en otro
-    # punto por encima de 0%).
-    disparo_trailing = trailing_armado and retroceso_pct >= margen_trailing and beneficio_pct >= 0
+    # Suelo explicito: nunca vender (ni parcial ni total) por debajo de
+    # MARGEN_MINIMO_VENTA_PCT (peticion del usuario, sept. 2026 -ver
+    # comentario junto a la constante-). Antes, una vez armado el trailing,
+    # se vendia el 100% de lo que quedara aunque el retroceso ya hubiera
+    # llevado el beneficio a negativo -"proteger lo ganado sin limite
+    # inferior"-; despues se ajusto a "nunca vender en negativo" (>=0%); esto
+    # lo sube a un margen de seguridad real (0.5%) frente al slippage entre
+    # la decision y la ejecucion. Si el beneficio actual no llega a ese
+    # suelo, NO se vende (se sigue manteniendo, esperando a que se recupere
+    # o a que el refuerzo de 2 velas bajistas decida vender mas arriba).
+    puede_vender = beneficio_pct >= MARGEN_MINIMO_VENTA_PCT
+    disparo_trailing = trailing_armado and retroceso_pct >= margen_trailing and puede_vender
     info = f"(maximo alcanzado {maximo_neto:.2f}%, retroceso {retroceso_pct:.2f} pts, margen permitido {margen_trailing:.2f} pts)"
 
     if disparo_trailing:
         _guardar_estado_venta()
         return "VENTA_TOTAL", (f"trailing stop: retrocedio {retroceso_pct:.2f} pts desde el maximo de "
                                 f"{maximo_neto:.2f}% (margen permitido a ese maximo: {margen_trailing:.2f} pts)")
-    if trailing_armado and clave not in _scale_out_realizado:
+    if trailing_armado and puede_vender and clave not in _scale_out_realizado:
         _scale_out_realizado.add(clave)
         _guardar_estado_venta()
         return "VENTA_PARCIAL", f"objetivo alcanzado ({beneficio_pct:.2f}% >= {umbral}%): asegurando el {PORCENTAJE_SCALE_OUT*100:.0f}%"
@@ -1899,7 +1916,10 @@ def revisar_ventas(ib, mercados=None):
                 accion_cripto, motivo_cripto = decidir_accion_venta(
                     clave_posicion_cripto, beneficio_pct, UMBRAL_BENEFICIO_CRYPTO_PCT)
 
-                if accion_cripto == "MANTENER" and beneficio_pct >= UMBRAL_BENEFICIO_CRYPTO_PCT:
+                # El refuerzo tampoco puede vender por debajo del suelo de
+                # seguridad (MARGEN_MINIMO_VENTA_PCT, 0.5%) aunque el umbral
+                # de armado de cripto sea mas bajo (UMBRAL_BENEFICIO_CRYPTO_PCT, 0.3%).
+                if accion_cripto == "MANTENER" and beneficio_pct >= MARGEN_MINIMO_VENTA_PCT:
                     if macd_5min_bajista_2_velas(ib, contrato):
                         accion_cripto, motivo_cripto = "VENTA_TOTAL", "2 velas de 5min bajistas seguidas"
 
@@ -2037,7 +2057,11 @@ def revisar_ventas(ib, mercados=None):
             clave_posicion = clave_historial(mercado, contrato.symbol)
             accion, motivo = decidir_accion_venta(clave_posicion, beneficio_pct, UMBRAL_BENEFICIO_PCT)
 
-            if accion == "MANTENER" and beneficio_pct >= UMBRAL_BENEFICIO_PCT:
+            # El refuerzo tampoco puede vender por debajo del suelo de
+            # seguridad (MARGEN_MINIMO_VENTA_PCT, 0.5% - coincide con
+            # UMBRAL_BENEFICIO_PCT en acciones, asi que no cambia nada aqui,
+            # pero queda explicito por si algun dia difieren).
+            if accion == "MANTENER" and beneficio_pct >= MARGEN_MINIMO_VENTA_PCT:
                 if macd_5min_bajista_2_velas(ib, contrato):
                     accion, motivo = "VENTA_TOTAL", "2 velas de 5min bajistas seguidas"
 

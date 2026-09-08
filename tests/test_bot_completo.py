@@ -1721,19 +1721,25 @@ check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroces
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
 
-# --- Suelo explicito: NUNCA vender con perdidas (peticion del usuario,
-# sept. 2026, mismo cambio en bot_alpaca.py). Antes, una vez armado el
-# trailing, se vendia el 100% "sin limite inferior" aunque el retroceso
-# ya hubiera llevado el beneficio a negativo. Ahora, si beneficio_pct ya
-# es negativo, NO se vende. ---
+# --- Suelo explicito: nunca vender por debajo de MARGEN_MINIMO_VENTA_PCT
+# (0.5%, peticion del usuario, sept. 2026, mismo cambio en bot_alpaca.py).
+# Antes era simplemente "no vender en negativo" (>=0%); tras el caso real
+# de una venta con slippage (un +2% de referencia se ejecuto como perdida
+# real), el suelo se sube a un margen de seguridad de 0.5%. ---
 accion, motivo = bot.decidir_accion_venta("US:SUELO", 5.0, bot.UMBRAL_BENEFICIO_PCT)  # arma el trailing en 5%
 check("suelo anti-perdidas: primera vez en el umbral (5%) -> SALIDA PARCIAL",
       accion == "VENTA_PARCIAL", f"accion={accion}")
 accion, motivo = bot.decidir_accion_venta("US:SUELO", -0.5, bot.UMBRAL_BENEFICIO_PCT)  # retroceso 5.5 pts (>> margen 1.5)
 check("suelo anti-perdidas: retroceso enorme (5.5 pts) pero beneficio ya NEGATIVO (-0.5%) -> NO vende",
       accion == "MANTENER", f"accion={accion}, motivo={motivo}")
-accion, motivo = bot.decidir_accion_venta("US:SUELO", 0.0, bot.UMBRAL_BENEFICIO_PCT)  # retroceso 5.0 pts, beneficio 0%
-check("suelo anti-perdidas: beneficio exactamente 0% (no negativo) con retroceso de sobra -> SI vende",
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 0.0, bot.UMBRAL_BENEFICIO_PCT)  # beneficio 0% (< suelo de 0.5%)
+check("suelo anti-perdidas: beneficio 0% (no negativo, pero por debajo del suelo de 0.5%) -> NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 0.49, bot.UMBRAL_BENEFICIO_PCT)  # justo por debajo del suelo
+check("suelo anti-perdidas: beneficio 0.49% (justo por debajo del suelo de 0.5%) -> NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 0.5, bot.UMBRAL_BENEFICIO_PCT)  # justo en el suelo
+check("suelo anti-perdidas: beneficio exactamente 0.5% (el suelo) -> SI vende",
       accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
@@ -2312,7 +2318,8 @@ if ib_falso_ventas_cripto.ordenes_colocadas:
 # ha cambiado en este doble de prueba) y olvidar el seguimiento.
 class _IBFalsoVentasCriptoRetroceso(_IBFalsoVentasCripto):
     def reqHistoricalData(self, contrato, **kwargs):
-        return [_Vela(50350.0)]  # +0.7% sobre 50000: retroceso claro desde el +10% maximo
+        return [_Vela(50700.0)]  # +1.4% bruto / ~0.7% neto sobre 50000 (por encima del suelo de
+                                   # 0.5%, MARGEN_MINIMO_VENTA_PCT): retroceso claro desde el +10% maximo
 
 
 ib_falso_retroceso_cripto = _IBFalsoVentasCriptoRetroceso([pos_venta_btc])
@@ -2339,11 +2346,14 @@ check("revisar_ventas CRYPTO: rellena el exchange vacio del contrato antes de pe
 
 
 # ---------------------------------------------------------------------------
-# 9d. UMBRAL_BENEFICIO_CRYPTO_PCT: cripto usa un umbral mas bajo (0.3%) que
-#     acciones (0.5%, sigue en UMBRAL_BENEFICIO_PCT sin cambios) - peticion
-#     del usuario, sept. 2026. El caso interesante es un beneficio NETO
-#     entre ambos umbrales (0.3%-0.5%): con el umbral de acciones NO se
-#     venderia, con el de cripto SI.
+# 9d. UMBRAL_BENEFICIO_CRYPTO_PCT: cripto usa un umbral de ARMADO mas bajo
+#     (0.3%) que acciones (0.5%, sigue en UMBRAL_BENEFICIO_PCT sin cambios),
+#     pero desde que se anadio el suelo de seguridad MARGEN_MINIMO_VENTA_PCT
+#     (0.5%, sept. 2026), NINGUN mercado vende de verdad por debajo de ese
+#     suelo aunque cripto arme el trailing (empiece a trackear el maximo)
+#     antes, a partir de 0.3%. El caso interesante es un beneficio NETO
+#     entre ambos (0.3%-0.5%): arma el trailing (lo trackea) pero NO vende
+#     todavia -antes de anadir el suelo, cripto SI vendia en ese rango-.
 # ---------------------------------------------------------------------------
 check("UMBRAL_BENEFICIO_CRYPTO_PCT es 0.3 (mas bajo que el de acciones, 0.5)",
       bot.UMBRAL_BENEFICIO_CRYPTO_PCT == 0.3 and bot.UMBRAL_BENEFICIO_PCT == 0.5,
@@ -2365,9 +2375,12 @@ try:
 finally:
     bot.macd_5min_bajista = macd_bajista_original_cripto
 
-check("revisar_ventas CRYPTO: con beneficio neto ~0.4% (entre 0.3% y 0.5%) SI vende, "
-      "gracias al umbral mas bajo de cripto",
-      len(ib_falso_umbral.ordenes_colocadas) == 1, f"ordenes={ib_falso_umbral.ordenes_colocadas}")
+check("revisar_ventas CRYPTO: con beneficio neto ~0.4% (entre el umbral de armado de cripto, "
+      "0.3%, y el suelo de seguridad, 0.5%) arma el trailing pero NO vende todavia",
+      ib_falso_umbral.ordenes_colocadas == [] and "CRYPTO:BTC" in bot._maximo_beneficio_neto_por_posicion,
+      f"ordenes={ib_falso_umbral.ordenes_colocadas}, cache={bot._maximo_beneficio_neto_por_posicion}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 
 
 # ---------------------------------------------------------------------------

@@ -199,12 +199,20 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
     cantidad total en acciones), se vende todo de una vez en su lugar.
   - **Trailing stop (principal, vende el 100% de lo que quede)**: una vez armado (máximo neto
     ≥ umbral), si el beneficio actual retrocede el margen permitido o más desde ese máximo,
-    vende TODO lo que quede — **pero NUNCA si el beneficio actual ya es negativo** (petición
-    explícita del usuario, sept. 2026: caso real, BCH/USD se vendió con -0,57% porque antes el
-    trailing, una vez armado, protegía lo ganado "sin límite inferior" — así funcionaba a
-    propósito hasta este cambio). Con este suelo, si el retroceso es tan grande que el
-    beneficio ya cayó a negativo, se sigue MANTENIENDO la posición en vez de cerrarla en
-    pérdidas, aunque eso signifique renunciar a limitar una caída aún mayor.
+    vende TODO lo que quede — **pero NUNCA si el beneficio actual está por debajo de
+    `MARGEN_MINIMO_VENTA_PCT` (0,5%, ni parcial ni total, ni por trailing stop ni por
+    refuerzo)**. Este suelo pasó por tres versiones, todas a petición del usuario: primero
+    "sin límite inferior" (protegía lo ganado incluso vendiendo en pérdidas — caso real,
+    BCH/USD se vendió con -0,57%); después "nunca vender en negativo" (≥0%); y finalmente,
+    tras otro caso real (una venta de META con slippage: el precio de referencia usado para
+    decidir era positivo, pero el precio REAL de ejecución fue peor, resultando en pérdida
+    real pese a que la decisión se tomó en positivo — ver el bug del `%` recalculado más
+    abajo), se subió a un margen de seguridad de 0,5% que deja colchón frente a ese
+    slippage. Aplica a AMBOS mercados por igual: en cripto, cuyo umbral de *armado* (empezar a
+    trackear el máximo) sigue siendo más bajo (`UMBRAL_BENEFICIO_CRYPTO_PCT=0,3%`), el trailing
+    puede armarse y trackear el máximo desde 0,3%, pero **no vende de verdad hasta 0,5%** — si
+    el beneficio actual no llega al suelo, se sigue MANTENIENDO la posición (incluida la salida
+    parcial) en vez de vender con un margen insuficiente.
     - **Margen ESCALONADO según el máximo alcanzado** (`_margen_trailing_stop()`, añadido
       sept. 2026, petición del usuario): cuanto más alto el pico de beneficio, más margen de
       retroceso se permite antes de vender, para no cerrar una posición con una subida fuerte
