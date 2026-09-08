@@ -1715,6 +1715,23 @@ check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroces
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
 
+# --- Suelo explicito: NUNCA vender con perdidas (peticion del usuario,
+# sept. 2026, mismo cambio en bot_alpaca.py). Antes, una vez armado el
+# trailing, se vendia el 100% "sin limite inferior" aunque el retroceso
+# ya hubiera llevado el beneficio a negativo. Ahora, si beneficio_pct ya
+# es negativo, NO se vende. ---
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 5.0, bot.UMBRAL_BENEFICIO_PCT)  # arma el trailing en 5%
+check("suelo anti-perdidas: primera vez en el umbral (5%) -> SALIDA PARCIAL",
+      accion == "VENTA_PARCIAL", f"accion={accion}")
+accion, motivo = bot.decidir_accion_venta("US:SUELO", -0.5, bot.UMBRAL_BENEFICIO_PCT)  # retroceso 5.5 pts (>> margen 1.5)
+check("suelo anti-perdidas: retroceso enorme (5.5 pts) pero beneficio ya NEGATIVO (-0.5%) -> NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 0.0, bot.UMBRAL_BENEFICIO_PCT)  # retroceso 5.0 pts, beneficio 0%
+check("suelo anti-perdidas: beneficio exactamente 0% (no negativo) con retroceso de sobra -> SI vende",
+      accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
 
 # ---------------------------------------------------------------------------
 # 8d. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.

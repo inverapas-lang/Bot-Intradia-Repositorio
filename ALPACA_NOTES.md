@@ -138,7 +138,11 @@ restada del beneficio neto (0 en acciones, real de Alpaca en cripto).
   en acciones), se vende todo de una vez en su lugar.
 - **Trailing stop (principal, vende el 100% de lo que quede)**: se arma solo cuando el máximo
   alcanza el umbral. Desde ahí, si el beneficio actual retrocede el margen permitido o más
-  desde ese máximo, vende TODO lo que quede — incluso si ya cayó a pérdida.
+  desde ese máximo, vende TODO lo que quede — **pero NUNCA si el beneficio actual ya es
+  negativo** (petición explícita del usuario, sept. 2026: caso real, BCH/USD se vendió con
+  -0,57% porque antes se protegía lo ganado "sin límite inferior", incluso hasta pérdidas; ver
+  NOTES.md para el mismo cambio en `bot_completo.py`). Si el retroceso lleva el beneficio a
+  negativo, se sigue MANTENIENDO la posición en vez de cerrarla en pérdidas.
   - **Margen ESCALONADO según el máximo alcanzado** (`_margen_trailing_stop()`, añadido
     sept. 2026, petición del usuario, mismo cambio en `bot_completo.py`): cuanto más alto el
     pico de beneficio, más margen de retroceso se permite antes de vender. Por debajo de 2% de

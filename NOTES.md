@@ -199,8 +199,12 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
     cantidad total en acciones), se vende todo de una vez en su lugar.
   - **Trailing stop (principal, vende el 100% de lo que quede)**: una vez armado (máximo neto
     ≥ umbral), si el beneficio actual retrocede el margen permitido o más desde ese máximo,
-    vende TODO lo que quede — sea cual sea el beneficio en ese momento (incluso si ya cayó a
-    pérdida: una vez armado, protege lo ganado sin límite inferior).
+    vende TODO lo que quede — **pero NUNCA si el beneficio actual ya es negativo** (petición
+    explícita del usuario, sept. 2026: caso real, BCH/USD se vendió con -0,57% porque antes el
+    trailing, una vez armado, protegía lo ganado "sin límite inferior" — así funcionaba a
+    propósito hasta este cambio). Con este suelo, si el retroceso es tan grande que el
+    beneficio ya cayó a negativo, se sigue MANTENIENDO la posición en vez de cerrarla en
+    pérdidas, aunque eso signifique renunciar a limitar una caída aún mayor.
     - **Margen ESCALONADO según el máximo alcanzado** (`_margen_trailing_stop()`, añadido
       sept. 2026, petición del usuario): cuanto más alto el pico de beneficio, más margen de
       retroceso se permite antes de vender, para no cerrar una posición con una subida fuerte

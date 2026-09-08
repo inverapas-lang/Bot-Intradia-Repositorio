@@ -672,6 +672,26 @@ finally:
     bot._maximo_beneficio_neto_por_posicion = {}
     bot._scale_out_realizado = set()
 
+# --- Suelo explicito: NUNCA vender con perdidas (peticion del usuario,
+# sept. 2026). Caso real: BCH/USD se vendio con beneficio -0.57% porque el
+# trailing, una vez armado, protegia lo ganado "sin limite inferior" -asi
+# funcionaba a proposito hasta ahora-. A partir de ahora, si el retroceso
+# es tan grande que el beneficio actual ya es negativo, NO se vende (se
+# sigue manteniendo la posicion en vez de cerrar en perdidas). ---
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+accion, motivo = bot.decidir_accion_venta("SUELO", 5.0, bot.UMBRAL_BENEFICIO_PCT)  # arma el trailing en 5%
+check("suelo anti-perdidas: primera vez en el umbral (5%) -> SALIDA PARCIAL",
+      accion == "VENTA_PARCIAL", f"accion={accion}")
+accion, motivo = bot.decidir_accion_venta("SUELO", -0.5, bot.UMBRAL_BENEFICIO_PCT)  # retroceso de 5.5 pts (>> margen 1.5)
+check("suelo anti-perdidas: retroceso enorme (5.5 pts) pero beneficio ya NEGATIVO (-0.5%) -> NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("SUELO", 0.0, bot.UMBRAL_BENEFICIO_PCT)  # retroceso de 5.0 pts, beneficio exactamente 0%
+check("suelo anti-perdidas: beneficio exactamente 0% (no negativo) con retroceso de sobra -> SI vende",
+      accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
 
 # ---------------------------------------------------------------------------
 # 8c. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.

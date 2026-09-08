@@ -1432,7 +1432,15 @@ def decidir_accion_venta(clave, beneficio_pct, umbral):
     trailing_armado = maximo_neto >= umbral
     retroceso_pct = maximo_neto - beneficio_pct
     margen_trailing = _margen_trailing_stop(maximo_neto)
-    disparo_trailing = trailing_armado and retroceso_pct >= margen_trailing
+    # Suelo explicito: NUNCA vender con perdidas (peticion del usuario,
+    # sept. 2026). Antes, una vez armado el trailing, se vendia el 100% de
+    # lo que quedara aunque el retroceso ya hubiera llevado el beneficio a
+    # negativo -"proteger lo ganado sin limite inferior"-. Ahora, si el
+    # retroceso es tan grande que beneficio_pct ya esta en negativo, NO se
+    # vende (se sigue manteniendo, esperando a que se recupere por encima
+    # de 0% o a que el refuerzo de 2 velas bajistas decida vender en otro
+    # punto por encima de 0%).
+    disparo_trailing = trailing_armado and retroceso_pct >= margen_trailing and beneficio_pct >= 0
     info = f"(maximo alcanzado {maximo_neto:.2f}%, retroceso {retroceso_pct:.2f} pts, margen permitido {margen_trailing:.2f} pts)"
 
     if disparo_trailing:
