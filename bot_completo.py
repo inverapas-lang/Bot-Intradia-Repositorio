@@ -1704,6 +1704,36 @@ def verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad_antes, pr
     return cantidad_ahora
 
 
+def _registrar_venta_a_posteriori(mercado, contrato, cantidad_antes, cantidad_ahora, precio_actual,
+                                   comision_total, coste_medio, beneficio_pct, etiqueta_accion,
+                                   clave_posicion):
+    """BUG real de produccion (sept. 2026, caso real: venta de SMCI vista en
+    la app de IBKR pero /hoy seguia mostrando 0 ventas): cuando una orden de
+    VENTA no confirmaba 'Filled' pero verificar_posicion_tras_orden_no_confirmada()
+    detectaba que la posicion SI habia bajado de verdad, el codigo se
+    quedaba solo con un log -sin guardar la operacion en el historial
+    (historial_operaciones_ibkr.json, la fuente de /hoy /ayer /semana) ni
+    avisar por Telegram-. Las COMPRAS ya tenian este tratamiento (ver
+    revisar_compras(), compra_confirmada = cantidad_tras_compra >
+    cantidad_antes_compra); esto iguala el mismo tratamiento en las ventas.
+    cantidad_ejecutada se deduce de la diferencia de posicion real (no hay
+    un avgFillPrice fiable por esta via, asi que precio_actual es la mejor
+    aproximacion disponible). Si la posicion quedo en ~0, se trata como
+    venta TOTAL (se olvida el seguimiento del trailing stop)."""
+    cantidad_ejecutada = cantidad_antes - cantidad_ahora
+    if cantidad_ejecutada <= 1e-6:
+        return
+    registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
+                                   precio_actual, comision_total, contrato.currency,
+                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+    notificar_telegram(f"🔴 {etiqueta_accion} <b>{contrato.symbol}</b> ({mercado}): "
+                       f"{formato_es(cantidad_ejecutada, 6)} a {formato_es(precio_actual, 4)} "
+                       f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%) "
+                       f"[confirmado a posteriori: el estado de la orden no fue fiable]")
+    if cantidad_ahora <= 1e-6:
+        cerrar_seguimiento_venta(clave_posicion)
+
+
 def mercado_de_posicion(pos):
     """Como CURRENCY_A_MERCADO no puede distinguir cripto (tambien en USD)
     de acciones US, se comprueba primero el tipo de contrato (secType).
@@ -1904,7 +1934,11 @@ def revisar_ventas(ib, mercados=None):
                     if accion_cripto == "VENTA_TOTAL":
                         cerrar_seguimiento_venta(clave_posicion_cripto)
                 else:
-                    verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad_a_vender_cripto, f"VENTAS: {contrato.symbol}")
+                    cantidad_ahora_cripto = verificar_posicion_tras_orden_no_confirmada(
+                        ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
+                    _registrar_venta_a_posteriori(mercado, contrato, cantidad, cantidad_ahora_cripto,
+                                                   precio_actual, comision_total, coste_medio, beneficio_pct,
+                                                   etiqueta_cripto, clave_posicion_cripto)
                 continue
 
             if (mercado != "?" and en_ventana_venta_forzada(mercado)
@@ -1953,7 +1987,11 @@ def revisar_ventas(ib, mercados=None):
                                        f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
                     cerrar_seguimiento_venta(clave_historial(mercado, contrato.symbol))
                 else:
-                    verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
+                    cantidad_ahora_forzada = verificar_posicion_tras_orden_no_confirmada(
+                        ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
+                    _registrar_venta_a_posteriori(mercado, contrato, cantidad, cantidad_ahora_forzada,
+                                                   precio_actual, comision_total, coste_medio, beneficio_pct,
+                                                   "VENTA FORZADA", clave_historial(mercado, contrato.symbol))
                 continue
 
             # Criterio de venta: trailing stop (principal) + 2 velas de 5min
@@ -2037,7 +2075,11 @@ def revisar_ventas(ib, mercados=None):
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(clave_posicion)
             else:
-                verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad_a_vender, f"VENTAS: {contrato.symbol}")
+                cantidad_ahora = verificar_posicion_tras_orden_no_confirmada(
+                    ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
+                _registrar_venta_a_posteriori(mercado, contrato, cantidad, cantidad_ahora, precio_actual,
+                                               comision_total, coste_medio, beneficio_pct, etiqueta_accion,
+                                               clave_posicion)
         except Exception as e:
             # Un fallo al procesar UNA posicion (p.ej. dato raro, error de red al
             # colocar la orden) no debe abortar la revision de las demas

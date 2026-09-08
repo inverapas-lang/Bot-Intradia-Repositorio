@@ -1019,6 +1019,72 @@ try:
     check("verificar_posicion_tras_orden_no_confirmada: detecta que la posicion NO cambio",
           cantidad_verificada_2 == 0, f"cantidad_verificada_2={cantidad_verificada_2}")
 
+    # --- BUG REAL DE PRODUCCION (sept. 2026, caso real: venta de SMCI
+    # confirmada por la propia app de IBKR, pero /hoy seguia mostrando "0
+    # ventas"): cuando una orden de VENTA no confirmaba 'Filled' pero la
+    # posicion SI habia bajado de verdad, no se registraba en el historial
+    # ni se avisaba por Telegram -a diferencia de las COMPRAS, que ya
+    # tenian este tratamiento-. _registrar_venta_a_posteriori() iguala el
+    # mismo tratamiento. ---
+    telegram_capturados = []
+    notificar_telegram_original = bot.notificar_telegram
+    bot.notificar_telegram = lambda msg: telegram_capturados.append(msg)
+    try:
+        # Venta TOTAL detectada a posteriori (posicion quedo en 0).
+        bot._maximo_beneficio_neto_por_posicion = {"US:ZZZ": 2.0}
+        bot._scale_out_realizado = {"US:ZZZ"}
+        bot._registrar_venta_a_posteriori("US", contrato_zzz, cantidad_antes=1.0, cantidad_ahora=0.0,
+                                           precio_actual=41.15, comision_total=1.0, coste_medio=38.0,
+                                           beneficio_pct=8.0, etiqueta_accion="VENTA",
+                                           clave_posicion="US:ZZZ")
+        operaciones = bot.cargar_historial_operaciones()
+        ventas_zzz = [o for o in operaciones if o["ticker"] == "ZZZ" and o["lado"] == "VENTA"]
+        check("_registrar_venta_a_posteriori: registra la venta en el historial aunque el estado "
+              "de la orden no confirmara 'Filled'",
+              len(ventas_zzz) == 1 and abs(ventas_zzz[0]["cantidad"] - 1.0) < 1e-9,
+              f"ventas_zzz={ventas_zzz}")
+        check("_registrar_venta_a_posteriori: SI avisa por Telegram (antes se quedaba muda)",
+              len(telegram_capturados) == 1 and "ZZZ" in telegram_capturados[0],
+              f"telegram_capturados={telegram_capturados}")
+        check("_registrar_venta_a_posteriori: venta TOTAL (posicion a 0) -> olvida el seguimiento del trailing",
+              "US:ZZZ" not in bot._maximo_beneficio_neto_por_posicion,
+              f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+        # Venta PARCIAL detectada a posteriori (queda posicion corriendo):
+        # NO debe olvidar el seguimiento.
+        telegram_capturados.clear()
+        bot._maximo_beneficio_neto_por_posicion = {"US:YYY": 2.0}
+        bot._scale_out_realizado = set()
+        contrato_yyy = _ContratoFalso("YYY")
+        contrato_yyy.currency = "USD"
+        bot._registrar_venta_a_posteriori("US", contrato_yyy, cantidad_antes=10.0, cantidad_ahora=5.0,
+                                           precio_actual=50.0, comision_total=1.0, coste_medio=45.0,
+                                           beneficio_pct=2.0, etiqueta_accion="VENTA PARCIAL",
+                                           clave_posicion="US:YYY")
+        operaciones = bot.cargar_historial_operaciones()
+        ventas_yyy = [o for o in operaciones if o["ticker"] == "YYY" and o["lado"] == "VENTA"]
+        check("_registrar_venta_a_posteriori: venta PARCIAL registra solo la cantidad realmente vendida (5, no 10)",
+              len(ventas_yyy) == 1 and abs(ventas_yyy[0]["cantidad"] - 5.0) < 1e-9,
+              f"ventas_yyy={ventas_yyy}")
+        check("_registrar_venta_a_posteriori: venta PARCIAL (queda posicion) -> SIGUE trackeando el maximo",
+              "US:YYY" in bot._maximo_beneficio_neto_por_posicion,
+              f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+        # Si la posicion no cambio en absoluto, no debe registrar nada.
+        telegram_capturados.clear()
+        operaciones_antes = len(bot.cargar_historial_operaciones())
+        bot._registrar_venta_a_posteriori("US", contrato_zzz, cantidad_antes=1.0, cantidad_ahora=1.0,
+                                           precio_actual=41.15, comision_total=1.0, coste_medio=38.0,
+                                           beneficio_pct=8.0, etiqueta_accion="VENTA",
+                                           clave_posicion="US:ZZZ")
+        check("_registrar_venta_a_posteriori: si la posicion no cambio, NO registra nada ni avisa",
+              len(bot.cargar_historial_operaciones()) == operaciones_antes and telegram_capturados == [],
+              f"telegram_capturados={telegram_capturados}")
+    finally:
+        bot.notificar_telegram = notificar_telegram_original
+        bot._maximo_beneficio_neto_por_posicion = {}
+        bot._scale_out_realizado = set()
+
     # --- Extremo a extremo: revisar_compras registra la apertura cuando la
     #     compra se confirma Filled y era una posicion nueva desde cero ---
     class _IBFalsoCompraFilled:

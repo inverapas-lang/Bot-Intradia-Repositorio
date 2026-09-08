@@ -1033,6 +1033,28 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
     cartera solo para mostrar el resumen al arrancar el bot. → se añadió el mismo
     `ib.qualifyContracts(pos.contract)` (si `exchange` viene vacío) justo antes de pedir el
     precio, igual que ya hacía `revisar_ventas()`.
+17. **Ventas confirmadas por IBKR pero invisibles para `/hoy` (caso real, sept. 2026: venta de
+    SMCI confirmada por la propia app de IBKR — notificación "Sold 1 SMCI @ 41.15" — pero
+    `/hoy` seguía mostrando "Ventas: 0 operaciones")**: mismo problema de fondo que el bug #10
+    ("el estado de la orden puede mentir"), pero solo la mitad arreglado. Cuando una orden de
+    VENTA no confirmaba `Filled`, `verificar_posicion_tras_orden_no_confirmada()` sí detectaba
+    en el log que la posición había bajado de verdad, pero el código se quedaba ahí — nunca
+    llamaba a `registrar_operacion_historial()` (la fuente de `/hoy`/`/ayer`/`/semana`, ver
+    `historial_operaciones_ibkr.json`) ni a `notificar_telegram()` ni a
+    `cerrar_seguimiento_venta()`. Las COMPRAS ya tenían el tratamiento correcto
+    (`compra_confirmada = cantidad_tras_compra > cantidad_antes_compra`, con registro
+    retroactivo); las VENTAS no. Además, dos de los tres puntos de venta (cripto y el trailing
+    stop principal) pasaban la cantidad *a vender* como referencia "antes" en vez de la
+    posición *completa* antes de la orden — con una venta PARCIAL esto habría comparado contra
+    la mitad equivocada. → nueva función `_registrar_venta_a_posteriori()`: cuando se detecta
+    que la posición sí bajó, calcula la cantidad realmente vendida por diferencia
+    (`cantidad_antes - cantidad_ahora`), registra la operación (con el precio actual como mejor
+    aproximación disponible, ya que no hay `avgFillPrice` fiable por esta vía), avisa por
+    Telegram, y solo cierra el seguimiento del trailing stop si la posición quedó en ~0 (venta
+    total real, no la acción originalmente intentada). Aplicado en los 3 puntos de venta
+    (acciones, cripto, venta forzada), todos ahora pasando la posición completa como
+    referencia. Este bug es específico de IBKR — Alpaca no tiene este mecanismo de
+    verificación porque su API de estado de órdenes no presenta el mismo problema.
 
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 
