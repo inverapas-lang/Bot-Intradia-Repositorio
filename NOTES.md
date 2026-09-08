@@ -159,6 +159,15 @@ todavía a la espera de ver un ciclo real con los tres mercados activos.
    deliberadamente conservador: si una orden acaba rechazada, se pierde margen para el resto
    del ciclo, pero nunca se compra de más. Si `AvailableFunds` no se puede leer (fallo de red),
    se omite solo esa comprobación concreta, sin bloquear el resto de compras del ciclo.
+   - **Compra REDUCIDA en vez de omitida cuando el importe estándar no cabe** (añadido sept.
+     2026, petición del usuario, mismo cambio que en `bot_alpaca.py`): si el importe estándar
+     (`IMPORTE_EUROS` convertido) supera `AvailableFunds`, en vez de omitir la señal entera se
+     reduce el importe al máximo que quepa, dejando siempre `MARGEN_EFECTIVO_MINIMO_USD` (5 USD)
+     de margen en la cuenta. El importe reducido fluye de forma natural por el resto de la
+     lógica existente (fraccionario en US, lote entero en HK/KR, mínimo de cripto), así que
+     cada mercado sigue aplicando su propio mínimo sobre el importe ya reducido — solo se omite
+     del todo si ni siquiera ese importe reducido llega a comprar nada (0 acciones/lotes, o por
+     debajo del mínimo fraccionario/de cripto).
 
 ## Reglas de venta (`revisar_ventas`)
 

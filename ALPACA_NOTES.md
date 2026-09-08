@@ -731,10 +731,12 @@ de sobra para una compra más pequeña — caso real visto en producción: la cu
 ~4 USD disponibles y una señal de LINK/USD (importe estándar 5.25 USD) se omitía ciclo tras
 ciclo sin comprar nada, dejando ese efectivo "muerto" sin invertir. Ahora, si el importe
 estándar supera el efectivo disponible, se reduce al máximo que quepa dejando siempre
-`MARGEN_EFECTIVO_MINIMO_EUR` (1 EUR, convertido a USD) de margen en la cuenta — solo se omite
-la señal si ni siquiera ese importe reducido llega al mínimo de la operación
-(`VALOR_MINIMO_OPERACION_FRACCIONARIA_USD` en acciones, `VALOR_MINIMO_OPERACION_CRIPTO_USD` en
-cripto). Mismo comportamiento en `revisar_compras()` y `revisar_compras_cripto()`.
+`MARGEN_EFECTIVO_MINIMO_USD` (5 USD — ajustado desde 1 EUR, petición explícita del usuario) de
+margen en la cuenta — solo se omite la señal si ni siquiera ese importe reducido llega al
+mínimo de la operación (`VALOR_MINIMO_OPERACION_FRACCIONARIA_USD` en acciones,
+`VALOR_MINIMO_OPERACION_CRIPTO_USD` en cripto). Mismo comportamiento en `revisar_compras()` y
+`revisar_compras_cripto()`, y el mismo margen de 5 USD (`MARGEN_EFECTIVO_MINIMO_USD`) también en
+`bot_completo.py`/IBKR (ver NOTES.md).
 
 Ambos se reservan de forma OPTIMISTA en el momento de decidir la compra
 (no al confirmarse como `filled`), para que dos señales del mismo ciclo

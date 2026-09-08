@@ -2304,6 +2304,7 @@ finally:
 class _IBFalsoLimitesAgregados:
     def __init__(self, num_posiciones_existentes, available_funds_usd):
         self.ordenes_colocadas = []
+        self.ordenes_objeto = []
         self._num_posiciones_existentes = num_posiciones_existentes
         self._available_funds_usd = available_funds_usd
 
@@ -2335,6 +2336,7 @@ class _IBFalsoLimitesAgregados:
 
     def placeOrder(self, contrato, orden):
         self.ordenes_colocadas.append(contrato.symbol)
+        self.ordenes_objeto.append(orden)
         return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Submitted"), isDone=lambda: True)
 
 
@@ -2369,6 +2371,29 @@ try:
     bot.revisar_compras(ib_sin_caja)
     check("revisar_compras: con AvailableFunds insuficiente, NO compra aunque haya señal y hueco",
           ib_sin_caja.ordenes_colocadas == [], f"ordenes={ib_sin_caja.ordenes_colocadas}")
+
+    # AvailableFunds insuficiente para el importe ESTANDAR pero suficiente
+    # para uno REDUCIDO que deje el margen minimo: compra ese importe
+    # reducido en vez de omitir la compra entera (peticion del usuario,
+    # sept. 2026, igual que en bot_alpaca.py). 350 USD deja margen para al
+    # menos 1 accion entera (~321 USD) incluso si el test corre fuera de
+    # la sesion regular (donde solo se admiten acciones enteras, no
+    # fracciones via API).
+    ib_caja_reducida = _IBFalsoLimitesAgregados(0, available_funds_usd=350.0)
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_caja_reducida)
+    check("revisar_compras: con AvailableFunds insuficiente para el importe estandar pero suficiente "
+          "para uno reducido, SI compra (reducido, dejando el margen minimo)",
+          "NUEVO" in ib_caja_reducida.ordenes_colocadas, f"ordenes={ib_caja_reducida.ordenes_colocadas}")
+    if ib_caja_reducida.ordenes_objeto:
+        importe_esperado = 350.0 - bot.MARGEN_EFECTIVO_MINIMO_USD
+        orden_colocada = ib_caja_reducida.ordenes_objeto[0]
+        importe_real = (orden_colocada.totalQuantity * 321.66968513386416 if orden_colocada.totalQuantity
+                         else orden_colocada.cashQty)
+        check("revisar_compras: el importe reducido usado no supera (fondos - margen minimo), ni "
+              "el importe estandar completo",
+              importe_real <= importe_esperado + 0.01 and importe_real < 1140.0,
+              f"importe_real={importe_real}, esperado_max={importe_esperado}")
 
     # Sin el tag AvailableFunds en absoluto (p.ej. fallo al leerlo): no debe
     # romper nada, simplemente no se aplica ese limite concreto.

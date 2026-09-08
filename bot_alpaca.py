@@ -334,7 +334,7 @@ TIPO_CAMBIO_EUR_USD = 1.14   # actualiza a mano si quieres mas precision
 # (IMPORTE_EUROS) no cabe en el efectivo disponible, en vez de omitir la
 # compra entera se reduce al maximo que quepa, dejando siempre este margen
 # de seguridad en la cuenta (nunca se deja la cuenta a 0 exacto).
-MARGEN_EFECTIVO_MINIMO_EUR = 1.0
+MARGEN_EFECTIVO_MINIMO_USD = 5.0
 
 DECIMALES_FRACCION = 4
 VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0
@@ -1395,7 +1395,7 @@ def revisar_compras():
                 continue
 
             if efectivo_disponible_usd is not None and importe_a_usar > efectivo_disponible_usd:
-                margen_minimo_usd = MARGEN_EFECTIVO_MINIMO_EUR * TIPO_CAMBIO_EUR_USD
+                margen_minimo_usd = MARGEN_EFECTIVO_MINIMO_USD
                 importe_ajustado = efectivo_disponible_usd - margen_minimo_usd
                 if importe_ajustado < VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:
                     log(f"COMPRAS: {ticker} - senal de COMPRA pero el efectivo disponible "
@@ -1523,7 +1523,7 @@ def revisar_compras_cripto():
                 continue
 
             if efectivo_disponible_usd is not None and importe_a_usar > efectivo_disponible_usd:
-                margen_minimo_usd = MARGEN_EFECTIVO_MINIMO_EUR * TIPO_CAMBIO_EUR_USD
+                margen_minimo_usd = MARGEN_EFECTIVO_MINIMO_USD
                 importe_ajustado = efectivo_disponible_usd - margen_minimo_usd
                 if importe_ajustado < VALOR_MINIMO_OPERACION_CRIPTO_USD:
                     log(f"COMPRAS: {ticker} - senal de COMPRA pero el efectivo disponible "

@@ -327,6 +327,12 @@ FRACCIONABLE_POR_MERCADO = {"US": True, "EU": False, "HK": False, "KR": False, "
 DECIMALES_FRACCION = 4  # precision al calcular la cantidad fraccionaria a comprar
 VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0  # por debajo de esto, IBKR rechaza la orden
 
+# Peticion explicita del usuario (sept. 2026, igual que en bot_alpaca.py): si
+# el importe estandar no cabe en los fondos disponibles, en vez de omitir la
+# compra entera se reduce al maximo que quepa, dejando siempre este margen de
+# seguridad en la cuenta (nunca se deja la cuenta a 0 exacto).
+MARGEN_EFECTIVO_MINIMO_USD = 5.0
+
 # --- Lista de valores: mercado US (NYSE, SMART, USD) ---
 ACTIVOS_US = [
     {"ticker": t, "exchange": "SMART", "currency": "USD", "mercado": "US"}
@@ -2354,10 +2360,19 @@ def revisar_compras(ib, mercados=None):
 
             importe_a_usar_usd = valor_en_usd(importe_a_usar, currency)
             if fondos_disponibles_usd is not None and importe_a_usar_usd > fondos_disponibles_usd:
-                log(f"COMPRAS: {ticker} - señal de COMPRA pero el importe ({importe_a_usar_usd:.2f} USD) "
-                    f"supera los fondos disponibles restantes en la cuenta ({fondos_disponibles_usd:.2f} "
-                    f"USD), se omite.")
-                continue
+                importe_ajustado_usd = fondos_disponibles_usd - MARGEN_EFECTIVO_MINIMO_USD
+                if importe_ajustado_usd <= 0:
+                    log(f"COMPRAS: {ticker} - señal de COMPRA pero los fondos disponibles "
+                        f"({fondos_disponibles_usd:.2f} USD) menos el margen de seguridad "
+                        f"({MARGEN_EFECTIVO_MINIMO_USD:.2f} USD) no dejan nada para comprar, se omite.")
+                    continue
+                log(f"COMPRAS: {ticker} - importe estandar ({importe_a_usar_usd:.2f} USD) reducido a "
+                    f"{importe_ajustado_usd:.2f} USD para no dejar la cuenta por debajo de "
+                    f"{MARGEN_EFECTIVO_MINIMO_USD:.2f} USD (fondos disponibles: "
+                    f"{fondos_disponibles_usd:.2f} USD). El resto de comprobaciones de minimos por "
+                    f"mercado (fraccion, lote...) siguen aplicandose sobre el importe ya reducido.")
+                importe_a_usar = importe_a_usar * (importe_ajustado_usd / importe_a_usar_usd)
+                importe_a_usar_usd = importe_ajustado_usd
 
             # Reserva optimista: se descuenta/anota AQUI, no tras confirmar la
             # orden, para que la SIGUIENTE señal de este mismo ciclo ya vea

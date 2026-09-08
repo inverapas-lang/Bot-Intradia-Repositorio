@@ -814,7 +814,7 @@ finally:
     bot._trading_client = trading_client_original
     bot._crypto_data_client = crypto_data_client_original
 
-margen_esperado_cripto_usd = bot.MARGEN_EFECTIVO_MINIMO_EUR * bot.TIPO_CAMBIO_EUR_USD
+margen_esperado_cripto_usd = bot.MARGEN_EFECTIVO_MINIMO_USD
 check("revisar_compras_cripto: con efectivo insuficiente para el importe estandar pero suficiente "
       "para uno reducido, SI compra (reducido, dejando el margen minimo)",
       len(ordenes_cripto_caja_reducida) == 1, f"ordenes={ordenes_cripto_caja_reducida}")
@@ -919,7 +919,7 @@ finally:
     bot._trading_client = trading_client_original
     bot._data_client = data_client_original
 
-margen_esperado_usd = bot.MARGEN_EFECTIVO_MINIMO_EUR * bot.TIPO_CAMBIO_EUR_USD
+margen_esperado_usd = bot.MARGEN_EFECTIVO_MINIMO_USD
 check("revisar_compras: con efectivo insuficiente para el importe estandar pero suficiente para "
       "un importe reducido, SI compra (reducido, dejando el margen minimo)",
       len(ordenes_caja_reducida) == 1, f"ordenes={ordenes_caja_reducida}")
