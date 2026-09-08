@@ -9,4 +9,6 @@ latido_bot_alpaca.txt
 bot_alpaca.pid
 bot_completo.log
 detener_bot.flag
+estado_venta_bot_completo.json
+estado_venta_alpaca.json
 .env

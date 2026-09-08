@@ -23,6 +23,7 @@ _DIR_TEMP_ESTADO_RUNTIME = tempfile.mkdtemp()
 bot.ARCHIVO_LATIDO = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "latido_bot_alpaca.txt")
 bot.ARCHIVO_PID = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "bot_alpaca.pid")
 bot.ARCHIVO_HISTORIAL_OPERACIONES = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "historial_operaciones_alpaca_test.json")
+bot.ARCHIVO_ESTADO_VENTA = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "estado_venta_test.json")
 
 fallos = []
 

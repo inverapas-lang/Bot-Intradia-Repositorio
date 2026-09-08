@@ -236,6 +236,17 @@ MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2
 # ya esta en NETO (sin comision, Alpaca no cobra en acciones), asi que el
 # trailing stop arma sobre beneficio neto de verdad.
 TRAILING_STOP_VENTA_PCT = 0.3  # puntos de retroceso desde el maximo neto alcanzado
+
+# Bug real de produccion (sept. 2026): el maximo trackeado vivia SOLO en
+# memoria (un dict normal). Cada reinicio del proceso (un despliegue, una
+# caida, systemctl restart) lo borraba por completo, asi que el bot
+# "olvidaba" que una posicion habia llegado a +7% y trackeaba desde el
+# valor que tuviera justo al arrancar -un retroceso real desde un maximo
+# anterior al reinicio nunca disparaba el trailing stop, porque el bot
+# nunca "vio" ese maximo-. Ahora se persiste en disco
+# (ARCHIVO_ESTADO_VENTA) y se recarga al arrancar, para sobrevivir a
+# reinicios igual que el historial de operaciones.
+ARCHIVO_ESTADO_VENTA = "estado_venta_alpaca.json"
 _maximo_beneficio_neto_por_posicion = {}  # ticker -> % neto maximo visto en la posicion actual
 
 # Salida parcial (peticion del usuario, sept. 2026): en cuanto una posicion
@@ -246,6 +257,34 @@ _maximo_beneficio_neto_por_posicion = {}  # ticker -> % neto maximo visto en la 
 # por posicion (_scale_out_realizado), no en cada ciclo tras la primera vez.
 PORCENTAJE_SCALE_OUT = 0.5
 _scale_out_realizado = set()  # tickers ya con su venta parcial hecha
+
+
+def cargar_estado_venta():
+    """Recupera _maximo_beneficio_neto_por_posicion/_scale_out_realizado
+    guardados en disco (ver ARCHIVO_ESTADO_VENTA) - se llama una vez al
+    arrancar el bot, para no perder el trailing stop en cada reinicio."""
+    global _maximo_beneficio_neto_por_posicion, _scale_out_realizado
+    try:
+        with open(ARCHIVO_ESTADO_VENTA, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+        _maximo_beneficio_neto_por_posicion = dict(datos.get("maximo_beneficio_neto_por_posicion", {}))
+        _scale_out_realizado = set(datos.get("scale_out_realizado", []))
+        if _maximo_beneficio_neto_por_posicion or _scale_out_realizado:
+            log(f"Estado de venta (trailing stop) recuperado de {ARCHIVO_ESTADO_VENTA}: "
+                f"{len(_maximo_beneficio_neto_por_posicion)} posicion(es) trackeada(s).")
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+
+def _guardar_estado_venta():
+    try:
+        with open(ARCHIVO_ESTADO_VENTA, "w", encoding="utf-8") as f:
+            json.dump({
+                "maximo_beneficio_neto_por_posicion": _maximo_beneficio_neto_por_posicion,
+                "scale_out_realizado": sorted(_scale_out_realizado),
+            }, f, indent=2, sort_keys=True)
+    except OSError as e:
+        log(f"No se pudo guardar el estado de venta ({ARCHIVO_ESTADO_VENTA}): {type(e).__name__}: {e}")
 
 
 def decidir_accion_venta(clave, beneficio_pct, umbral):
@@ -265,10 +304,13 @@ def decidir_accion_venta(clave, beneficio_pct, umbral):
     info = f"(maximo alcanzado {maximo_neto:.2f}%, retroceso {retroceso_pct:.2f} pts)"
 
     if disparo_trailing:
+        _guardar_estado_venta()
         return "VENTA_TOTAL", f"trailing stop: retrocedio {retroceso_pct:.2f} pts desde el maximo de {maximo_neto:.2f}%"
     if trailing_armado and clave not in _scale_out_realizado:
         _scale_out_realizado.add(clave)
+        _guardar_estado_venta()
         return "VENTA_PARCIAL", f"objetivo alcanzado ({beneficio_pct:.2f}% >= {umbral}%): asegurando el {PORCENTAJE_SCALE_OUT*100:.0f}%"
+    _guardar_estado_venta()
     return "MANTENER", info
 
 
@@ -277,6 +319,7 @@ def cerrar_seguimiento_venta(clave):
     posicion (llamar tras confirmar una venta TOTAL)."""
     _maximo_beneficio_neto_por_posicion.pop(clave, None)
     _scale_out_realizado.discard(clave)
+    _guardar_estado_venta()
 
 INTERVALO_SEGUNDOS = 130  # 2 min 10 s (ajustado tras pruebas en paper, ago 2026) - solo acciones
 CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto, en su propia cadencia (peticion
@@ -1605,6 +1648,7 @@ def main():
     evitar_suspension_windows()
     escribir_pid()
     actualizar_latido()
+    cargar_estado_venta()
     threading.Thread(target=vigilante_congelacion, daemon=True).start()
 
     modo_texto = "PAPER (simulado)" if ALPACA_PAPER else "REAL - DINERO REAL"

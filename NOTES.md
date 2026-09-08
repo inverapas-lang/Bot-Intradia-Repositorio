@@ -979,6 +979,24 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
     cuenta antes de que existiera el historial, o se abrió fuera del bot. **No es un bug
     recuperable**: no hay dato que mostrar. Se mostrará bien la próxima vez que ese valor
     se compre de cero (quedará registrado en el historial en ese momento).
+15. **BUG CRÍTICO — el máximo del trailing stop se olvidaba en cada reinicio del bot (caso
+    real, sept. 2026)**: `_maximo_beneficio_neto_por_posicion` y `_scale_out_realizado`
+    (ver "Reglas de venta" más arriba) vivían solo en memoria. Caso real detectado por el
+    usuario: BCH/USD llegó a +3.45% neto y LINK/USD a +6.99%, y horas después habían
+    retrocedido a +1.05% y +5.32% respectivamente (mucho más de los 0.3 puntos de
+    `TRAILING_STOP_VENTA_PCT`) sin que el bot vendiera nada. Causa: entre medias hubo varios
+    reinicios del bot (despliegues de esta misma sesión de trabajo), y cada reinicio ponía
+    `_maximo_beneficio_neto_por_posicion` a `{}` de nuevo — el bot "olvidaba" el máximo real
+    ya visto y empezaba a trackear desde el valor que tuviera la posición en ese momento, así
+    que el retroceso real (desde el máximo histórico) nunca se comparaba con el umbral. →
+    se persiste este estado a disco (`estado_venta_bot_completo.json`, fuera del repo vía
+    `.gitignore`) mediante `cargar_estado_venta()` (llamado una vez en `main()` al arrancar)
+    y `_guardar_estado_venta()` (llamado tras cada actualización del máximo o de la salida
+    parcial, dentro de `decidir_accion_venta()`/`cerrar_seguimiento_venta()`), de forma que
+    un reinicio ya no borra el progreso del trailing stop. **Importante**: esto no recupera
+    retroactivamente el máximo ya perdido de una posición que estuviera abierta antes de
+    desplegar este arreglo — para esas, el trailing volverá a trackear desde el valor
+    vigente en el siguiente reinicio, no desde el pico histórico ya olvidado.
 
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 

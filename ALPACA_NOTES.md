@@ -745,6 +745,44 @@ adelantaba a la regla de "1 de 7" y esta última nunca llegaba a aplicarse de ve
   CORTA (1min-1h); si es larga (día/semana), da `BLOQUEADO_TF_LARGA`.
 - El atajo de 4 cortas alcistas TAMBIÉN exige que ninguna larga esté en contra.
 
+## BUG CRÍTICO corregido: el trailing stop se olvidaba en cada reinicio (sept. 2026)
+
+Caso real reportado por el usuario: la cartera `[REAL]` mostraba BCH/USD con +3.45% neto y
+LINK/USD con +6.99% neto en una foto, y horas después +1.05% y +5.32% respectivamente en la
+siguiente — un retroceso muy superior a los 0.3 puntos de `TRAILING_STOP_VENTA_PCT` — sin que
+el bot hubiera vendido nada, ni total ni parcialmente.
+
+Causa: `_maximo_beneficio_neto_por_posicion` y `_scale_out_realizado` (ver "Reglas de venta"
+más arriba) vivían solo en memoria (`{}` y `set()` a nivel de módulo, sin persistencia). Entre
+las dos fotos de cartera hubo varios reinicios de `bot_alpaca.py` (despliegues de esta misma
+sesión de trabajo, vía `systemctl restart bot-alpaca`), y cada reinicio ponía ese diccionario
+a `{}` de nuevo. El bot "olvidaba" que ya había visto un máximo de +3.45%/+6.99% en esas
+posiciones, y volvía a empezar a trackear el máximo desde el valor vigente en ese momento —
+así que el retroceso real (medido desde el máximo histórico ya olvidado) nunca llegó a
+compararse contra el umbral de 0.3 puntos.
+
+Arreglo: se persiste este estado a disco (`estado_venta_alpaca.json`, fuera del repositorio
+vía `.gitignore` — es estado de ejecución, no código) mediante dos funciones nuevas:
+- `cargar_estado_venta()`: se llama una única vez, al arrancar, dentro de `main()` (justo
+  después de `actualizar_latido()`), y repuebla `_maximo_beneficio_neto_por_posicion`/
+  `_scale_out_realizado` desde el JSON si existe (si no existe o está corrupto, sigue con los
+  diccionarios vacíos igual que antes, sin lanzar excepción).
+- `_guardar_estado_venta()`: se llama tras cada actualización real de estos dos estructuras,
+  dentro de `decidir_accion_venta()` (en sus 3 posibles desenlaces) y de
+  `cerrar_seguimiento_venta()` — así el fichero en disco nunca queda desfasado respecto a lo
+  que el bot tiene en memoria.
+
+Con esto, un reinicio del bot (despliegue, caída, reconexión) ya NO borra el progreso del
+trailing stop de las posiciones abiertas.
+
+**Importante — no es retroactivo**: este arreglo no recupera el máximo de +3.45%/+6.99% que
+ya se perdió para las posiciones BCH/LINK que estaban abiertas antes de desplegarlo. En el
+primer reinicio tras el despliegue, el trailing de esas posiciones concretas volverá a
+empezar a trackear desde el beneficio vigente en ese momento (no desde el pico histórico ya
+olvidado) — el beneficio se protege hacia adelante, pero el pico ya perdido no se reconstruye.
+De ahí en adelante (mientras el bot no se reinicie, o tras el próximo reinicio con el arreglo
+ya desplegado) el máximo sí sobrevive a cualquier reinicio posterior.
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).
