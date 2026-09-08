@@ -692,6 +692,68 @@ check("suelo anti-perdidas: beneficio exactamente 0% (no negativo) con retroceso
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
 
+# --- BUG REAL DE PRODUCCION (sept. 2026, caso real: venta de META que
+# parecia con beneficio positivo en Telegram pero en realidad se vendio
+# mas barato de lo comprado): el % de beneficio mostrado/registrado se
+# calculaba con precio_actual (el precio de referencia usado para DECIDIR
+# vender, el cierre de la ultima vela ANTES de mandar la orden), no con el
+# precio REAL de ejecucion que devuelve Alpaca -si hay slippage entre la
+# decision y la ejecucion de una orden a mercado, el % podia llegar a
+# tener el signo contrario a lo que realmente paso-. Ahora se recalcula
+# con el precio real (obtener_ejecucion_real) antes de notificar/registrar. ---
+class _TradingClientEjecucionReal(_TradingClientFalso):
+    """Como _TradingClientFalso, pero get_order_by_id() devuelve un precio
+    REAL de ejecucion distinto del precio de referencia usado para decidir
+    -simula el slippage real visto en produccion-."""
+    def __init__(self, *args, precio_real_venta, cantidad_real_venta, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._precio_real_venta = precio_real_venta
+        self._cantidad_real_venta = cantidad_real_venta
+
+    def get_order_by_id(self, order_id):
+        return types.SimpleNamespace(status=types.SimpleNamespace(value="filled"),
+                                      filled_qty=str(self._cantidad_real_venta),
+                                      filled_avg_price=str(self._precio_real_venta))
+
+
+mensajes_telegram_slippage = []
+notificar_telegram_original_slippage = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: mensajes_telegram_slippage.append(msg)
+bot.macd_5min_bajista_2_velas = lambda ticker: False
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+# Precio de referencia (decision): +2% -> arma el trailing, primera vez en
+# el umbral -> VENTA PARCIAL de 5 (mitad de 10). Precio REAL de ejecucion:
+# 99 (mas bajo que el coste de 100) -> en realidad fue una PERDIDA del 1%.
+cliente_slippage = _TradingClientEjecucionReal(posiciones=[_posicion_trailing(100.0)],
+                                                precio_real_venta=99.0, cantidad_real_venta=5)
+bot._trading_client = cliente_slippage
+bot._data_client = _DataClientPrecioFijo(102.0)
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.notificar_telegram = notificar_telegram_original_slippage
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("beneficio recalculado con precio real: coloca la orden basandose en el precio de "
+      "referencia (+2%, arma el trailing)", len(cliente_slippage.ordenes) == 1,
+      f"ordenes={cliente_slippage.ordenes}")
+check("beneficio recalculado con precio real: el mensaje de Telegram NO muestra el +2% de "
+      "referencia, muestra el -1% real (precio de ejecucion 99 vs coste 100)",
+      len(mensajes_telegram_slippage) == 1 and "-1,00%" in mensajes_telegram_slippage[0]
+      and "+2" not in mensajes_telegram_slippage[0],
+      f"mensajes={mensajes_telegram_slippage}")
+operaciones_slippage = bot.cargar_historial_operaciones()
+venta_trail = [o for o in operaciones_slippage if o["ticker"] == "TRAIL" and o["lado"] == "VENTA"]
+check("beneficio recalculado con precio real: el historial (fuente de /hoy) tambien guarda el "
+      "-1% real, no el +2% de referencia",
+      bool(venta_trail) and abs(venta_trail[-1]["beneficio_pct"] - (-1.0)) < 1e-6,
+      f"ultimo_registro={venta_trail[-1] if venta_trail else None}")
+
 
 # ---------------------------------------------------------------------------
 # 8c. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.

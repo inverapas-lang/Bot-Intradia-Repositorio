@@ -1933,12 +1933,26 @@ def revisar_ventas(ib, mercados=None):
                 if estado == 'Filled':
                     precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_limite_cripto
                     cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad_a_vender_cripto
+                    # Beneficio NETO recalculado con el precio REAL de
+                    # ejecucion, no con precio_actual (el precio de referencia
+                    # usado para DECIDIR vender, que puede quedar desfasado si
+                    # hay slippage entre la decision y la ejecucion -bug real
+                    # de produccion, sept. 2026: una venta parecia con
+                    # beneficio positivo en Telegram pero en realidad se
+                    # vendio mas barato de lo comprado-).
+                    comision_venta_real = estimar_comision_cripto(cantidad_ejecutada * precio_ejecucion)
+                    comision_total_real = comision_compra + comision_venta_real
+                    valor_compra_ejecutada = cantidad_ejecutada * coste_medio
+                    beneficio_pct_bruto_real = (precio_ejecucion - coste_medio) / coste_medio * 100
+                    comision_total_pct_real = (comision_total_real / valor_compra_ejecutada * 100
+                                                ) if valor_compra_ejecutada else 0.0
+                    beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
-                                                   precio_ejecucion, comision_total, contrato.currency,
-                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                                                   precio_ejecucion, comision_total_real, contrato.currency,
+                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                     notificar_telegram(f"🔴 {etiqueta_cripto} <b>{contrato.symbol}</b> ({mercado}): "
                                        f"{formato_es(cantidad_ejecutada, 6)} a {formato_es(precio_ejecucion, 4)} "
-                                       f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
+                                       f"{contrato.currency} ({formato_es(beneficio_pct_real, signo=True)}%)")
                     if accion_cripto == "VENTA_TOTAL":
                         cerrar_seguimiento_venta(clave_posicion_cripto)
                 else:
@@ -1987,12 +2001,24 @@ def revisar_ventas(ib, mercados=None):
                 if estado == 'Filled':
                     precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
                     cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad
+                    # Beneficio recalculado con el precio REAL de ejecucion,
+                    # no con precio_actual (ver comentario equivalente en la
+                    # rama de cripto, mas arriba -bug real de produccion,
+                    # sept. 2026-).
+                    comision_venta_real = estimar_comision(cantidad_ejecutada * precio_ejecucion,
+                                                            contrato.currency, cantidad_ejecutada)
+                    comision_total_real = comision_compra + comision_venta_real
+                    beneficio_pct_bruto_real = (precio_ejecucion - coste_medio) / coste_medio * 100
+                    valor_compra_ejecutada = cantidad_ejecutada * coste_medio
+                    comision_total_pct_real = (comision_total_real / valor_compra_ejecutada * 100
+                                                ) if valor_compra_ejecutada else 0.0
+                    beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
-                                                   precio_ejecucion, comision_total, contrato.currency,
-                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                                                   precio_ejecucion, comision_total_real, contrato.currency,
+                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                     notificar_telegram(f"🔴 VENTA FORZADA <b>{contrato.symbol}</b> ({mercado}): "
                                        f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
-                                       f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
+                                       f"{contrato.currency} ({formato_es(beneficio_pct_real, signo=True)}%)")
                     cerrar_seguimiento_venta(clave_historial(mercado, contrato.symbol))
                 else:
                     cantidad_ahora_forzada = verificar_posicion_tras_orden_no_confirmada(
@@ -2074,12 +2100,23 @@ def revisar_ventas(ib, mercados=None):
             if estado == 'Filled':
                 precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
                 cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad_a_vender
+                # Beneficio recalculado con el precio REAL de ejecucion, no
+                # con precio_actual (ver comentario equivalente en la venta
+                # forzada, mas arriba -bug real de produccion, sept. 2026-).
+                comision_venta_real = estimar_comision(cantidad_ejecutada * precio_ejecucion,
+                                                        contrato.currency, cantidad_ejecutada)
+                comision_total_real = comision_compra + comision_venta_real
+                beneficio_pct_bruto_real = (precio_ejecucion - coste_medio) / coste_medio * 100
+                valor_compra_ejecutada = cantidad_ejecutada * coste_medio
+                comision_total_pct_real = (comision_total_real / valor_compra_ejecutada * 100
+                                            ) if valor_compra_ejecutada else 0.0
+                beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
                 registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
-                                               precio_ejecucion, comision_total, contrato.currency,
-                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                                               precio_ejecucion, comision_total_real, contrato.currency,
+                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                 notificar_telegram(f"🔴 {etiqueta_accion} <b>{contrato.symbol}</b> ({mercado}): "
                                    f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
-                                   f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%)")
+                                   f"{contrato.currency} ({formato_es(beneficio_pct_real, signo=True)}%)")
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(clave_posicion)
             else:

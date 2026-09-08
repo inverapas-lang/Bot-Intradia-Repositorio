@@ -1059,6 +1059,21 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
     (acciones, cripto, venta forzada), todos ahora pasando la posición completa como
     referencia. Este bug es específico de IBKR — Alpaca no tiene este mecanismo de
     verificación porque su API de estado de órdenes no presenta el mismo problema.
+18. **El % de beneficio notificado/registrado podía tener el signo CONTRARIO al real (caso
+    real, sept. 2026, mismo bug en `bot_alpaca.py`: una venta de META parecía con beneficio
+    positivo en Telegram, pero comparando con la app de Alpaca se había vendido más barato de
+    lo comprado — una pérdida real)**: `beneficio_pct` se calculaba UNA vez al principio del
+    ciclo, contra `precio_actual` (el cierre de la última vela, el precio de referencia usado
+    para DECIDIR si vender) — y ese mismo valor, ya desfasado, se reutilizaba después para el
+    mensaje de Telegram y para `registrar_operacion_historial()`, aunque para entonces ya se
+    conocía el precio REAL de ejecución (`avgFillPrice`/`filled_avg_price`, el que de verdad
+    cobra o paga el bróker). Si había slippage entre la decisión y la ejecución de una orden a
+    mercado (frecuente en momentos de caída rápida, que es justo cuando más se vende), el %
+    mostrado podía no coincidir con lo que realmente pasó — incluso con el signo cambiado. →
+    en los 3 puntos de venta de cada bot, el % ya no se calcula una sola vez: se recalcula
+    (`beneficio_pct_real`/`beneficio_pct_bruto_real`) contra el precio REAL de ejecución justo
+    antes de notificar y registrar, así que tanto Telegram como `/hoy`/`/ayer`/`/semana`
+    reflejan lo que económicamente pasó de verdad, no la estimación previa a la orden.
 
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 

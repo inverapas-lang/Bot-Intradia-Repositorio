@@ -859,13 +859,16 @@ activos_prueba_compras = [
 activos_originales = bot.ACTIVOS
 es_horario_original = bot.es_horario_operativo
 en_ventana_sin_compra_original = bot.en_ventana_sin_compra
+en_postmercado_us_original = bot.en_postmercado_us
 bot.ACTIVOS = activos_prueba_compras
 bot.es_horario_operativo = lambda mercado: True  # forzar "mercado abierto" durante el test
-# En_ventana_sin_compra depende de la hora REAL respecto al cierre real del
-# mercado; se fuerza a False para que el test no dependa de a que hora del
-# dia se ejecute (evita falsos negativos si por casualidad se corre dentro
-# de los ultimos 90 min reales antes del cierre de US).
+# En_ventana_sin_compra y en_postmercado_us dependen de la hora REAL
+# respecto al cierre real del mercado; se fuerzan a False para que el test
+# no dependa de a que hora del dia se ejecute (evita falsos negativos si
+# por casualidad se corre dentro de los ultimos 90 min reales antes del
+# cierre de US, o dentro del postmercado real 16:00-20:00 ET).
 bot.en_ventana_sin_compra = lambda mercado: False
+bot.en_postmercado_us = lambda: False
 
 ib_falso_compras = _IBFalsoCompras()
 excepcion_compras = None
@@ -878,6 +881,7 @@ finally:
     bot.ACTIVOS = activos_originales
     bot.es_horario_operativo = es_horario_original
     bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+    bot.en_postmercado_us = en_postmercado_us_original
 
 check("revisar_compras: un valor que falla al pedir precio no lanza excepcion hacia fuera",
       excepcion_compras is None, f"excepcion={excepcion_compras}")
@@ -1115,6 +1119,7 @@ try:
     bot.ACTIVOS = [{"ticker": "NUEVA", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
     bot.es_horario_operativo = lambda mercado: True
     bot.en_ventana_sin_compra = lambda mercado: False
+    bot.en_postmercado_us = lambda: False
     check("obtener_apertura_registrada: NUEVA sin registro previo -> None",
           bot.obtener_apertura_registrada("US", "NUEVA") is None)
     try:
@@ -1124,6 +1129,7 @@ try:
         bot.ACTIVOS = activos_originales
         bot.es_horario_operativo = es_horario_original
         bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+        bot.en_postmercado_us = en_postmercado_us_original
 
     check("revisar_compras: una compra Filled de una posicion nueva SI registra la apertura",
           bot.obtener_apertura_registrada("US", "NUEVA") is not None)
@@ -1731,6 +1737,68 @@ check("suelo anti-perdidas: beneficio exactamente 0% (no negativo) con retroceso
       accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+
+# --- BUG REAL DE PRODUCCION (sept. 2026, mismo cambio en bot_alpaca.py):
+# el % de beneficio mostrado/registrado se calculaba con precio_actual (el
+# precio de referencia usado para DECIDIR vender), no con el precio REAL
+# de ejecucion (avgFillPrice) -si hay slippage, el % podia tener el signo
+# contrario a lo que realmente paso-. Ahora se recalcula con el precio
+# real antes de notificar/registrar. ---
+class _IBFalsoTrailingStopSlippage(_IBFalsoTrailingStop):
+    """Como _IBFalsoTrailingStop, pero placeOrder() devuelve un
+    avgFillPrice/filled REAL distinto del precio de referencia (precio_actual)
+    usado para decidir -simula el slippage real visto en produccion-."""
+    def __init__(self, avgCost, precio_inicial, precio_real_venta, cantidad_real_venta):
+        super().__init__(avgCost, precio_inicial)
+        self._precio_real_venta = precio_real_venta
+        self._cantidad_real_venta = cantidad_real_venta
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        return types.SimpleNamespace(
+            orderStatus=types.SimpleNamespace(status="Filled", avgFillPrice=self._precio_real_venta,
+                                               filled=self._cantidad_real_venta),
+            isDone=lambda: True)
+
+
+telegram_capturados_slippage = []
+notificar_telegram_original_slippage = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: telegram_capturados_slippage.append(msg)
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: False
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+# Precio de referencia (decision): coste 100, precio_inicial 102 -> +2%
+# neto (tras comision ~0.7%, sigue armando el trailing) -> primera vez en
+# el umbral -> VENTA PARCIAL de 5 (mitad de 10). Precio REAL de ejecucion:
+# 99 (mas bajo que el coste) -> en realidad fue una PERDIDA.
+ib_slippage = _IBFalsoTrailingStopSlippage(avgCost=100, precio_inicial=102.0,
+                                            precio_real_venta=99.0, cantidad_real_venta=5)
+try:
+    bot.revisar_ventas(ib_slippage)
+finally:
+    bot.notificar_telegram = notificar_telegram_original_slippage
+    bot.macd_5min_bajista_2_velas = macd_2velas_original
+    bot.es_horario_operativo = es_horario_original_trailing
+    bot.en_ventana_venta_forzada = en_venta_forzada_original
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("beneficio recalculado con precio real (IBKR): coloca la orden basandose en el precio de "
+      "referencia (arma el trailing)", ib_slippage.ordenes_colocadas == ["TRAIL"],
+      f"ordenes={ib_slippage.ordenes_colocadas}")
+check("beneficio recalculado con precio real (IBKR): el mensaje de Telegram muestra un beneficio "
+      "NEGATIVO (precio de ejecucion 99 vs coste 100), no el positivo de referencia",
+      len(telegram_capturados_slippage) == 1 and "-" in telegram_capturados_slippage[0]
+      and "%)" in telegram_capturados_slippage[0],
+      f"mensajes={telegram_capturados_slippage}")
+operaciones_ibkr_slippage = bot.cargar_historial_operaciones()
+ventas_trail_ibkr = [o for o in operaciones_ibkr_slippage if o["ticker"] == "TRAIL" and o["lado"] == "VENTA"]
+check("beneficio recalculado con precio real (IBKR): el historial (fuente de /hoy) tambien guarda "
+      "el beneficio NEGATIVO real, no el positivo de referencia",
+      bool(ventas_trail_ibkr) and ventas_trail_ibkr[-1]["beneficio_pct"] < 0,
+      f"ultimo_registro={ventas_trail_ibkr[-1] if ventas_trail_ibkr else None}")
 
 
 # ---------------------------------------------------------------------------
@@ -2461,10 +2529,12 @@ activo_prueba_limites = [{"ticker": "NUEVO", "exchange": "SMART", "currency": "U
 
 es_horario_original_limites = bot.es_horario_operativo
 en_ventana_sin_compra_original_limites = bot.en_ventana_sin_compra
+en_postmercado_us_original_limites = bot.en_postmercado_us
 activos_originales_limites = bot.ACTIVOS
 bot.ACTIVOS = activo_prueba_limites
 bot.es_horario_operativo = lambda mercado: True
 bot.en_ventana_sin_compra = lambda mercado: False
+bot.en_postmercado_us = lambda: False
 try:
     # Ya hay MAX_POSICIONES_ABIERTAS posiciones distintas abiertas -> un
     # ticker NUEVO (que no es ninguna de esas) debe omitirse.
@@ -2528,6 +2598,7 @@ finally:
     bot.ACTIVOS = activos_originales_limites
     bot.es_horario_operativo = es_horario_original_limites
     bot.en_ventana_sin_compra = en_ventana_sin_compra_original_limites
+    bot.en_postmercado_us = en_postmercado_us_original_limites
 
 
 # ---------------------------------------------------------------------------

@@ -848,6 +848,29 @@ olvidado) — el beneficio se protege hacia adelante, pero el pico ya perdido no
 De ahí en adelante (mientras el bot no se reinicie, o tras el próximo reinicio con el arreglo
 ya desplegado) el máximo sí sobrevive a cualquier reinicio posterior.
 
+## BUG CRÍTICO corregido: el % de beneficio notificado podía tener el signo contrario (sept. 2026)
+
+Caso real reportado por el usuario: una venta de META se notificó por Telegram con beneficio
+positivo, pero comparando con el historial de órdenes de la propia app de Alpaca, en realidad
+se había vendido más barato de lo comprado — una pérdida real.
+
+**Causa**: `beneficio_pct` se calculaba UNA vez al principio del ciclo, contra `precio_actual`
+(el cierre de la última vela, el precio de referencia usado para DECIDIR si vender) — y ese
+mismo valor, ya desfasado, se reutilizaba después tanto para el mensaje de Telegram como para
+`registrar_operacion_historial()` (la fuente de `/hoy`/`/ayer`/`/semana`), aunque para
+entonces ya se conocía el precio REAL de ejecución (`obtener_ejecucion_real()`, que lee
+`filled_avg_price` de Alpaca — el que de verdad se cobra o paga). Si había slippage entre la
+decisión y la ejecución de una orden a mercado o IOC (más probable justo en momentos de caída
+rápida, que es precisamente cuando más se vende), el % mostrado podía no coincidir con lo que
+realmente pasó — incluso con el signo cambiado, como en este caso.
+
+**Arreglo**: en los 3 puntos de venta (`revisar_ventas()` — venta forzada y trailing/refuerzo
+— y `revisar_ventas_cripto()`), el % ya no se calcula una sola vez: se recalcula
+(`beneficio_pct_real`) contra `precio_real` justo después de `obtener_ejecucion_real()`, antes
+de notificar por Telegram y de guardar en el historial. Así, tanto la notificación como
+`/hoy`/`/ayer`/`/semana` reflejan lo que económicamente pasó de verdad, no la estimación
+previa a la orden. Mismo cambio en `bot_completo.py` (ver NOTES.md).
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

@@ -1184,11 +1184,19 @@ def revisar_ventas():
                 log(f"VENTAS: {ticker} - orden a mercado, estado: {estado}")
                 if estado == "filled":
                     cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad, precio_actual)
+                    # Beneficio RECALCULADO con el precio REAL de ejecucion, no
+                    # con precio_actual (el precio de referencia usado para
+                    # DECIDIR vender, que puede quedar desfasado del precio real
+                    # de una orden a mercado si hay slippage entre la decision y
+                    # la ejecucion -bug real de produccion, sept. 2026: una
+                    # venta de META parecia con beneficio positivo en Telegram
+                    # pero en realidad se vendio mas barato de lo comprado-.
+                    beneficio_pct_real = (precio_real - coste_medio) / coste_medio * 100
                     registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
-                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                     notificar_telegram(f"🔴 VENTA FORZADA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
                                         f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
-                                        f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
+                                        f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
                     cerrar_seguimiento_venta(ticker)
                 continue
 
@@ -1236,11 +1244,14 @@ def revisar_ventas():
             log(f"VENTAS: {ticker} - orden colocada, estado: {estado}")
             if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_a_vender, precio_actual)
+                # Beneficio RECALCULADO con el precio REAL de ejecucion (ver
+                # comentario equivalente en la venta forzada, mas arriba).
+                beneficio_pct_real = (precio_real - coste_medio) / coste_medio * 100
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
-                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                 notificar_telegram(f"🔴 {etiqueta_accion} <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
                                     f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
-                                    f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
+                                    f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(ticker)
         except Exception as e:
@@ -1357,11 +1368,23 @@ def revisar_ventas_cripto():
             log(f"VENTAS: {ticker} - orden limitada IOC a {precio_limite} USD, estado: {estado}")
             if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_a_vender, precio_limite)
+                # Beneficio NETO recalculado con el precio REAL de ejecucion,
+                # no con precio_actual (el precio de referencia usado para
+                # DECIDIR vender, que puede quedar desfasado -bug real de
+                # produccion, sept. 2026: ver comentario equivalente en
+                # revisar_ventas(), la version para acciones-).
+                valor_venta_real = cantidad_real * precio_real
+                comision_venta_real = estimar_comision_cripto_alpaca(valor_venta_real)
+                comision_total_real = estimar_comision_cripto_alpaca(cantidad_real * coste_medio) + comision_venta_real
+                beneficio_pct_bruto_real = (precio_real - coste_medio) / coste_medio * 100
+                comision_total_pct_real = (comision_total_real / (cantidad_real * coste_medio) * 100
+                                            ) if cantidad_real * coste_medio else 0.0
+                beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
-                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct)
+                                               coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                 notificar_telegram(f"🔴 {etiqueta_accion} <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "
                                     f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
-                                    f"beneficio {formato_es(beneficio_pct, signo=True)}%)")
+                                    f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(ticker)
         except Exception as e:
