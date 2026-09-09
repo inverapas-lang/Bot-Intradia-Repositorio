@@ -469,6 +469,9 @@ arrancar/parar el bot y consultar la cartera sin tener que entrar por SSH.
 /estado    - si el bot esta corriendo o parado
 /arrancar  - arranca el bot (systemctl start bot-alpaca)
 /parar     - para el bot (systemctl stop bot-alpaca)
+/actualizar - git pull en el repo y, si trajo cambios, reinicia bot-alpaca
+             (desplegar cambios sin necesitar SSH, solo desde Telegram;
+             ver mas abajo)
 /cartera   - posiciones abiertas (igual que cartera_alpaca.py)
 /carterapaper - posiciones abiertas de la cuenta PAPER, aparte de la activa
              (requiere ALPACA_PAPER_API_KEY/ALPACA_PAPER_SECRET_KEY, ver arriba)
@@ -491,6 +494,25 @@ linea de las ventas, con su beneficio/perdida realizado, que ya existía).
 Solo responde al chat configurado en `TELEGRAM_CHAT_ID` — cualquier otro
 mensaje de cualquier otro chat se ignora y se registra en el log de
 `telegram_bot.py`.
+
+### `/actualizar`: desplegar cambios sin SSH (añadido sept. 2026, petición del usuario)
+
+Antes, para desplegar un cambio del repositorio hacía falta un cliente SSH (Termius, JuiceSSH,
+etc.) para ejecutar `git pull` + `sudo systemctl restart bot-alpaca` a mano. `/actualizar` hace
+lo mismo desde el propio chat de Telegram:
+1. `git pull` en el directorio del repo (la carpeta donde vive `telegram_bot.py`, no depende del
+   directorio de trabajo del proceso).
+2. Si `git pull` falla (p.ej. hay cambios locales sin commitear que chocan con el pull), se avisa
+   con el error exacto y **no se toca el servicio** — hay que resolverlo a mano por SSH.
+3. Si no había cambios nuevos ("Already up to date"), se avisa y tampoco se reinicia nada
+   (evita un reinicio innecesario del bot en marcha).
+4. Si sí trajo cambios, reinicia `bot-alpaca` (`ejecutar_systemctl("restart")`, mismo mecanismo
+   que `/arrancar`/`/parar` — mismo requisito de sudoers sin contraseña).
+
+**Importante**: `/actualizar` **no reinicia el propio proceso de `telegram_bot.py`**
+(sería reiniciarse a sí mismo a mitad de responder al comando, arriesgado). Si el cambio
+desplegado también tocaba `telegram_bot.py`, ese cambio concreto no se aplica hasta reiniciar
+el servicio `telegram-bot` aparte (por SSH) — el propio mensaje de `/actualizar` lo recuerda.
 
 ### Cómo crear el bot de Telegram
 

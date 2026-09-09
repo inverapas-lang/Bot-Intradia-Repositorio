@@ -12,6 +12,11 @@ Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
     /estado      - si el servicio bot-alpaca esta activo o parado
     /arrancar    - arranca el servicio (systemctl start bot-alpaca)
     /parar       - para el servicio (systemctl stop bot-alpaca)
+    /actualizar  - git pull en el repo y, si trajo cambios, reinicia bot-alpaca
+                   (para desplegar sin necesitar un cliente SSH, solo desde
+                   Telegram; ver el aviso en el propio codigo sobre
+                   telegram_bot.py -este mismo script- necesitando su propio
+                   reinicio si el cambio le afecta tambien a el)
     /cartera     - posiciones abiertas (igual que cartera_alpaca.py)
     /hoy         - resumen de actividad de hoy (num. compras/ventas y
                    acciones totales de cada lado) + detalle de las ventas cerradas
@@ -128,6 +133,45 @@ def consultar_estado_servicio():
         return f"desconocido ({type(e).__name__})"
 
 
+DIRECTORIO_REPO = os.path.dirname(os.path.abspath(__file__))
+
+
+def actualizar_codigo():
+    """/actualizar (peticion del usuario, sept. 2026: poder desplegar
+    cambios sin necesitar un cliente SSH, solo desde Telegram). Hace
+    'git pull' en el repo y, si trajo cambios nuevos, reinicia bot-alpaca
+    para que el codigo nuevo entre en marcha. Requiere que el sudoers del
+    usuario permita 'systemctl restart bot-alpaca' sin contraseña (mismo
+    requisito que /arrancar y /parar, ver ALPACA_NOTES.md) y que el repo no
+    tenga cambios locales sin commitear que choquen con git pull -en ese
+    caso git pull falla limpiamente y no se toca el servicio-.
+
+    NO reinicia el propio proceso de telegram_bot.py (este script): si el
+    cambio tocaba tambien telegram_bot.py, hay que reiniciar el servicio
+    telegram-bot a mano (por SSH, o parando y volviendo a arrancar la
+    Tarea/servicio) para que ese cambio concreto surta efecto."""
+    try:
+        resultado_pull = subprocess.run(
+            ["git", "pull"], cwd=DIRECTORIO_REPO, capture_output=True, text=True, timeout=30
+        )
+    except Exception as e:
+        return f"⚠️ Error al ejecutar git pull: {type(e).__name__}: {e}"
+
+    salida_pull = (resultado_pull.stdout + resultado_pull.stderr).strip()
+    if resultado_pull.returncode != 0:
+        return f"⚠️ git pull falló, no se ha tocado el bot:\n<pre>{escapar_html(salida_pull)}</pre>"
+
+    if "Already up to date" in salida_pull or "ya está actualizado" in salida_pull.lower():
+        return f"✅ Ya estaba actualizado, no había cambios nuevos.\n<pre>{escapar_html(salida_pull)}</pre>"
+
+    error_reinicio = ejecutar_systemctl("restart")
+    aviso_telegram = ("\n\n⚠️ Si este cambio también tocaba telegram_bot.py, este propio bot de "
+                       "Telegram necesita un reinicio aparte (por SSH) para aplicarlo.")
+    if error_reinicio:
+        return f"✅ Código actualizado, pero falló el reinicio:\n<pre>{escapar_html(salida_pull)}</pre>\n\n{error_reinicio}{aviso_telegram}"
+    return f"✅ Código actualizado y bot-alpaca reiniciado:\n<pre>{escapar_html(salida_pull)}</pre>{aviso_telegram}"
+
+
 LIMITE_CARACTERES_LOG_TELEGRAM = 3500  # margen bajo el limite de 4096 de un mensaje de Telegram
 
 
@@ -241,6 +285,7 @@ AYUDA = (
     "/estado - si el bot esta corriendo o parado\n"
     "/arrancar - arranca el bot\n"
     "/parar - para el bot\n"
+    "/actualizar - descarga el codigo mas reciente (git pull) y reinicia el bot\n"
     "/cartera - posiciones abiertas (cuenta activa del bot)\n"
     "/carterapaper - posiciones abiertas de la cuenta PAPER (aparte de la activa)\n"
     "/hoy - actividad y operaciones cerradas hoy\n"
@@ -266,6 +311,9 @@ def procesar_comando(texto):
     if comando == "parar":
         error = ejecutar_systemctl("stop")
         return error or "🔴 Bot parado."
+
+    if comando == "actualizar":
+        return actualizar_codigo()
 
     if comando == "cartera":
         return cartera.formatear_posiciones_abiertas(html=True)

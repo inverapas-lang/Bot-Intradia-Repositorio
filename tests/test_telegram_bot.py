@@ -166,6 +166,72 @@ finally:
     tb.subprocess.run = run_original
 
 
+# --- 4b. /actualizar (peticion del usuario, sept. 2026: poder desplegar
+#     cambios sin SSH, solo desde Telegram): git pull + reinicio del
+#     servicio si trajo cambios. ---
+def _run_falso_pull_con_cambios(cmd, **kwargs):
+    llamadas_subprocess.append(cmd)
+    if cmd[:2] == ["git", "pull"]:
+        return types.SimpleNamespace(returncode=0, stdout="Updating abc123..def456\n 3 files changed\n", stderr="")
+    if cmd[:2] == ["sudo", "systemctl"]:
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="comando no reconocido")
+
+
+llamadas_subprocess.clear()
+tb.subprocess.run = _run_falso_pull_con_cambios
+try:
+    resultado_actualizar = tb.procesar_comando("/actualizar")
+    check("/actualizar: con cambios nuevos, hace git pull Y reinicia bot-alpaca",
+          "✅" in resultado_actualizar and "actualizado" in resultado_actualizar.lower()
+          and ["sudo", "systemctl", "restart", "bot-alpaca"] in llamadas_subprocess,
+          f"resultado={resultado_actualizar!r}, llamadas={llamadas_subprocess}")
+    check("/actualizar: el mensaje incluye la salida de git pull",
+          "abc123" in resultado_actualizar, f"resultado={resultado_actualizar!r}")
+finally:
+    tb.subprocess.run = run_original
+
+
+def _run_falso_pull_sin_cambios(cmd, **kwargs):
+    llamadas_subprocess.append(cmd)
+    if cmd[:2] == ["git", "pull"]:
+        return types.SimpleNamespace(returncode=0, stdout="Already up to date.\n", stderr="")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="no deberia llamarse")
+
+
+llamadas_subprocess.clear()
+tb.subprocess.run = _run_falso_pull_sin_cambios
+try:
+    resultado_sin_cambios = tb.procesar_comando("/actualizar")
+    check("/actualizar: sin cambios nuevos (Already up to date), NO reinicia el bot",
+          "Ya estaba actualizado" in resultado_sin_cambios
+          and not any(cmd[:2] == ["sudo", "systemctl"] for cmd in llamadas_subprocess),
+          f"resultado={resultado_sin_cambios!r}, llamadas={llamadas_subprocess}")
+finally:
+    tb.subprocess.run = run_original
+
+
+def _run_falso_pull_conflicto(cmd, **kwargs):
+    llamadas_subprocess.append(cmd)
+    if cmd[:2] == ["git", "pull"]:
+        return types.SimpleNamespace(returncode=1, stdout="",
+                                      stderr="error: your local changes would be overwritten by merge")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="no deberia llamarse")
+
+
+llamadas_subprocess.clear()
+tb.subprocess.run = _run_falso_pull_conflicto
+try:
+    resultado_conflicto = tb.procesar_comando("/actualizar")
+    check("/actualizar: si git pull falla (p.ej. cambios locales sin commitear), avisa "
+          "claramente y NO reinicia el bot",
+          "⚠️" in resultado_conflicto and "local changes" in resultado_conflicto
+          and not any(cmd[:2] == ["sudo", "systemctl"] for cmd in llamadas_subprocess),
+          f"resultado={resultado_conflicto!r}, llamadas={llamadas_subprocess}")
+finally:
+    tb.subprocess.run = run_original
+
+
 # --- 5. Comando que lanza una excepcion inesperada no rompe el bucle principal ---
 def _formatear_que_falla(html=False):
     raise RuntimeError("fallo simulado en cartera")
