@@ -964,6 +964,73 @@ def esperar_estado_final_orden(order_id, espera_maxima=ESPERA_MAXIMA_ESTADO_ORDE
     return estado
 
 
+def obtener_cantidad_posicion_real(ticker):
+    """Cantidad real de una posicion consultando directamente la cuenta (0.0
+    si no hay). Version de bot_completo.py/IBKR para Alpaca."""
+    for p in obtener_posiciones():
+        if p.symbol == ticker:
+            return float(p.qty)
+    return 0.0
+
+
+def verificar_orden_no_confirmada(ticker, cantidad_antes, prefijo_log):
+    """BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de WMT se
+    ejecuto de verdad pero no quedo registrada en el historial ni avisada
+    por Telegram): esperar_estado_final_orden() solo espera
+    ESPERA_MAXIMA_ESTADO_ORDEN_SEGUNDOS (10s) antes de rendirse. Una orden
+    LIMITADA fuera de sesion regular (poca liquidez en pre/postmercado)
+    puede tardar mas que eso en rellenarse, y aun asi acabar ejecutandose
+    poco despues -a diferencia de IBKR, bot_alpaca.py nunca comprobaba este
+    caso: si el estado no confirmaba 'filled', la operacion se descartaba
+    sin mas, aunque la posicion hubiera cambiado de verdad-. Se vuelve a
+    consultar la posicion real unos segundos despues y se compara con la
+    cantidad de antes, igual que verificar_posicion_tras_orden_no_confirmada()
+    en bot_completo.py."""
+    time.sleep(2)
+    cantidad_ahora = obtener_cantidad_posicion_real(ticker)
+    if abs(cantidad_ahora - cantidad_antes) > 1e-6:
+        log(f"{prefijo_log} - la posicion SI cambio de verdad ({cantidad_antes:g} -> {cantidad_ahora:g}) "
+            f"pese al estado no confirmado como 'filled' (probable ejecucion tardia de una orden limitada).")
+    else:
+        log(f"{prefijo_log} - la posicion NO ha cambiado ({cantidad_ahora:g}): confirmado que la orden no se ejecuto.")
+    return cantidad_ahora
+
+
+def _registrar_venta_a_posteriori(ticker, cantidad_antes, cantidad_ahora, precio_actual, coste_medio,
+                                   etiqueta_accion, calcular_comision=None):
+    """Mismo tratamiento que _registrar_venta_a_posteriori() en
+    bot_completo.py: cuando una orden de VENTA no confirma 'filled' pero
+    verificar_orden_no_confirmada() detecta que la posicion SI bajo de
+    verdad, registra la venta a posteriori en vez de dejarla fuera del
+    historial/Telegram solo porque el estado de la orden no fue fiable.
+    cantidad_ejecutada se deduce de la diferencia de posicion real (no hay
+    un precio de ejecucion fiable por esta via, asi que precio_actual es la
+    mejor aproximacion disponible). Si calcular_comision se pasa (cripto,
+    que SI cobra comision), se resta del beneficio bruto; si no (acciones,
+    sin comision), el beneficio es directamente el bruto. Si la posicion
+    quedo en ~0, se trata como venta TOTAL (se olvida el seguimiento del
+    trailing stop)."""
+    cantidad_ejecutada = cantidad_antes - cantidad_ahora
+    if cantidad_ejecutada <= 1e-6:
+        return
+    beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
+    if calcular_comision:
+        comision_total = calcular_comision(cantidad_ejecutada, precio_actual)
+        valor_compra = cantidad_ejecutada * coste_medio
+        comision_pct = (comision_total / valor_compra * 100) if valor_compra else 0.0
+        beneficio_pct_real = beneficio_pct_bruto - comision_pct
+    else:
+        beneficio_pct_real = beneficio_pct_bruto
+    registrar_operacion_historial(ticker, "VENTA", cantidad_ejecutada, precio_actual,
+                                   coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
+    notificar_telegram(f"🔴 {etiqueta_accion} <b>{ticker}</b>: {formato_es(cantidad_ejecutada, 6)} a "
+                        f"{formato_es(precio_actual)} USD (total {formato_es(cantidad_ejecutada * precio_actual)} USD, "
+                        f"beneficio {formato_es(beneficio_pct_real, signo=True)}%) "
+                        f"[confirmado a posteriori: el estado de la orden no fue fiable]")
+    if cantidad_ahora <= 1e-6:
+        cerrar_seguimiento_venta(ticker)
+
+
 def cancelar_ordenes_abiertas(ticker):
     """Cancela cualquier orden todavia ABIERTA (no rellenada) de un ticker,
     antes de mandar una orden nueva. Bug real visto en produccion (agosto
@@ -1215,6 +1282,10 @@ def revisar_ventas():
                                         f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
                                         f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
                     cerrar_seguimiento_venta(ticker)
+                else:
+                    cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
+                    _registrar_venta_a_posteriori(ticker, cantidad, cantidad_ahora, precio_actual,
+                                                   coste_medio, "VENTA FORZADA")
                 continue
 
             # Criterio de venta: trailing stop (principal) + 2 velas de 5min
@@ -1275,6 +1346,10 @@ def revisar_ventas():
                                     f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(ticker)
+            else:
+                cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
+                _registrar_venta_a_posteriori(ticker, cantidad, cantidad_ahora, precio_actual,
+                                               coste_medio, etiqueta_accion)
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
 
@@ -1411,6 +1486,12 @@ def revisar_ventas_cripto():
                                     f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(ticker)
+            else:
+                cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
+                _registrar_venta_a_posteriori(
+                    ticker, cantidad, cantidad_ahora, precio_actual, coste_medio, etiqueta_accion,
+                    calcular_comision=lambda qty, precio: (estimar_comision_cripto_alpaca(qty * coste_medio)
+                                                            + estimar_comision_cripto_alpaca(qty * precio)))
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion cripto: {type(e).__name__}: {e}. Se omite.")
 
@@ -1542,10 +1623,15 @@ def revisar_compras():
                                             side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
 
             cancelar_ordenes_abiertas(ticker)
+            cantidad_antes_compra = next((float(p.qty) for p in posiciones if p.symbol == ticker), 0.0)
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
-            if estado == "filled":
+            compra_confirmada = estado == "filled"
+            if not compra_confirmada:
+                cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra, f"COMPRAS: {ticker}")
+                compra_confirmada = cantidad_tras_compra > cantidad_antes_compra + 1e-6
+            if compra_confirmada:
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
                 notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
@@ -1652,10 +1738,16 @@ def revisar_compras_cripto():
                                         side=OrderSide.BUY, time_in_force=TimeInForce.IOC)
 
             cancelar_ordenes_abiertas(ticker)
+            cantidad_antes_compra_cripto = next((float(p.qty) for p in posiciones if p.symbol == ticker), 0.0)
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
-            if estado == "filled":
+            compra_confirmada = estado == "filled"
+            if not compra_confirmada:
+                cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra_cripto,
+                                                                      f"COMPRAS: {ticker}")
+                compra_confirmada = cantidad_tras_compra > cantidad_antes_compra_cripto + 1e-9
+            if compra_confirmada:
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
                 notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "

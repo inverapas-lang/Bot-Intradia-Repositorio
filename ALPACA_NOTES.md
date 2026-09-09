@@ -877,6 +877,31 @@ de notificar por Telegram y de guardar en el historial. Así, tanto la notificac
 `/hoy`/`/ayer`/`/semana` reflejan lo que económicamente pasó de verdad, no la estimación
 previa a la orden. Mismo cambio en `bot_completo.py` (ver NOTES.md).
 
+## BUG CRÍTICO corregido: compras/ventas ejecutadas de verdad pero invisibles (sept. 2026)
+
+Caso real reportado por el usuario: una compra de WMT apareció en `/cartera` (la posición
+estaba ahí, comprada de verdad), pero `/hoy` seguía mostrando "Compras: 0 operaciones" y no
+llegó ningún aviso de Telegram.
+
+**Causa**: a diferencia de `bot_completo.py`/IBKR (que desde hace tiempo tiene
+`verificar_posicion_tras_orden_no_confirmada()` para este caso exacto), `bot_alpaca.py` NUNCA
+comprobaba qué pasaba si `esperar_estado_final_orden()` se rendía (10 s máximo,
+`ESPERA_MAXIMA_ESTADO_ORDEN_SEGUNDOS`) sin ver un estado final. Una orden LIMITADA fuera de
+sesión regular (poca liquidez en pre/postmercado, como en este caso) puede tardar más de 10 s
+en rellenarse y aun así acabar ejecutándose poco después — pero como el código solo actuaba
+`if estado == "filled":`, sin ningún `else`, la operación se descartaba sin más: nunca se
+llamaba a `registrar_operacion_historial()` (la fuente de `/hoy`/`/ayer`/`/semana`) ni a
+`notificar_telegram()`, aunque la posición hubiera cambiado de verdad.
+
+**Arreglo**: nuevas funciones `obtener_cantidad_posicion_real()` y
+`verificar_orden_no_confirmada()` (equivalentes a las de `bot_completo.py`): cuando el estado
+no confirma `filled`, se espera un poco y se vuelve a consultar la posición real; si cambió,
+se trata como confirmada. Para las VENTAS se añadió además `_registrar_venta_a_posteriori()`
+(misma idea que en `bot_completo.py`): calcula la cantidad realmente vendida por diferencia de
+posición y usa `precio_actual` como mejor aproximación disponible (no hay un precio de
+ejecución fiable por esta vía). Aplicado en los 5 puntos de compra/venta (acciones y cripto,
+compra y venta, más la venta forzada).
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

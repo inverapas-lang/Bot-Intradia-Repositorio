@@ -762,6 +762,125 @@ check("beneficio recalculado con precio real: el historial (fuente de /hoy) tamb
       bool(venta_trail) and abs(venta_trail[-1]["beneficio_pct"] - (-1.0)) < 1e-6,
       f"ultimo_registro={venta_trail[-1] if venta_trail else None}")
 
+# --- BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de WMT se
+# ejecuto de verdad -aparecio en /cartera- pero /hoy seguia mostrando "0
+# compras" y no llego ningun aviso de Telegram): a diferencia de
+# bot_completo.py/IBKR, bot_alpaca.py NUNCA comprobaba que pasaba si
+# esperar_estado_final_orden() se rendia (10s maximo) sin ver un estado
+# final -una orden LIMITADA fuera de sesion regular (poca liquidez en
+# pre/postmercado) puede tardar mas que eso en rellenarse, y aun asi acabar
+# ejecutandose poco despues-. Si eso pasaba, la compra se descartaba sin
+# mas, aunque la posicion hubiera cambiado de verdad. ---
+class _TradingClientOrdenNuncaConfirma(_TradingClientFalso):
+    """Como _TradingClientFalso, pero get_order_by_id() nunca llega a un
+    estado FINAL (simula esperar_estado_final_orden() agotando su tiempo de
+    espera), y get_all_positions() SI refleja que la orden se ejecuto de
+    verdad -simula que Alpaca tardo mas en confirmar de lo que el bot
+    esperaba, pero la orden se ejecuto igualmente-."""
+    def __init__(self, *args, posiciones_tras_ejecucion, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._posiciones_tras_ejecucion = posiciones_tras_ejecucion
+        self._orden_colocada = False
+
+    def get_order_by_id(self, order_id):
+        return types.SimpleNamespace(status=types.SimpleNamespace(value="accepted"),
+                                      filled_qty=None, filled_avg_price=None)
+
+    def get_all_positions(self):
+        return self._posiciones_tras_ejecucion if self._orden_colocada else self._posiciones
+
+    def submit_order(self, order_data):
+        self._orden_colocada = True
+        return super().submit_order(order_data)
+
+
+sleep_original_orden_no_confirmada = bot.time.sleep
+bot.time.sleep = lambda s: None  # no perder tiempo real en los reintentos/espera de 2s
+mensajes_wmt = []
+notificar_telegram_original_wmt = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: mensajes_wmt.append(msg)
+bot._cache_largas_por_dia = {}
+activos_originales_wmt = bot.ACTIVOS
+bot.ACTIVOS = ["WMT"]
+posicion_wmt_tras_compra = types.SimpleNamespace(
+    symbol="WMT", qty="0.05", avg_entry_price="95.0", market_value="4.75",
+    unrealized_pl="0.0", unrealized_plpc="0.0",
+)
+cliente_wmt = _TradingClientOrdenNuncaConfirma(portfolio_value=10_000,
+                                                posiciones_tras_ejecucion=[posicion_wmt_tras_compra])
+bot._trading_client = cliente_wmt
+bot._data_client = _fake_data_client_alcista()
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.notificar_telegram = notificar_telegram_original_wmt
+    bot.time.sleep = sleep_original_orden_no_confirmada
+    bot.ACTIVOS = activos_originales_wmt
+
+check("compra confirmada a posteriori (WMT): aunque el estado de la orden nunca confirmo "
+      "'filled', SI se detecta que la posicion cambio y SI avisa por Telegram",
+      len(mensajes_wmt) == 1 and "WMT" in mensajes_wmt[0], f"mensajes={mensajes_wmt}")
+operaciones_wmt = bot.cargar_historial_operaciones()
+compras_wmt = [o for o in operaciones_wmt if o["ticker"] == "WMT" and o["lado"] == "COMPRA"]
+check("compra confirmada a posteriori (WMT): SI queda registrada en el historial (fuente de /hoy)",
+      bool(compras_wmt), f"compras_wmt={compras_wmt}")
+
+# Mismo caso, pero para una VENTA: si esperar_estado_final_orden() se rinde
+# sin un estado final, pero la posicion SI bajo de verdad, debe registrarse
+# y avisar por Telegram igualmente (antes no pasaba ni para compras ni
+# para ventas).
+class _TradingClientVentaNuncaConfirma(_TradingClientFalso):
+    def __init__(self, *args, posiciones_tras_venta, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._posiciones_tras_venta = posiciones_tras_venta
+        self._orden_colocada = False
+
+    def get_order_by_id(self, order_id):
+        return types.SimpleNamespace(status=types.SimpleNamespace(value="accepted"),
+                                      filled_qty=None, filled_avg_price=None)
+
+    def get_all_positions(self):
+        return self._posiciones_tras_venta if self._orden_colocada else self._posiciones
+
+    def submit_order(self, order_data):
+        self._orden_colocada = True
+        return super().submit_order(order_data)
+
+
+bot.time.sleep = lambda s: None
+mensajes_venta_wmt = []
+bot.notificar_telegram = lambda msg: mensajes_venta_wmt.append(msg)
+bot._maximo_beneficio_neto_por_posicion = {"TRAIL": 5.0}
+bot._scale_out_realizado = {"TRAIL"}
+posicion_trail_vendida_parcial = types.SimpleNamespace(
+    symbol="TRAIL", qty="5", avg_entry_price="100.0", market_value="0", unrealized_pl="0", unrealized_plpc="0")
+cliente_venta_no_confirma = _TradingClientVentaNuncaConfirma(
+    posiciones=[_posicion_trailing(100.0)], posiciones_tras_venta=[posicion_trail_vendida_parcial])
+bot._trading_client = cliente_venta_no_confirma
+bot._data_client = _DataClientPrecioFijo(101.0)  # +1%: retroceso de 4 pts desde el maximo (5%, margen 1.5) ->
+                                                    # trailing dispara, y sigue por encima del suelo anti-perdidas (0.5%)
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.notificar_telegram = notificar_telegram_original_wmt
+    bot.time.sleep = sleep_original_orden_no_confirmada
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("venta confirmada a posteriori (TRAIL): aunque el estado de la orden nunca confirmo "
+      "'filled', SI se detecta que la posicion bajo y SI avisa por Telegram",
+      len(mensajes_venta_wmt) == 1 and "TRAIL" in mensajes_venta_wmt[0], f"mensajes={mensajes_venta_wmt}")
+operaciones_venta_wmt = bot.cargar_historial_operaciones()
+ventas_trail_posteriori = [o for o in operaciones_venta_wmt if o["ticker"] == "TRAIL" and o["lado"] == "VENTA"]
+check("venta confirmada a posteriori (TRAIL): SI queda registrada en el historial, con la "
+      "cantidad realmente vendida (10 -> 5, se vendieron 5)",
+      bool(ventas_trail_posteriori) and abs(ventas_trail_posteriori[-1]["cantidad"] - 5.0) < 1e-6,
+      f"ultimo_registro={ventas_trail_posteriori[-1] if ventas_trail_posteriori else None}")
+
 
 # ---------------------------------------------------------------------------
 # 8c. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.
