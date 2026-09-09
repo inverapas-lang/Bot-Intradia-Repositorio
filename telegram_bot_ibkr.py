@@ -20,13 +20,13 @@ Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
                    cada vuelta de su bucle -maximo cada 30s- y run.bot.bat
                    respeta para no reiniciarlo). Puede tardar hasta medio
                    minuto en hacer efecto; comprueba con /estado.
-    /actualizar  - git pull + reiniciar, para desplegar sin necesitar SSH.
-                   Es BLOQUEANTE: pide la parada y espera (hasta 60s,
-                   consultando el PID) a que el proceso viejo muera de
-                   verdad antes de arrancar uno nuevo -para no arriesgarse
-                   a tener DOS instancias corriendo a la vez con dinero
-                   real-. Si no llega a parar a tiempo, NO arranca nada
-                   nuevo y avisa para que se compruebe/arranque a mano.
+    /actualizar  - git pull, para desplegar sin necesitar SSH. En DOS PASOS:
+                   si trae cambios y el bot esta corriendo, pide la parada
+                   (igual que /parar) y NO arranca nada por su cuenta -para
+                   no arriesgarse a tener DOS instancias corriendo a la vez
+                   con dinero real-; hay que confirmar con /estado que ya
+                   paro y mandar /arrancar a mano. Si el bot ya estaba
+                   parado, arranca directamente con el codigo nuevo.
     /cartera     - posiciones abiertas en todos los mercados (igual que
                    cartera_ibkr.py), consultando IB Gateway con un clientId
                    propio (no interfiere con el bot si esta corriendo)
@@ -184,25 +184,21 @@ def parar_bot():
         return f"⚠️ No se pudo solicitar la parada: {type(e).__name__}: {e}"
 
 
-ESPERA_MAXIMA_PARADA_ACTUALIZAR_SEGUNDOS = 60
-INTERVALO_CHEQUEO_PARADA_ACTUALIZAR_SEGUNDOS = 2
-
-
 def actualizar_bot():
     """/actualizar (peticion del usuario, sept. 2026: poder desplegar
-    cambios sin necesitar un cliente SSH, solo desde Telegram - version
-    BLOQUEANTE con espera activa, a diferencia de la de telegram_bot.py/
-    Alpaca). Aqui parar NO es atomico como 'systemctl restart': es
-    cooperativo y asincrono (run.bot.bat en Windows, sin systemd) - el bot
-    tarda hasta 30-60s en detenerse de verdad tras la señal. Si se lanzara
-    run.bot.bat de nuevo ANTES de que el proceso viejo muera del todo,
-    habria DOS instancias del bot corriendo a la vez con dinero real -el
-    riesgo mas serio a evitar aqui-. Por eso esta funcion, tras pedir la
-    parada, se queda esperando (consultando el PID cada
-    INTERVALO_CHEQUEO_PARADA_ACTUALIZAR_SEGUNDOS) hasta que el proceso
-    viejo muera de verdad -o hasta ESPERA_MAXIMA_PARADA_ACTUALIZAR_SEGUNDOS,
-    en cuyo caso NO arranca uno nuevo, para no arriesgarse- antes de
-    arrancar el bot con el codigo nuevo."""
+    cambios sin necesitar un cliente SSH, solo desde Telegram) - version en
+    DOS PASOS (opcion elegida explicitamente por el usuario en vez de la
+    bloqueante con espera activa). Aqui parar NO es atomico como 'systemctl
+    restart': es cooperativo y asincrono (run.bot.bat en Windows, sin
+    systemd) - el bot tarda hasta 30-60s en detenerse de verdad tras la
+    señal. Lanzar run.bot.bat de nuevo ANTES de que el proceso viejo muera
+    del todo dejaria DOS instancias corriendo a la vez con dinero real -el
+    riesgo mas serio a evitar-, asi que esta funcion NUNCA arranca nada
+    automaticamente tras pedir la parada: hace git pull y, si el bot estaba
+    corriendo, pide la parada (igual que /parar) y devuelve el mensaje
+    diciendo que hay que confirmar con /estado y mandar /arrancar a mano
+    cuando se vea parado. Si el bot ya estaba parado de antemano, arranca
+    directamente (no hay nada que esperar)."""
     try:
         resultado_pull = subprocess.run(
             ["git", "pull"], cwd=RUTA_BASE, capture_output=True, text=True, timeout=30
@@ -220,31 +216,15 @@ def actualizar_bot():
     pid = _pid_registrado()
     bot_estaba_corriendo = pid is not None and _proceso_vivo(pid)
 
-    if bot_estaba_corriendo:
-        try:
-            with open(os.path.join(RUTA_BASE, bot.ARCHIVO_DETENER), "w", encoding="utf-8") as f:
-                f.write(str(time.time()))
-        except OSError as e:
-            return (f"✅ Código actualizado:\n<pre>{escapar_html(salida_pull)}</pre>\n\n"
-                    f"⚠️ No se pudo solicitar la parada para reiniciar: {type(e).__name__}: {e}")
+    if not bot_estaba_corriendo:
+        resultado_arranque = arrancar_bot()
+        return (f"✅ Código actualizado (el bot ya estaba parado):\n<pre>{escapar_html(salida_pull)}</pre>\n\n"
+                f"{resultado_arranque}")
 
-        transcurrido = 0.0
-        parado_a_tiempo = False
-        while transcurrido < ESPERA_MAXIMA_PARADA_ACTUALIZAR_SEGUNDOS:
-            time.sleep(INTERVALO_CHEQUEO_PARADA_ACTUALIZAR_SEGUNDOS)
-            transcurrido += INTERVALO_CHEQUEO_PARADA_ACTUALIZAR_SEGUNDOS
-            if not _proceso_vivo(pid):
-                parado_a_tiempo = True
-                break
-        if not parado_a_tiempo:
-            return (f"✅ Código actualizado:\n<pre>{escapar_html(salida_pull)}</pre>\n\n"
-                    f"⚠️ El bot no terminó de parar en {ESPERA_MAXIMA_PARADA_ACTUALIZAR_SEGUNDOS}s; "
-                    f"NO se ha arrancado uno nuevo para no arriesgar dos instancias corriendo a la "
-                    f"vez. Comprueba con /estado y, cuando confirmes que está parado, manda "
-                    f"/arrancar a mano.")
-
-    resultado_arranque = arrancar_bot()
-    return f"✅ Código actualizado y bot reiniciado:\n<pre>{escapar_html(salida_pull)}</pre>\n\n{resultado_arranque}"
+    resultado_parada = parar_bot()
+    return (f"✅ Código actualizado:\n<pre>{escapar_html(salida_pull)}</pre>\n\n{resultado_parada}\n\n"
+            f"👉 Cuando /estado confirme que está parado, manda /arrancar para que arranque ya con "
+            f"el código nuevo.")
 
 
 def _conectar_cartera():
@@ -352,8 +332,8 @@ AYUDA = (
     "/estado - si el bot esta corriendo, parado o congelado\n"
     "/arrancar - arranca el bot (run.bot.bat)\n"
     "/parar - pide una parada limpia del bot\n"
-    "/actualizar - descarga el codigo mas reciente (git pull), para el bot, "
-    "espera a que termine de verdad y lo vuelve a arrancar (puede tardar hasta 1 min)\n"
+    "/actualizar - descarga el codigo mas reciente (git pull) y pide la parada "
+    "del bot si hace falta; confirma con /estado y manda /arrancar cuando pare\n"
     "/cartera - posiciones abiertas en todos los mercados\n"
     "/hoy - actividad y operaciones cerradas hoy\n"
     "/ayer - operaciones cerradas ayer\n"

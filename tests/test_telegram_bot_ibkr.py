@@ -157,38 +157,23 @@ run_original_ibkr = tib.subprocess.run
 sleep_original_ibkr = tib.time.sleep
 _escribir("run.bot.bat", "echo dummy")
 
-# Caso 1: bot corriendo, el proceso viejo muere en el primer chequeo -> SI
-# reinicia (para + espera + arranca).
+# Caso 1: bot corriendo -> pide la parada (igual que /parar) pero NO
+# arranca nada por su cuenta (version en DOS PASOS, elegida por el usuario
+# en vez de la bloqueante: evita el riesgo de dos instancias a la vez sin
+# necesidad de esperar activamente).
 tib.subprocess.run = _run_falso_git_ok
 _vivo_simulado["valor"] = True
 _escribir(tib.bot.ARCHIVO_PID, str(os.getpid()))
 llamadas_popen.clear()
-tib.time.sleep = lambda s: _vivo_simulado.__setitem__("valor", False)
-try:
-    resultado_actualizar_ok = tib.actualizar_bot()
-finally:
-    tib.time.sleep = sleep_original_ibkr
-check("/actualizar: bot corriendo -> pide la parada, espera a que muera y arranca de nuevo",
-      resultado_actualizar_ok.startswith("✅") and "reiniciado" in resultado_actualizar_ok,
-      f"resultado={resultado_actualizar_ok!r}")
-check("/actualizar: SI llamo a Popen para arrancar el bot nuevo", len(llamadas_popen) == 1,
-      f"llamadas={llamadas_popen}")
+resultado_actualizar_ok = tib.actualizar_bot()
+check("/actualizar: bot corriendo -> pide la parada pero NO arranca nada por su cuenta",
+      resultado_actualizar_ok.startswith("✅") and "manda /arrancar" in resultado_actualizar_ok
+      and len(llamadas_popen) == 0, f"resultado={resultado_actualizar_ok!r}")
+check("/actualizar: SI crea el flag de parada (detener_bot.flag), igual que /parar",
+      os.path.exists(os.path.join(tib.RUTA_BASE, tib.bot.ARCHIVO_DETENER)))
 check("/actualizar: incluye la salida de git pull en la respuesta", "abc123" in resultado_actualizar_ok,
       f"resultado={resultado_actualizar_ok!r}")
-
-# Caso 2: bot corriendo, el proceso viejo NUNCA muere -> NO arranca uno
-# nuevo (evita el riesgo de dos instancias a la vez), avisa claramente.
-_vivo_simulado["valor"] = True
-_escribir(tib.bot.ARCHIVO_PID, str(os.getpid()))
-llamadas_popen.clear()
-tib.time.sleep = lambda s: None  # nunca lo mata: sigue "vivo" todo el rato
-try:
-    resultado_actualizar_timeout = tib.actualizar_bot()
-finally:
-    tib.time.sleep = sleep_original_ibkr
-check("/actualizar: si el bot no llega a parar a tiempo, NO arranca uno nuevo",
-      "NO se ha arrancado" in resultado_actualizar_timeout and len(llamadas_popen) == 0,
-      f"resultado={resultado_actualizar_timeout!r}, llamadas={llamadas_popen}")
+_borrar_si_existe(tib.bot.ARCHIVO_DETENER)
 
 # Caso 3: sin cambios nuevos (Already up to date) -> no toca nada del bot.
 _borrar_si_existe(tib.bot.ARCHIVO_PID)
