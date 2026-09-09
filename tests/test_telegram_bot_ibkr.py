@@ -131,6 +131,98 @@ _borrar_si_existe(tib.bot.ARCHIVO_PID)
 _borrar_si_existe(tib.bot.ARCHIVO_DETENER)
 
 
+# --- 3b. /actualizar (peticion del usuario, sept. 2026): git pull + parada
+#     BLOQUEANTE (espera activa a que el proceso viejo muera de verdad,
+#     para no arriesgar dos instancias corriendo a la vez) + arranque. ---
+def _run_falso_git_ok(cmd, **kwargs):
+    if cmd[:2] == ["git", "pull"]:
+        return types.SimpleNamespace(returncode=0, stdout="Updating abc123..def456\n 2 files changed\n", stderr="")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="comando no reconocido")
+
+
+def _run_falso_git_sin_cambios(cmd, **kwargs):
+    if cmd[:2] == ["git", "pull"]:
+        return types.SimpleNamespace(returncode=0, stdout="Already up to date.\n", stderr="")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="no deberia llamarse")
+
+
+def _run_falso_git_falla(cmd, **kwargs):
+    if cmd[:2] == ["git", "pull"]:
+        return types.SimpleNamespace(returncode=1, stdout="",
+                                      stderr="error: your local changes would be overwritten by merge")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="no deberia llamarse")
+
+
+run_original_ibkr = tib.subprocess.run
+sleep_original_ibkr = tib.time.sleep
+_escribir("run.bot.bat", "echo dummy")
+
+# Caso 1: bot corriendo, el proceso viejo muere en el primer chequeo -> SI
+# reinicia (para + espera + arranca).
+tib.subprocess.run = _run_falso_git_ok
+_vivo_simulado["valor"] = True
+_escribir(tib.bot.ARCHIVO_PID, str(os.getpid()))
+llamadas_popen.clear()
+tib.time.sleep = lambda s: _vivo_simulado.__setitem__("valor", False)
+try:
+    resultado_actualizar_ok = tib.actualizar_bot()
+finally:
+    tib.time.sleep = sleep_original_ibkr
+check("/actualizar: bot corriendo -> pide la parada, espera a que muera y arranca de nuevo",
+      resultado_actualizar_ok.startswith("✅") and "reiniciado" in resultado_actualizar_ok,
+      f"resultado={resultado_actualizar_ok!r}")
+check("/actualizar: SI llamo a Popen para arrancar el bot nuevo", len(llamadas_popen) == 1,
+      f"llamadas={llamadas_popen}")
+check("/actualizar: incluye la salida de git pull en la respuesta", "abc123" in resultado_actualizar_ok,
+      f"resultado={resultado_actualizar_ok!r}")
+
+# Caso 2: bot corriendo, el proceso viejo NUNCA muere -> NO arranca uno
+# nuevo (evita el riesgo de dos instancias a la vez), avisa claramente.
+_vivo_simulado["valor"] = True
+_escribir(tib.bot.ARCHIVO_PID, str(os.getpid()))
+llamadas_popen.clear()
+tib.time.sleep = lambda s: None  # nunca lo mata: sigue "vivo" todo el rato
+try:
+    resultado_actualizar_timeout = tib.actualizar_bot()
+finally:
+    tib.time.sleep = sleep_original_ibkr
+check("/actualizar: si el bot no llega a parar a tiempo, NO arranca uno nuevo",
+      "NO se ha arrancado" in resultado_actualizar_timeout and len(llamadas_popen) == 0,
+      f"resultado={resultado_actualizar_timeout!r}, llamadas={llamadas_popen}")
+
+# Caso 3: sin cambios nuevos (Already up to date) -> no toca nada del bot.
+_borrar_si_existe(tib.bot.ARCHIVO_PID)
+tib.subprocess.run = _run_falso_git_sin_cambios
+llamadas_popen.clear()
+resultado_sin_cambios_ibkr = tib.actualizar_bot()
+check("/actualizar: sin cambios nuevos, NO intenta parar ni arrancar nada",
+      "Ya estaba actualizado" in resultado_sin_cambios_ibkr and len(llamadas_popen) == 0,
+      f"resultado={resultado_sin_cambios_ibkr!r}")
+
+# Caso 4: git pull falla -> avisa, no toca el bot.
+tib.subprocess.run = _run_falso_git_falla
+resultado_falla_ibkr = tib.actualizar_bot()
+check("/actualizar: si git pull falla, avisa claramente y no toca el bot",
+      "⚠️" in resultado_falla_ibkr and "local changes" in resultado_falla_ibkr
+      and len(llamadas_popen) == 0, f"resultado={resultado_falla_ibkr!r}")
+
+# Caso 5: hay cambios pero el bot YA estaba parado -> arranca directamente,
+# sin pasar por la espera de parada.
+tib.subprocess.run = _run_falso_git_ok
+_borrar_si_existe(tib.bot.ARCHIVO_PID)
+_vivo_simulado["valor"] = False
+llamadas_popen.clear()
+resultado_bot_parado_ibkr = tib.actualizar_bot()
+check("/actualizar: con el bot ya parado, arranca directamente sin esperar",
+      resultado_bot_parado_ibkr.startswith("✅") and len(llamadas_popen) == 1,
+      f"resultado={resultado_bot_parado_ibkr!r}")
+
+tib.subprocess.run = run_original_ibkr
+_borrar_si_existe(tib.bot.ARCHIVO_PID)
+_borrar_si_existe(tib.bot.ARCHIVO_DETENER)
+_vivo_simulado["valor"] = False
+
+
 # --- 4. /cartera, /hoy, /ayer, /semana: dobles de prueba de cartera_ibkr ---
 tib.cartera.formatear_posiciones_abiertas = lambda ib, html=False: "POSICIONES_FALSAS"
 tib.cartera.formatear_operaciones_cerradas = lambda d, h, html=False: f"CERRADAS de {d} a {h}"

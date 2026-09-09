@@ -877,6 +877,21 @@ ninguno de los dos, así que `telegram_bot_ibkr.py` usa mecanismos propios:
   3. Al arrancar de nuevo (`main()`), si por lo que sea sigue existiendo el flag (p.ej. se
      arrancó `python bot_completo.py` a mano sin pasar por `/arrancar`, que ya lo borra), se
      ignora con un aviso en el log — un arranque nuevo nunca debe autopararse de inmediato.
+- **`/actualizar`** (añadido sept. 2026, petición del usuario: desplegar sin necesitar un
+  cliente SSH, igual que ya tenía `/actualizar` en `telegram_bot.py`/Alpaca — pero aquí la
+  implementación es distinta a propósito). En Alpaca, `systemctl restart` para y arranca en
+  el mismo comando, prácticamente sin ventana de riesgo. Aquí parar es **cooperativo y
+  asíncrono** (el mismo mecanismo de `/parar` de arriba: puede tardar hasta 30-60s en hacer
+  efecto de verdad). Lanzar `run.bot.bat` de nuevo ANTES de que el proceso viejo muera del
+  todo dejaría **dos instancias del bot corriendo a la vez con dinero real** — el riesgo más
+  serio a evitar. Por eso `/actualizar` aquí es **BLOQUEANTE, con espera activa**:
+  1. `git pull` en el repo (si falla, o si no había cambios nuevos, avisa y no toca el bot).
+  2. Si el bot estaba corriendo, pide la parada (mismo mecanismo que `/parar`) y se queda
+     comprobando el PID cada `INTERVALO_CHEQUEO_PARADA_ACTUALIZAR_SEGUNDOS` (2s) hasta que el
+     proceso muere de verdad, o hasta `ESPERA_MAXIMA_PARADA_ACTUALIZAR_SEGUNDOS` (60s).
+  3. Si no llegó a parar a tiempo, **NO arranca nada nuevo** — avisa para comprobar con
+     `/estado` y arrancar a mano cuando se confirme que sí paró. Si sí paró (o si ya estaba
+     parado desde el principio), arranca el bot con el código nuevo (`arrancar_bot()`).
 - **`/log`**: no hay `journalctl`. `bot_completo.py` ahora también escribe cada línea de
   `log()` a un archivo (`bot_completo.log`, en la misma carpeta), además de la consola de
   siempre — con una rotación simple (se trunca a la mitad si supera 5 MB, no crece sin límite
