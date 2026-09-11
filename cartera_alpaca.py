@@ -133,7 +133,7 @@ def formatear_posiciones_abiertas(html=False, client=None, modo_etiqueta=None):
     return "\n".join(lineas)
 
 
-def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora):
+def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora, modo):
     """Recorre TODAS las operaciones (ya ordenadas cronologicamente, de UN
     solo ticker, sin restringir por rango de fechas -una posicion puede
     haberse abierto antes del rango que se esta consultando-) y devuelve la
@@ -142,12 +142,23 @@ def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora):
     cae a ~0 (posicion totalmente cerrada) se olvida la apertura anterior -
     la siguiente COMPRA cuenta como una posicion nueva. None si no hay
     ninguna compra registrada antes de 'hasta_fecha_hora' (dato incompleto,
-    p.ej. si el historial no llega tan atras)."""
+    p.ej. si el historial no llega tan atras).
+
+    BUG REAL DE PRODUCCION (sept. 2026, caso real: CVX aparecia "abierta
+    desde" hace mas de una semana cuando en realidad se habia comprado esa
+    misma mañana): solo se cuentan operaciones del MISMO modo (REAL/PAPER)
+    que la venta que se esta mirando -son carteras independientes-. Sin
+    este filtro, un historial que mezcla una epoca PAPER antigua con la
+    REAL actual para el mismo ticker arrastraba la apertura de una posicion
+    PAPER de hace dias que no tenia nada que ver con la posicion REAL de
+    hoy."""
     cantidad_actual = 0.0
     fecha_apertura = None
     for o in operaciones_ticker_ordenadas:
         if o["fecha_hora"] > hasta_fecha_hora:
             break
+        if _modo_operacion(o) != modo:
+            continue
         if o["lado"] == "COMPRA":
             if cantidad_actual <= 1e-9:
                 fecha_apertura = o["fecha_hora"]
@@ -155,6 +166,16 @@ def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora):
         else:
             cantidad_actual = max(0.0, cantidad_actual - o["cantidad"])
     return fecha_apertura
+
+
+_MESES_ES = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
+
+
+def _formatear_fecha_corta(fecha_hora_iso):
+    """'2026-09-03T15:09:12' -> '03 SEP' (peticion del usuario, sept. 2026:
+    formato mas legible que la fecha ISO para la linea de 'abierta desde')."""
+    fecha = datetime.fromisoformat(fecha_hora_iso)
+    return f"{fecha.day:02d} {_MESES_ES[fecha.month - 1]}"
 
 
 def _formatear_duracion(delta):
@@ -214,9 +235,10 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
             ganancia_usd = ganancia_eur = None
         ganancia_total_usd += ganancia_usd or 0.0
         importe_total_vendido_usd += cantidad * precio
-        fecha_apertura = _fecha_apertura_posicion(operaciones_por_ticker.get(o["ticker"], []), o["fecha_hora"])
+        modo_op = _modo_operacion(o)
+        fecha_apertura = _fecha_apertura_posicion(operaciones_por_ticker.get(o["ticker"], []), o["fecha_hora"], modo_op)
         filas.append((o["fecha_hora"], o["ticker"], cantidad, precio, ganancia_usd, ganancia_eur,
-                      beneficio_pct, _modo_operacion(o), fecha_apertura))
+                      beneficio_pct, modo_op, fecha_apertura))
 
     beneficio_total_pct = (ganancia_total_usd / coste_total_usd * 100) if coste_total_usd else None
 
@@ -224,9 +246,11 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         # Tabla (peticion del usuario, sept. 2026): Ticker + Cant. (maximo 4
         # decimales, redondeada para que la tabla quede alineada pese a que
         # el historial guarda muchos mas decimales de precision) + Precio de
-        # venta + % + USD, con el emoji de modo pegado al final de la fila.
-        # Debajo de cada fila, si se conoce, cuanto llevaba abierta la
-        # posicion (desde la ultima compra que la abrio hasta esta venta).
+        # venta + % + USD. Debajo de cada fila, en la MISMA linea que el
+        # emoji de modo (no en su propia linea aparte -en el movil el emoji
+        # solo se veia envuelto de forma rara-), cuanto llevaba abierta la
+        # posicion (desde la ultima compra que la abrio hasta esta venta), y
+        # una linea en blanco entre una operacion y la siguiente.
         lineas_tabla = [f"  {'Ticker':<7}{'Cant.':>7}{'Precio':>8}{'%':>8}{'USD':>8}"]
         for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo, fecha_apertura in filas:
             emoji = _emoji_pl(ganancia_usd) if ganancia_usd is not None else "⚪"
@@ -235,11 +259,14 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
             pct_str = f"{bot.formato_es(beneficio_pct, signo=True)}%" if beneficio_pct is not None else "N/D"
             ganancia_str = bot.formato_es(ganancia_usd, signo=True) if ganancia_usd is not None else "N/D"
             modo_emoji = "💰" if modo == "REAL" else "🧪"
-            lineas_tabla.append(f"{emoji} {ticker:<6}{cantidad_str:>7}{precio_str:>8}{pct_str:>8}{ganancia_str:>8} {modo_emoji}")
+            lineas_tabla.append(f"{emoji} {ticker:<6}{cantidad_str:>7}{precio_str:>8}{pct_str:>8}{ganancia_str:>8}")
+            apertura_str = ""
             if fecha_apertura is not None:
                 duracion = _formatear_duracion(datetime.fromisoformat(fecha_hora) - datetime.fromisoformat(fecha_apertura))
-                lineas_tabla.append(f"    abierta desde {fecha_apertura[5:16].replace('T', ' ')} ({duracion})")
-        tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
+                apertura_str = f" abierta desde {_formatear_fecha_corta(fecha_apertura)} ({duracion})"
+            lineas_tabla.append(f"  {modo_emoji}{apertura_str}")
+            lineas_tabla.append("")
+        tabla = "<pre>" + "\n".join(lineas_tabla).rstrip() + "</pre>"
         pct_total_str = f" ({bot.formato_es(beneficio_total_pct, signo=True)}% sobre lo invertido, {bot.formato_es(coste_total_usd)} USD)" \
             if beneficio_total_pct is not None else ""
         resumen = (f"Importe total vendido: {bot.formato_es(importe_total_vendido_usd)} USD\n"

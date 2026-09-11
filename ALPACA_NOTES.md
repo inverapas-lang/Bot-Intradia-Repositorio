@@ -1051,6 +1051,33 @@ cuánto llevaba abierta la posición.
   correctamente acciones sin comisión que descontar con cripto ya neteada, sin necesitar ningún
   cambio adicional.
 
+## BUG CRÍTICO corregido: "abierta desde" mezclaba posiciones PAPER y REAL (sept. 2026)
+
+Caso real reportado por el usuario: la tabla de `/ayer` mostraba **CVX "abierta desde hace 9
+días"**, pero según el propio historial de Alpaca, ese CVX se había comprado esa misma mañana
+(la única compra de CVX ese día).
+
+**Causa**: `_fecha_apertura_posicion()` recorría el historial completo de ese ticker sin
+distinguir REAL de PAPER. Como el historial se acumula entre cambios de modo del bot (ver la
+sección de distinción REAL/PAPER más abajo), una compra/venta **PAPER** de CVX de hace más de
+una semana (de cuando el bot corría en simulación) se mezclaba con la posición **REAL** actual
+del mismo ticker — el algoritmo de "cantidad acumulada, se resetea a 0 al cerrar del todo" nunca
+veía la posición PAPER cerrarse porque el filtro no la aislaba en primer lugar de la REAL, así
+que arrastraba la fecha de apertura equivocada.
+
+**Arreglo**: `_fecha_apertura_posicion()` ahora recibe también el `modo` (REAL/PAPER) de la
+venta que se está mirando, y **solo cuenta operaciones del mismo modo** — son carteras
+independientes que nunca deberían mezclarse en este cálculo.
+
+De paso, otros tres ajustes pedidos sobre la misma tabla:
+- La fecha de apertura se formatea como `"11 SEP"` (día + mes abreviado en español), no
+  `"09-11"`.
+- La línea "abierta desde ..." va pegada al emoji de modo (💰/🧪) en la misma línea, en vez de en
+  una línea propia aparte — en el móvil el emoji solo se veía "envuelto" de forma rara al final
+  de la fila anterior.
+- Hay una línea en blanco entre una operación cerrada y la siguiente, para que la tabla sea más
+  fácil de leer con varias operaciones seguidas.
+
 ## Veto del scale-out por MACD alcista (sept. 2026, a raíz del análisis de operaciones)
 
 Al revisar el historial real (ver la sección de "Herramienta de diagnóstico" más abajo) se

@@ -252,6 +252,38 @@ check("formatear_operaciones_cerradas (html): sin COMPRA previa en el historial,
       "ZZZ" in cerradas_sin_apertura and "abierta desde" not in cerradas_sin_apertura,
       f"resultado={cerradas_sin_apertura!r}")
 
+check("formatear_operaciones_cerradas (html): la fecha de apertura va en formato 'DD MES' "
+      "(p.ej. '11 SEP'), no 'MM-DD'",
+      "11 SEP" in cerradas_html_apertura, f"resultado={cerradas_html_apertura!r}")
+check("formatear_operaciones_cerradas (html): hay una linea en blanco entre una operacion y la siguiente",
+      "\n\n" in cerradas_html_apertura, f"resultado={cerradas_html_apertura!r}")
+
+# --- BUG REAL DE PRODUCCION (sept. 2026, caso real: CVX aparecia "abierta
+# desde" hace mas de una semana en Telegram, pero segun el propio historial
+# de Alpaca se habia comprado esa misma mañana): _fecha_apertura_posicion()
+# no distinguia PAPER de REAL, asi que una compra/venta PAPER antigua del
+# mismo ticker contaminaba el calculo de la posicion REAL actual. ---
+compra_cvx_paper = hoy_dt - timedelta(days=9)
+venta_cvx_paper = compra_cvx_paper + timedelta(minutes=30)
+compra_cvx_real = hoy_dt - timedelta(hours=5, minutes=29)
+operaciones_paper_contamina = [
+    {"fecha_hora": compra_cvx_paper.isoformat(timespec="seconds"), "ticker": "CVX", "lado": "COMPRA",
+     "cantidad": 0.05, "precio": 200.0, "modo": "PAPER"},
+    {"fecha_hora": venta_cvx_paper.isoformat(timespec="seconds"), "ticker": "CVX", "lado": "VENTA",
+     "cantidad": 0.05, "precio": 201.0, "coste_medio": 200.0, "beneficio_pct": 0.5, "modo": "PAPER"},
+    {"fecha_hora": compra_cvx_real.isoformat(timespec="seconds"), "ticker": "CVX", "lado": "COMPRA",
+     "cantidad": 0.1505, "precio": 212.16, "modo": "REAL"},
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "CVX", "lado": "VENTA",
+     "cantidad": 0.1505, "precio": 213.86, "coste_medio": 212.16, "beneficio_pct": 0.82, "modo": "REAL"},
+]
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump(operaciones_paper_contamina, f)
+cerradas_html_cvx = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html): una compra/venta PAPER antigua del mismo ticker "
+      "NO contamina la apertura de la posicion REAL actual (CVX: abierta hace 5h29min, no 9 dias)",
+      "5h 29min" in cerradas_html_cvx and "9d" not in cerradas_html_cvx,
+      f"resultado={cerradas_html_cvx!r}")
+
 
 if fallos:
     print(f"\n{len(fallos)} test(s) FALLARON: {fallos}")
