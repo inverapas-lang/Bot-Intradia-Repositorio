@@ -957,25 +957,32 @@ La tabla "OPERACIONES CERRADAS" que muestran `/hoy`, `/ayer` y `/semana` (vía
 `Fecha | Ticker | Cant. | Gan. USD | Modo`, y en pantallas de móvil no cabía en el ancho: la
 columna "Modo" se desbordaba a la siguiente línea, quedando ilegible.
 
-**Arreglo**: tabla simplificada a `Hora | Ticker | % | USD`:
+**Primer ajuste**: tabla simplificada a `Hora | Ticker | % | USD` (se quitó "Cant.", se añadió
+"%").
 
-- "Fecha" (`MM-DD HH:MM`) se reduce a solo la hora (`HH:MM`) — dentro de `/hoy`/`/ayer` todas
-  las filas son del mismo día, así que la fecha completa era redundante.
-- Se elimina la columna "Cant." (cantidad de acciones/cripto), poco relevante para ver de un
-  vistazo si una operación fue rentable o no.
-- Se añade una columna "%" con el `beneficio_pct` de cada operación (formato español, con
-  signo), que es justo lo que pidió el usuario poder ver.
-- La columna "Modo" desaparece como columna propia; el emoji 💰 (REAL) / 🧪 (PAPER) se queda
-  pegado al final de cada fila en vez de tener su propio encabezado.
+**Segundo ajuste** (mismo día, el usuario pidió ver también la cantidad vendida y el importe
+total en $): columnas finales `Ticker | Cant. | % | USD`:
+
+- Se quita la columna "Hora" (la fecha completa ya no aparecía desde el primer ajuste, y la
+  hora exacta de cada venta no aportaba tanto como la cantidad).
+- Vuelve la columna "Cant." (cantidad vendida de cada operación), que el usuario pidió
+  recuperar.
+- Se mantiene la columna "%" con el `beneficio_pct` de cada operación (formato español, con
+  signo).
+- La columna "Modo" sigue sin encabezado propio: el emoji 💰 (REAL) / 🧪 (PAPER) va pegado al
+  final de cada fila.
+- Se añade una línea de resumen "Importe total vendido: X USD" (suma de `cantidad × precio` de
+  todas las ventas del rango), además del ya existente "TOTAL ganancia/pérdida realizada".
 
 Ejemplo de salida:
 
 ```
 📉 OPERACIONES CERRADAS (2026-09-11 a 2026-09-11)
-  Hora  Ticker        %     USD
-🟢 09:09 WMT      +3,42%   +0,16 🧪
-🔴 09:09 SMCI     -0,77%   -0,02 🧪
-TOTAL ganancia/perdida realizada: +0,14 USD (+0,12 EUR)
+  Ticker   Cant.       %     USD
+🟢 WMT       1.5  +3,42%   +4,80 🧪
+🔴 SMCI   0.0658  -0,77%   -0,02 🧪
+Importe total vendido: 145,35 USD
+TOTAL ganancia/perdida realizada: +4,78 USD (+4,19 EUR)
 💰 = REAL, 🧪 = PAPER (simulado) (2 PAPER)
 ```
 

@@ -170,16 +170,25 @@ check("formatear_operaciones_cerradas (html): usa el emoji de REAL (💰) y de P
 # Tabla simplificada (peticion del usuario, sept. 2026): antes tenia Fecha
 # completa + Ticker + Cant. + Gan. USD + Modo en columna aparte y no cabia
 # en el ancho de un movil (la columna "Modo" se desbordaba a la siguiente
-# linea). Ahora es Hora + Ticker + % + USD, con el % pedido por el
-# usuario, y sin columna "Cant." ni columna "Modo" aparte (el emoji de
-# modo va pegado al final de la fila).
-check("formatear_operaciones_cerradas (html): la cabecera es mas simple (Hora/Ticker/%/USD, "
-      "sin columnas 'Fecha'/'Cant.'/'Modo')",
-      "%" in cerradas_html and "Hora" in cerradas_html
-      and "Fecha" not in cerradas_html and "Cant." not in cerradas_html,
+# linea). Ahora es Ticker + Cant. + % + USD, con el % pedido por el
+# usuario, sin columna "Fecha"/"Hora" ni columna "Modo" aparte (el emoji
+# de modo va pegado al final de la fila).
+check("formatear_operaciones_cerradas (html): la cabecera es mas simple (Ticker/Cant./%/USD, "
+      "sin columnas 'Fecha'/'Modo')",
+      "%" in cerradas_html and "Cant." in cerradas_html and "Ticker" in cerradas_html
+      and "Fecha" not in cerradas_html,
       f"resultado={cerradas_html!r}")
 check("formatear_operaciones_cerradas (html): SI muestra el % de beneficio de cada operacion",
       "+10,00%" in cerradas_html, f"resultado={cerradas_html!r}")
+check("formatear_operaciones_cerradas (html): SI muestra la cantidad vendida de cada operacion",
+      "5" in cerradas_html, f"resultado={cerradas_html!r}")
+
+# Peticion del usuario (sept. 2026): tambien quiere ver el importe TOTAL en $
+# que se ha vendido (no solo la ganancia/perdida neta).
+# NVDA: 5 * 110 = 550, TSLA: 1 * 300 = 300 -> total 850.
+check("formatear_operaciones_cerradas (html): muestra el importe total vendido en USD",
+      "Importe total vendido" in cerradas_html and "850,00" in cerradas_html,
+      f"resultado={cerradas_html!r}")
 
 
 if fallos:

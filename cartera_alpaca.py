@@ -149,6 +149,7 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
 
     filas = []
     ganancia_total_usd = 0.0
+    importe_total_vendido_usd = 0.0
     for o in ventas:
         cantidad = o["cantidad"]
         coste_medio = o.get("coste_medio")
@@ -161,6 +162,7 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         else:
             ganancia_usd = ganancia_eur = None
         ganancia_total_usd += ganancia_usd or 0.0
+        importe_total_vendido_usd += cantidad * precio
         filas.append((o["fecha_hora"], o["ticker"], cantidad, precio, ganancia_usd, ganancia_eur,
                       beneficio_pct, _modo_operacion(o)))
 
@@ -168,19 +170,22 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         # Tabla simplificada (peticion del usuario, sept. 2026): antes tenia
         # Fecha completa + Ticker + Cant. + Gan. USD + Modo en columna aparte,
         # y no cabia en el ancho de un movil -la columna "Modo" se desbordaba
-        # a la siguiente linea-. Ahora solo Hora + Ticker + % + USD (el % es
-        # lo que se pidio ver), y el emoji de modo va pegado al final de la
-        # fila en vez de en su propia columna.
-        lineas_tabla = [f"  {'Hora':<6}{'Ticker':<7}{'%':>8}{'USD':>8}"]
+        # a la siguiente linea-. Ahora es Ticker + Cant. + % + USD (cantidad
+        # vendida y % de beneficio, pedidos por el usuario), el emoji de modo
+        # va pegado al final de la fila en vez de en su propia columna, y el
+        # resumen final incluye el importe total en $ vendido (no solo la
+        # ganancia/perdida neta).
+        lineas_tabla = [f"  {'Ticker':<7}{'Cant.':>7}{'%':>8}{'USD':>8}"]
         for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo in filas:
-            hora = fecha_hora[11:16]  # HH:MM
             emoji = _emoji_pl(ganancia_usd) if ganancia_usd is not None else "⚪"
+            cantidad_str = f"{cantidad:g}"
             pct_str = f"{bot.formato_es(beneficio_pct, signo=True)}%" if beneficio_pct is not None else "N/D"
             ganancia_str = bot.formato_es(ganancia_usd, signo=True) if ganancia_usd is not None else "N/D"
             modo_emoji = "💰" if modo == "REAL" else "🧪"
-            lineas_tabla.append(f"{emoji} {hora:<6}{ticker:<7}{pct_str:>8}{ganancia_str:>8} {modo_emoji}")
+            lineas_tabla.append(f"{emoji} {ticker:<6}{cantidad_str:>7}{pct_str:>8}{ganancia_str:>8} {modo_emoji}")
         tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
-        resumen = (f"<b>TOTAL</b> ganancia/perdida realizada: {bot.formato_es(ganancia_total_usd, signo=True)} USD "
+        resumen = (f"Importe total vendido: {bot.formato_es(importe_total_vendido_usd)} USD\n"
+                  f"<b>TOTAL</b> ganancia/perdida realizada: {bot.formato_es(ganancia_total_usd, signo=True)} USD "
                   f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR)\n"
                   f"💰 = REAL, 🧪 = PAPER (simulado){_resumen_por_modo(ventas)}")
         return f"{titulo_html}\n{tabla}\n{resumen}"
