@@ -1020,6 +1020,37 @@ TOTAL ganancia/perdida realizada: +4,78 USD (+4,19 EUR)
 
 El formato en texto plano (sin HTML, usado solo internamente) no cambia.
 
+## Tabla de operaciones cerradas: precio, tiempo abierta y % sobre lo invertido (sept. 2026)
+
+Tercer ajuste de la tabla de `/hoy`/`/ayer`/`/semana` (los dos anteriores: quitar columnas que
+desbordaban el móvil, luego recuperar "Cant." y añadir el importe total vendido). Petición del
+usuario a partir de una captura real: alinear columnas, cantidad a máximo 4 decimales, añadir el
+precio de venta, un % sobre el TOTAL invertido (no solo el $/EUR neto), y debajo de cada fila
+cuánto llevaba abierta la posición.
+
+- **Cantidad a máximo 4 decimales**: se redondea con `round(cantidad, 4)` antes de formatear —
+  el historial guarda hasta 9 decimales para cripto, lo que rompía la alineación de la tabla.
+- **Columna "Precio"**: el precio de venta de cada operación (`bot.formato_es(precio)`).
+- **"abierta desde" bajo cada fila**: `_fecha_apertura_posicion()` recorre el historial COMPLETO
+  (no solo el rango desde/hasta que se está consultando — la posición pudo abrirse antes) de ese
+  ticker, acumulando cantidad con cada COMPRA y descontando con cada VENTA; cada vez que la
+  cantidad cae a ~0 (posición totalmente cerrada) se "olvida" la apertura anterior, así que la
+  siguiente COMPRA cuenta como una posición nueva. Si no hay ninguna COMPRA previa registrada
+  (dato incompleto), simplemente no se muestra la línea, sin reventar.
+- **% TOTAL sobre lo invertido**: `beneficio_total_pct = ganancia_total_usd / coste_total_usd * 100`
+  (antes solo se mostraba la ganancia neta en $/EUR, sin relativizar contra cuánto se había
+  invertido). `coste_total_usd` es la suma de `coste_medio × cantidad` de cada venta con
+  `coste_medio` conocido.
+- **Comisiones**: el usuario pidió descontarlas del cálculo si es posible. **No se ha podido**:
+  `bot_alpaca.py` no guarda una comisión por operación en el historial para ACCIONES, porque
+  Alpaca no cobra comisión en acciones (solo hay tasas regulatorias diminutas — CAT/TAF/REG,
+  ver la sección de comisiones más abajo — que Alpaca agrega una vez al día, no por operación,
+  así que no hay forma de repartirlas entre operaciones concretas con los datos que se guardan
+  hoy). Para CRIPTO sí hay comisión real (`estimar_comision_cripto_alpaca`), y el `beneficio_pct`
+  que ya se registra para cripto es NETO (ya la tiene descontada) — así que el % TOTAL mezcla
+  correctamente acciones sin comisión que descontar con cripto ya neteada, sin necesitar ningún
+  cambio adicional.
+
 ## Veto del scale-out por MACD alcista (sept. 2026, a raíz del análisis de operaciones)
 
 Al revisar el historial real (ver la sección de "Herramienta de diagnóstico" más abajo) se

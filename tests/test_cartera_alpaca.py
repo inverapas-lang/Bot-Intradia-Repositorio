@@ -191,6 +191,68 @@ check("formatear_operaciones_cerradas (html): muestra el importe total vendido e
       f"resultado={cerradas_html!r}")
 
 
+# ---------------------------------------------------------------------------
+# 5. formatear_operaciones_cerradas (html): precio de venta, cantidad a
+#    maximo 4 decimales, tiempo abierta la posicion y % TOTAL sobre lo
+#    invertido (peticion del usuario, sept. 2026, a partir de una captura
+#    real de /ayer donde pidio ver esto añadido a la tabla).
+# ---------------------------------------------------------------------------
+compra_hace_3h58 = hoy_dt - timedelta(hours=3, minutes=58)
+compra_hace_9h04 = hoy_dt - timedelta(hours=9, minutes=4)
+operaciones_con_apertura = [
+    {"fecha_hora": compra_hace_3h58.isoformat(timespec="seconds"), "ticker": "C", "lado": "COMPRA",
+     "cantidad": 0.116369, "precio": 135.71, "modo": "REAL"},
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "C", "lado": "VENTA",
+     "cantidad": 0.116369, "precio": 137.71, "coste_medio": 135.71, "beneficio_pct": 1.46, "modo": "REAL"},
+    {"fecha_hora": compra_hace_9h04.isoformat(timespec="seconds"), "ticker": "SMCI", "lado": "COMPRA",
+     "cantidad": 0.426837, "precio": 37.35, "modo": "REAL"},
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "SMCI", "lado": "VENTA",
+     "cantidad": 0.426837, "precio": 37.73, "coste_medio": 37.35, "beneficio_pct": 1.00, "modo": "REAL"},
+]
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump(operaciones_con_apertura, f)
+
+cerradas_html_apertura = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html): la cabecera incluye la columna 'Precio'",
+      "Precio" in cerradas_html_apertura, f"resultado={cerradas_html_apertura!r}")
+check("formatear_operaciones_cerradas (html): muestra el precio de venta de cada operacion",
+      "137,71" in cerradas_html_apertura and "37,73" in cerradas_html_apertura,
+      f"resultado={cerradas_html_apertura!r}")
+check("formatear_operaciones_cerradas (html): la cantidad se redondea a maximo 4 decimales "
+      "(0.116369 -> 0.1164, no los 6 decimales guardados en el historial)",
+      "0.1164" in cerradas_html_apertura and "0.116369" not in cerradas_html_apertura,
+      f"resultado={cerradas_html_apertura!r}")
+check("formatear_operaciones_cerradas (html): debajo de cada fila indica desde cuando estaba "
+      "abierta la posicion (encontrando la COMPRA que la abrio en el historial completo)",
+      "abierta desde" in cerradas_html_apertura and "3h 58min" in cerradas_html_apertura
+      and "9h 04min" in cerradas_html_apertura,
+      f"resultado={cerradas_html_apertura!r}")
+# C: coste 0.116369*135.71=15.79, ganancia (137.71-135.71)*0.116369=0.23 -> +1,46%
+# SMCI: coste 0.426837*37.35=15.94, ganancia (37.73-37.35)*0.426837=0.16 -> +1,00%
+# TOTAL: coste=31.73, ganancia=0.39 -> +1.24% sobre lo invertido
+check("formatear_operaciones_cerradas (html): el resumen TOTAL incluye el % sobre lo invertido "
+      "(no solo el $/EUR neto)",
+      "sobre lo invertido" in cerradas_html_apertura and "+1,24%" in cerradas_html_apertura,
+      f"resultado={cerradas_html_apertura!r}")
+
+cerradas_plano_apertura = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date())
+check("formatear_operaciones_cerradas (plano): el TOTAL tambien incluye el % sobre lo invertido",
+      "sobre lo invertido" in cerradas_plano_apertura and "+1,24%" in cerradas_plano_apertura,
+      f"resultado={cerradas_plano_apertura!r}")
+
+# Venta sin ninguna COMPRA previa en el historial (dato incompleto, p.ej. si
+# el historial no llega tan atras): no debe reventar, simplemente no muestra
+# la linea de "abierta desde".
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "ZZZ", "lado": "VENTA",
+                "cantidad": 1.0, "precio": 10.0, "coste_medio": 9.0, "beneficio_pct": 11.11, "modo": "REAL"}], f)
+cerradas_sin_apertura = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html): sin COMPRA previa en el historial, no revienta "
+      "y simplemente no muestra 'abierta desde'",
+      "ZZZ" in cerradas_sin_apertura and "abierta desde" not in cerradas_sin_apertura,
+      f"resultado={cerradas_sin_apertura!r}")
+
+
 if fallos:
     print(f"\n{len(fallos)} test(s) FALLARON: {fallos}")
     sys.exit(1)

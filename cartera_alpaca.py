@@ -133,6 +133,44 @@ def formatear_posiciones_abiertas(html=False, client=None, modo_etiqueta=None):
     return "\n".join(lineas)
 
 
+def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora):
+    """Recorre TODAS las operaciones (ya ordenadas cronologicamente, de UN
+    solo ticker, sin restringir por rango de fechas -una posicion puede
+    haberse abierto antes del rango que se esta consultando-) y devuelve la
+    fecha/hora de la COMPRA que abrio la racha actual: la cantidad se va
+    acumulando con cada COMPRA y descontando con cada VENTA, y cada vez que
+    cae a ~0 (posicion totalmente cerrada) se olvida la apertura anterior -
+    la siguiente COMPRA cuenta como una posicion nueva. None si no hay
+    ninguna compra registrada antes de 'hasta_fecha_hora' (dato incompleto,
+    p.ej. si el historial no llega tan atras)."""
+    cantidad_actual = 0.0
+    fecha_apertura = None
+    for o in operaciones_ticker_ordenadas:
+        if o["fecha_hora"] > hasta_fecha_hora:
+            break
+        if o["lado"] == "COMPRA":
+            if cantidad_actual <= 1e-9:
+                fecha_apertura = o["fecha_hora"]
+            cantidad_actual += o["cantidad"]
+        else:
+            cantidad_actual = max(0.0, cantidad_actual - o["cantidad"])
+    return fecha_apertura
+
+
+def _formatear_duracion(delta):
+    segundos = int(delta.total_seconds())
+    if segundos < 60:
+        return f"{segundos}s"
+    minutos = segundos // 60
+    if minutos < 60:
+        return f"{minutos}min"
+    horas, minutos_resto = divmod(minutos, 60)
+    if horas < 24:
+        return f"{horas}h {minutos_resto:02d}min" if minutos_resto else f"{horas}h"
+    dias, horas_resto = divmod(horas, 24)
+    return f"{dias}d {horas_resto}h" if horas_resto else f"{dias}d"
+
+
 def formatear_operaciones_cerradas(desde, hasta, html=False):
     """Ver formatear_posiciones_abiertas() para el significado de html=."""
     operaciones = bot.cargar_historial_operaciones()
@@ -147,8 +185,20 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
     if not ventas:
         return (titulo_html if html else titulo_plano) + "\n(ninguna)"
 
+    # Historial COMPLETO por ticker (sin restringir al rango desde/hasta):
+    # hace falta para encontrar la compra de apertura de una posicion que
+    # pudo abrirse antes del rango que se esta consultando (ver
+    # _fecha_apertura_posicion()).
+    operaciones_por_ticker = {}
+    for o in operaciones:
+        if o["lado"] in ("COMPRA", "VENTA"):
+            operaciones_por_ticker.setdefault(o["ticker"], []).append(o)
+    for lista in operaciones_por_ticker.values():
+        lista.sort(key=lambda o: o["fecha_hora"])
+
     filas = []
     ganancia_total_usd = 0.0
+    coste_total_usd = 0.0
     importe_total_vendido_usd = 0.0
     for o in ventas:
         cantidad = o["cantidad"]
@@ -159,47 +209,56 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         if coste_medio is not None:
             ganancia_usd = (precio - coste_medio) * cantidad  # sin comision, ver bot_alpaca.py
             ganancia_eur = ganancia_usd / bot.TIPO_CAMBIO_EUR_USD
+            coste_total_usd += coste_medio * cantidad
         else:
             ganancia_usd = ganancia_eur = None
         ganancia_total_usd += ganancia_usd or 0.0
         importe_total_vendido_usd += cantidad * precio
+        fecha_apertura = _fecha_apertura_posicion(operaciones_por_ticker.get(o["ticker"], []), o["fecha_hora"])
         filas.append((o["fecha_hora"], o["ticker"], cantidad, precio, ganancia_usd, ganancia_eur,
-                      beneficio_pct, _modo_operacion(o)))
+                      beneficio_pct, _modo_operacion(o), fecha_apertura))
+
+    beneficio_total_pct = (ganancia_total_usd / coste_total_usd * 100) if coste_total_usd else None
 
     if html:
-        # Tabla simplificada (peticion del usuario, sept. 2026): antes tenia
-        # Fecha completa + Ticker + Cant. + Gan. USD + Modo en columna aparte,
-        # y no cabia en el ancho de un movil -la columna "Modo" se desbordaba
-        # a la siguiente linea-. Ahora es Ticker + Cant. + % + USD (cantidad
-        # vendida y % de beneficio, pedidos por el usuario), el emoji de modo
-        # va pegado al final de la fila en vez de en su propia columna, y el
-        # resumen final incluye el importe total en $ vendido (no solo la
-        # ganancia/perdida neta).
-        lineas_tabla = [f"  {'Ticker':<7}{'Cant.':>7}{'%':>8}{'USD':>8}"]
-        for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo in filas:
+        # Tabla (peticion del usuario, sept. 2026): Ticker + Cant. (maximo 4
+        # decimales, redondeada para que la tabla quede alineada pese a que
+        # el historial guarda muchos mas decimales de precision) + Precio de
+        # venta + % + USD, con el emoji de modo pegado al final de la fila.
+        # Debajo de cada fila, si se conoce, cuanto llevaba abierta la
+        # posicion (desde la ultima compra que la abrio hasta esta venta).
+        lineas_tabla = [f"  {'Ticker':<7}{'Cant.':>7}{'Precio':>8}{'%':>8}{'USD':>8}"]
+        for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo, fecha_apertura in filas:
             emoji = _emoji_pl(ganancia_usd) if ganancia_usd is not None else "⚪"
-            cantidad_str = f"{cantidad:g}"
+            cantidad_str = f"{round(cantidad, 4):g}"
+            precio_str = bot.formato_es(precio)
             pct_str = f"{bot.formato_es(beneficio_pct, signo=True)}%" if beneficio_pct is not None else "N/D"
             ganancia_str = bot.formato_es(ganancia_usd, signo=True) if ganancia_usd is not None else "N/D"
             modo_emoji = "💰" if modo == "REAL" else "🧪"
-            lineas_tabla.append(f"{emoji} {ticker:<6}{cantidad_str:>7}{pct_str:>8}{ganancia_str:>8} {modo_emoji}")
+            lineas_tabla.append(f"{emoji} {ticker:<6}{cantidad_str:>7}{precio_str:>8}{pct_str:>8}{ganancia_str:>8} {modo_emoji}")
+            if fecha_apertura is not None:
+                duracion = _formatear_duracion(datetime.fromisoformat(fecha_hora) - datetime.fromisoformat(fecha_apertura))
+                lineas_tabla.append(f"    abierta desde {fecha_apertura[5:16].replace('T', ' ')} ({duracion})")
         tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
+        pct_total_str = f" ({bot.formato_es(beneficio_total_pct, signo=True)}% sobre lo invertido, {bot.formato_es(coste_total_usd)} USD)" \
+            if beneficio_total_pct is not None else ""
         resumen = (f"Importe total vendido: {bot.formato_es(importe_total_vendido_usd)} USD\n"
                   f"<b>TOTAL</b> ganancia/perdida realizada: {bot.formato_es(ganancia_total_usd, signo=True)} USD "
-                  f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR)\n"
+                  f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR){pct_total_str}\n"
                   f"💰 = REAL, 🧪 = PAPER (simulado){_resumen_por_modo(ventas)}")
         return f"{titulo_html}\n{tabla}\n{resumen}"
 
     lineas = [titulo_plano]
-    for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo in filas:
+    for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo, fecha_apertura in filas:
         fecha_str = fecha_hora[:16].replace("T", " ")
         ganancia_str = (f", ganancia {bot.formato_es(ganancia_usd, signo=True)} USD / "
                         f"{bot.formato_es(ganancia_eur, signo=True)} EUR") if ganancia_usd is not None else ""
         beneficio_pct_str = f" ({bot.formato_es(beneficio_pct, signo=True)}%)" if beneficio_pct is not None else ""
         lineas.append(f"[{modo}] {fecha_str} {ticker}: {bot.formato_es(cantidad, 4)} acciones a "
                       f"{bot.formato_es(precio, 4)} USD{ganancia_str}{beneficio_pct_str}")
+    pct_total_str = f" ({bot.formato_es(beneficio_total_pct, signo=True)}% sobre lo invertido)" if beneficio_total_pct is not None else ""
     lineas.append(f"TOTAL ganancia/perdida realizada: {bot.formato_es(ganancia_total_usd, signo=True)} USD "
-                  f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR)")
+                  f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR){pct_total_str}")
     return "\n".join(lineas)
 
 
