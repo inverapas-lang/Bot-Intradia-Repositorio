@@ -167,6 +167,20 @@ cerradas_html = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.dat
 check("formatear_operaciones_cerradas (html): usa el emoji de REAL (💰) y de PAPER (🧪)",
       "💰" in cerradas_html and "🧪" in cerradas_html, f"resultado={cerradas_html!r}")
 
+# Tabla simplificada (peticion del usuario, sept. 2026): antes tenia Fecha
+# completa + Ticker + Cant. + Gan. USD + Modo en columna aparte y no cabia
+# en el ancho de un movil (la columna "Modo" se desbordaba a la siguiente
+# linea). Ahora es Hora + Ticker + % + USD, con el % pedido por el
+# usuario, y sin columna "Cant." ni columna "Modo" aparte (el emoji de
+# modo va pegado al final de la fila).
+check("formatear_operaciones_cerradas (html): la cabecera es mas simple (Hora/Ticker/%/USD, "
+      "sin columnas 'Fecha'/'Cant.'/'Modo')",
+      "%" in cerradas_html and "Hora" in cerradas_html
+      and "Fecha" not in cerradas_html and "Cant." not in cerradas_html,
+      f"resultado={cerradas_html!r}")
+check("formatear_operaciones_cerradas (html): SI muestra el % de beneficio de cada operacion",
+      "+10,00%" in cerradas_html, f"resultado={cerradas_html!r}")
+
 
 if fallos:
     print(f"\n{len(fallos)} test(s) FALLARON: {fallos}")

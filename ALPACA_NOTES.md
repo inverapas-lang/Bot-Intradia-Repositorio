@@ -950,6 +950,37 @@ posición y usa `precio_actual` como mejor aproximación disponible (no hay un p
 ejecución fiable por esta vía). Aplicado en los 5 puntos de compra/venta (acciones y cripto,
 compra y venta, más la venta forzada).
 
+## Tabla de operaciones cerradas simplificada en Telegram (sept. 2026, petición del usuario)
+
+La tabla "OPERACIONES CERRADAS" que muestran `/hoy`, `/ayer` y `/semana` (vía
+`formatear_operaciones_cerradas(..., html=True)` en `cartera_alpaca.py`) tenía columnas
+`Fecha | Ticker | Cant. | Gan. USD | Modo`, y en pantallas de móvil no cabía en el ancho: la
+columna "Modo" se desbordaba a la siguiente línea, quedando ilegible.
+
+**Arreglo**: tabla simplificada a `Hora | Ticker | % | USD`:
+
+- "Fecha" (`MM-DD HH:MM`) se reduce a solo la hora (`HH:MM`) — dentro de `/hoy`/`/ayer` todas
+  las filas son del mismo día, así que la fecha completa era redundante.
+- Se elimina la columna "Cant." (cantidad de acciones/cripto), poco relevante para ver de un
+  vistazo si una operación fue rentable o no.
+- Se añade una columna "%" con el `beneficio_pct` de cada operación (formato español, con
+  signo), que es justo lo que pidió el usuario poder ver.
+- La columna "Modo" desaparece como columna propia; el emoji 💰 (REAL) / 🧪 (PAPER) se queda
+  pegado al final de cada fila en vez de tener su propio encabezado.
+
+Ejemplo de salida:
+
+```
+📉 OPERACIONES CERRADAS (2026-09-11 a 2026-09-11)
+  Hora  Ticker        %     USD
+🟢 09:09 WMT      +3,42%   +0,16 🧪
+🔴 09:09 SMCI     -0,77%   -0,02 🧪
+TOTAL ganancia/perdida realizada: +0,14 USD (+0,12 EUR)
+💰 = REAL, 🧪 = PAPER (simulado) (2 PAPER)
+```
+
+El formato en texto plano (sin HTML, usado solo internamente) no cambia.
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

@@ -165,13 +165,20 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
                       beneficio_pct, _modo_operacion(o)))
 
     if html:
-        lineas_tabla = [f"  {'Fecha':<12}{'Ticker':<7}{'Cant.':>8}{'Gan. USD':>12}  Modo"]
+        # Tabla simplificada (peticion del usuario, sept. 2026): antes tenia
+        # Fecha completa + Ticker + Cant. + Gan. USD + Modo en columna aparte,
+        # y no cabia en el ancho de un movil -la columna "Modo" se desbordaba
+        # a la siguiente linea-. Ahora solo Hora + Ticker + % + USD (el % es
+        # lo que se pidio ver), y el emoji de modo va pegado al final de la
+        # fila en vez de en su propia columna.
+        lineas_tabla = [f"  {'Hora':<6}{'Ticker':<7}{'%':>8}{'USD':>8}"]
         for fecha_hora, ticker, cantidad, precio, ganancia_usd, ganancia_eur, beneficio_pct, modo in filas:
-            fecha_corta = fecha_hora[5:16].replace("T", " ")  # MM-DD HH:MM (11 caracteres)
+            hora = fecha_hora[11:16]  # HH:MM
             emoji = _emoji_pl(ganancia_usd) if ganancia_usd is not None else "⚪"
-            ganancia_str = f"{bot.formato_es(ganancia_usd, signo=True):>12}" if ganancia_usd is not None else f"{'N/D':>12}"
+            pct_str = f"{bot.formato_es(beneficio_pct, signo=True)}%" if beneficio_pct is not None else "N/D"
+            ganancia_str = bot.formato_es(ganancia_usd, signo=True) if ganancia_usd is not None else "N/D"
             modo_emoji = "💰" if modo == "REAL" else "🧪"
-            lineas_tabla.append(f"{emoji} {fecha_corta:<12}{ticker:<7}{bot.formato_es(cantidad, 2):>8}{ganancia_str}  {modo_emoji}")
+            lineas_tabla.append(f"{emoji} {hora:<6}{ticker:<7}{pct_str:>8}{ganancia_str:>8} {modo_emoji}")
         tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
         resumen = (f"<b>TOTAL</b> ganancia/perdida realizada: {bot.formato_es(ganancia_total_usd, signo=True)} USD "
                   f"({bot.formato_es(ganancia_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR)\n"
