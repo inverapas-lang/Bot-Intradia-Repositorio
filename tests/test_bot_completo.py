@@ -1,0 +1,2832 @@
+"""
+Tests manuales (sin pytest) para las funciones de logica pura de
+bot_completo.py: no requieren conexion a IBKR, solo importan el modulo y
+prueban calculos matematicos y de horarios con datos simulados.
+"""
+import os
+import sys
+import tempfile
+import time
+import types
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import bot_completo as bot
+import pandas as pd
+
+# Cada llamada a bot.log()/bot.actualizar_latido() escribe en disco (senal de
+# vida para el vigilante externo). Se redirige a una carpeta temporal desde
+# el principio para que correr los tests no deje "latido_bot.txt" ni
+# "bot.pid" tirados en la carpeta del repo.
+_DIR_TEMP_ESTADO_RUNTIME = tempfile.mkdtemp()
+bot.ARCHIVO_LATIDO = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "latido_bot.txt")
+bot.ARCHIVO_PID = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "bot.pid")
+bot.ARCHIVO_HISTORIAL_OPERACIONES = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "historial_operaciones_ibkr_test.json")
+bot.ARCHIVO_ESTADO_VENTA = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "estado_venta_test.json")
+
+fallos = []
+
+
+def check(nombre, condicion, detalle=""):
+    estado = "OK  " if condicion else "FAIL"
+    print(f"[{estado}] {nombre}" + (f" -- {detalle}" if detalle and not condicion else ""))
+    if not condicion:
+        fallos.append(nombre)
+
+
+# ---------------------------------------------------------------------------
+# 1. calcular_macd: sobre una serie conocida, comprobar forma y valores
+#    finitos, y que una serie claramente alcista de un valor MACD positivo.
+# ---------------------------------------------------------------------------
+precios_alcistas = pd.Series([100 + i * 0.5 for i in range(60)])  # tendencia subiendo
+macd, senal, hist = bot.calcular_macd(precios_alcistas)
+check("MACD: longitud de salida coincide con la entrada", len(macd) == len(precios_alcistas))
+check("MACD: en tendencia alcista sostenida, MACD final > 0",
+      macd.iloc[-1] > 0, f"macd.iloc[-1]={macd.iloc[-1]}")
+check("MACD: en tendencia alcista sostenida, MACD > señal (cruce alcista)",
+      macd.iloc[-1] > senal.iloc[-1])
+
+precios_bajistas = pd.Series([100 - i * 0.5 for i in range(60)])  # tendencia bajando
+macd_b, senal_b, _ = bot.calcular_macd(precios_bajistas)
+check("MACD: en tendencia bajista sostenida, MACD < señal",
+      macd_b.iloc[-1] < senal_b.iloc[-1])
+
+precios_planos = pd.Series([100.0] * 60)
+macd_p, senal_p, hist_p = bot.calcular_macd(precios_planos)
+check("MACD: precio plano da histograma ~0", abs(hist_p.iloc[-1]) < 1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 2. tick_size_krx: tabla oficial de KRX
+# ---------------------------------------------------------------------------
+casos_tick = [
+    (500, 1), (1999, 1),
+    (2000, 5), (4999, 5),
+    (5000, 10), (19999, 10),
+    (20000, 50), (49999, 50),
+    (50000, 100), (199999, 100),
+    (200000, 500), (499999, 500),
+    (500000, 1000), (1000000, 1000),
+]
+for precio, esperado in casos_tick:
+    obtenido = bot.tick_size_krx(precio)
+    check(f"tick_size_krx({precio}) == {esperado}", obtenido == esperado, f"obtenido={obtenido}")
+
+
+# ---------------------------------------------------------------------------
+# 3. calcular_precio_limite_venta
+# ---------------------------------------------------------------------------
+pl_usd = bot.calcular_precio_limite_venta(100.0, "USD")
+check("precio limite USD: 0.2% por debajo de 100 -> 99.8",
+      abs(pl_usd - 99.8) < 1e-9, f"obtenido={pl_usd}")
+
+pl_krw = bot.calcular_precio_limite_venta(10050, "KRW")
+# 10050 * 0.998 = 10029.9 -> tick de 10 (rango 5000-20000) -> redondeo hacia abajo a 10020
+check("precio limite KRW: redondeado al tick de KRX hacia abajo",
+      pl_krw % bot.tick_size_krx(pl_krw) == 0, f"obtenido={pl_krw}")
+check("precio limite KRW: valor esperado 10020", pl_krw == 10020, f"obtenido={pl_krw}")
+
+
+# ---------------------------------------------------------------------------
+# 4. valor_en_usd / valor_en_eur / comisiones
+# ---------------------------------------------------------------------------
+check("valor_en_usd: USD pasa igual", bot.valor_en_usd(100, "USD") == 100)
+check("valor_en_usd: EUR->USD multiplica por el tipo de cambio",
+      abs(bot.valor_en_usd(100, "EUR") - 100 * bot.TIPO_CAMBIO_EUR_USD) < 1e-9)
+check("valor_en_usd: HKD->USD divide por el tipo de cambio",
+      abs(bot.valor_en_usd(780, "HKD") - 100) < 1e-6)
+
+# estimar_comision: tarifas reales de IBKR (tiered, Nivel I) por mercado.
+
+# US, fraccionaria (cantidad no entera): 1% del valor, minimo 0.01 USD.
+comision_us_frac_pequena = bot.estimar_comision(0.75, "USD", 0.05)  # 1% de 0.75 = 0.0075 < minimo
+check("estimar_comision US fraccionaria: aplica el minimo (0.01 USD) cuando el 1% es menor",
+      abs(comision_us_frac_pequena - bot.COMISION_US_FRACCION_MINIMA) < 1e-9,
+      f"obtenido={comision_us_frac_pequena}")
+
+comision_us_frac_grande = bot.estimar_comision(1000, "USD", 3.544)  # 1% de 1000 = 10 > minimo
+check("estimar_comision US fraccionaria: aplica el 1% cuando supera el minimo",
+      abs(comision_us_frac_grande - 1000 * bot.COMISION_US_FRACCION_PCT) < 1e-9,
+      f"obtenido={comision_us_frac_grande}")
+
+# US, acciones ENTERAS: 0.0035 USD/accion, minimo 0.35 USD/orden.
+comision_us_entera_pequena = bot.estimar_comision(300, "USD", 3)  # 3*0.0035=0.0105 < minimo
+check("estimar_comision US acciones enteras: aplica el minimo (0.35 USD) en ordenes pequeñas",
+      abs(comision_us_entera_pequena - bot.COMISION_US_MINIMA) < 1e-9,
+      f"obtenido={comision_us_entera_pequena}")
+
+comision_us_entera_grande = bot.estimar_comision(50_000, "USD", 500)  # 500*0.0035=1.75 > minimo
+check("estimar_comision US acciones enteras: aplica 0.0035 USD/accion cuando supera el minimo",
+      abs(comision_us_entera_grande - 500 * bot.COMISION_US_POR_ACCION) < 1e-9,
+      f"obtenido={comision_us_entera_grande}")
+
+comision_us_tope = bot.estimar_comision(10, "USD", 1000)  # 1000*0.0035=3.5, pero tope 1% de 10 = 0.10
+check("estimar_comision US acciones enteras: nunca supera el tope del 1% del valor negociado",
+      abs(comision_us_tope - 10 * bot.COMISION_MAX_PCT) < 1e-9,
+      f"obtenido={comision_us_tope}")
+
+# HK: 0.05% del valor, minimo ~2.25 USD equivalente en HKD.
+comision_hk_minima = bot.estimar_comision(1000, "HKD")  # 0.05% de 1000 HKD = 0.5, por debajo del minimo
+minimo_hk_esperado = bot.COMISION_HK_MINIMA_USD * bot.TIPO_CAMBIO_USD_HKD
+check("estimar_comision HK: aplica el minimo (~2.25 USD equivalente) en ordenes pequeñas",
+      abs(comision_hk_minima - minimo_hk_esperado) < 1e-6,
+      f"obtenido={comision_hk_minima}, esperado={minimo_hk_esperado}")
+
+comision_hk_grande = bot.estimar_comision(1_000_000, "HKD")
+check("estimar_comision HK: aplica el 0.05% cuando supera el minimo",
+      abs(comision_hk_grande - 1_000_000 * bot.COMISION_HK_PCT) < 1e-6,
+      f"obtenido={comision_hk_grande}")
+
+# KR: 0.06% del valor, minimo 4000 KRW.
+comision_kr_minima = bot.estimar_comision(100_000, "KRW")  # 0.06% de 100000 = 60, por debajo del minimo
+check("estimar_comision KR: aplica el minimo (4000 KRW) en ordenes pequeñas",
+      abs(comision_kr_minima - bot.COMISION_KR_MINIMA_KRW) < 1e-6,
+      f"obtenido={comision_kr_minima}")
+
+comision_kr_grande = bot.estimar_comision(100_000_000, "KRW")
+check("estimar_comision KR: aplica el 0.06% cuando supera el minimo",
+      abs(comision_kr_grande - 100_000_000 * bot.COMISION_KR_PCT) < 1e-6,
+      f"obtenido={comision_kr_grande}")
+
+
+# ---------------------------------------------------------------------------
+# 5. es_horario_operativo / minutos_hasta_cierre / ventanas de cierre
+#    Se prueba con datetimes fijos inyectados, sin depender de "ahora".
+# ---------------------------------------------------------------------------
+class _RelojFijo(datetime):
+    _instante_fijo = None
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is not None:
+            return cls._instante_fijo.astimezone(tz)
+        return cls._instante_fijo
+
+
+def con_reloj_fijo(instante, fn, *args, **kwargs):
+    original = bot.datetime
+    _RelojFijo._instante_fijo = instante
+    bot.datetime = _RelojFijo
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        bot.datetime = original
+
+
+# Miercoles 10:00 ET -> mercado US abierto (regular)
+miercoles_us_abierto = datetime(2026, 8, 12, 10, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: miercoles 10:00 ET -> abierto",
+      con_reloj_fijo(miercoles_us_abierto, bot.es_horario_operativo, "US") is True)
+
+# Miercoles 20:00 ET -> mercado US cerrado (justo en el limite exclusivo del
+# postmercado extendido: fuera de premercado, regular Y postmercado)
+miercoles_us_cerrado = datetime(2026, 8, 12, 20, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: miercoles 20:00 ET -> cerrado",
+      con_reloj_fijo(miercoles_us_cerrado, bot.es_horario_operativo, "US") is False)
+
+# Sabado 10:00 ET -> cerrado por ser fin de semana
+sabado_us = datetime(2026, 8, 15, 10, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: sabado -> cerrado (fin de semana)",
+      con_reloj_fijo(sabado_us, bot.es_horario_operativo, "US") is False)
+
+# ---------------------------------------------------------------------------
+# 4b. Festivos de NYSE/Nasdaq (peticion del usuario, sept. 2026: "el bot
+#     puede identificar los dias festivos en US para no operar ese dia?").
+#     Calculados por regla, verificados contra el calendario oficial real.
+# ---------------------------------------------------------------------------
+check("festivos_nyse 2025: coincide con el calendario oficial (10 festivos)",
+      sorted(bot.festivos_nyse(2025)) == [
+          date(2025, 1, 1), date(2025, 1, 20), date(2025, 2, 17), date(2025, 4, 18),
+          date(2025, 5, 26), date(2025, 6, 19), date(2025, 7, 4), date(2025, 9, 1),
+          date(2025, 11, 27), date(2025, 12, 25),
+      ], f"festivos={sorted(bot.festivos_nyse(2025))}")
+
+check("festivos_nyse 2026: Labor Day cae en 7 de septiembre (caso real reportado por el usuario)",
+      date(2026, 9, 7) in bot.festivos_nyse(2026))
+check("festivos_nyse 2026: Independence Day (4 jul, sabado) se observa el viernes 3",
+      date(2026, 7, 3) in bot.festivos_nyse(2026) and date(2026, 7, 4) not in bot.festivos_nyse(2026))
+
+check("es_festivo_us: 7 de septiembre de 2026 (Labor Day) -> True", bot.es_festivo_us(date(2026, 9, 7)))
+check("es_festivo_us: 8 de septiembre de 2026 (dia normal) -> False", not bot.es_festivo_us(date(2026, 9, 8)))
+
+# Lunes 7 de sept. 2026, 10:00 ET (Labor Day, horario normal de mercado) ->
+# debe dar CERRADO por festivo, aunque sea un dia de semana en horario.
+labor_day_2026 = datetime(2026, 9, 7, 10, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: Labor Day 2026 en horario normal -> cerrado por festivo",
+      con_reloj_fijo(labor_day_2026, bot.es_horario_operativo, "US") is False)
+check("en_postmercado_us: Labor Day 2026 -> cerrado por festivo (no solo mira fin de semana)",
+      con_reloj_fijo(datetime(2026, 9, 7, 17, 0, tzinfo=bot.ZONA_NY), bot.en_postmercado_us) is False)
+check("fuera_de_sesion_regular_us: Labor Day 2026 en premercado -> cerrado por festivo",
+      con_reloj_fijo(datetime(2026, 9, 7, 6, 0, tzinfo=bot.ZONA_NY), bot.fuera_de_sesion_regular_us) is False)
+
+# El dia siguiente (martes 8 sept. 2026, dia normal) -> vuelve a abrir con normalidad.
+check("es_horario_operativo US: el dia siguiente al festivo, horario normal -> abierto",
+      con_reloj_fijo(datetime(2026, 9, 8, 10, 0, tzinfo=bot.ZONA_NY), bot.es_horario_operativo, "US") is True)
+
+# proxima_apertura(): si hoy es festivo, debe saltar al dia siguiente (no
+# ofrecer una apertura el mismo dia festivo).
+proxima_tras_festivo = con_reloj_fijo(datetime(2026, 9, 7, 10, 0, tzinfo=bot.ZONA_NY), bot.proxima_apertura, "US")
+check("proxima_apertura US: si hoy es festivo (Labor Day), la proxima apertura NO es hoy",
+      proxima_tras_festivo.date() != date(2026, 9, 7), f"proxima_apertura={proxima_tras_festivo}")
+check("proxima_apertura US: tras el festivo, la proxima apertura es el dia siguiente (8 sept, dia normal)",
+      proxima_tras_festivo.date() == date(2026, 9, 8), f"proxima_apertura={proxima_tras_festivo}")
+
+# Justo en el limite del cierre REGULAR (16:00 ET): ahora sigue ABIERTO,
+# porque entra el postmercado extendido (16:00-20:00 ET) - decision del
+# usuario de poder comprar (no vender) en esa franja.
+limite_cierre_regular_us = datetime(2026, 8, 12, 16, 0, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: exactamente a las 16:00 ET -> ABIERTO (empieza el postmercado)",
+      con_reloj_fijo(limite_cierre_regular_us, bot.es_horario_operativo, "US") is True)
+
+# 19:59 ET -> dentro del postmercado extendido (abierto)
+diecinueve_59 = datetime(2026, 8, 12, 19, 59, tzinfo=bot.ZONA_NY)
+check("es_horario_operativo US: 19:59 ET -> abierto (postmercado)",
+      con_reloj_fijo(diecinueve_59, bot.es_horario_operativo, "US") is True)
+
+# fuera_de_sesion_regular_us / en_postmercado_us: premercado, regular y postmercado
+premercado_us = datetime(2026, 8, 12, 6, 0, tzinfo=bot.ZONA_NY)
+check("fuera_de_sesion_regular_us: 6:00 ET (premercado) -> True",
+      con_reloj_fijo(premercado_us, bot.fuera_de_sesion_regular_us) is True)
+check("en_postmercado_us: 6:00 ET (premercado) -> False",
+      con_reloj_fijo(premercado_us, bot.en_postmercado_us) is False)
+
+check("fuera_de_sesion_regular_us: 10:00 ET (sesion regular) -> False",
+      con_reloj_fijo(miercoles_us_abierto, bot.fuera_de_sesion_regular_us) is False)
+
+postmercado_us = datetime(2026, 8, 12, 18, 0, tzinfo=bot.ZONA_NY)
+check("fuera_de_sesion_regular_us: 18:00 ET (postmercado) -> True",
+      con_reloj_fijo(postmercado_us, bot.fuera_de_sesion_regular_us) is True)
+check("en_postmercado_us: 18:00 ET (postmercado) -> True",
+      con_reloj_fijo(postmercado_us, bot.en_postmercado_us) is True)
+
+# minutos_hasta_cierre: 15:50 ET -> 10 minutos para el cierre
+quince_cincuenta = datetime(2026, 8, 12, 15, 50, tzinfo=bot.ZONA_NY)
+minutos = con_reloj_fijo(quince_cincuenta, bot.minutos_hasta_cierre, "US")
+check("minutos_hasta_cierre US a las 15:50 ET -> 10.0",
+      abs(minutos - 10.0) < 1e-9, f"obtenido={minutos}")
+
+# en_ventana_venta_forzada: dentro de los ultimos 15 min antes del cierre
+check("en_ventana_venta_forzada US a las 15:50 ET (10 min para cerrar) -> True",
+      con_reloj_fijo(quince_cincuenta, bot.en_ventana_venta_forzada, "US") is True)
+
+# en_ventana_sin_compra: dentro de los ultimos 90 min antes del cierre
+catorce_cuarenta = datetime(2026, 8, 12, 14, 40, tzinfo=bot.ZONA_NY)  # 80 min para cerrar
+check("en_ventana_sin_compra US a las 14:40 ET (80 min para cerrar) -> True",
+      con_reloj_fijo(catorce_cuarenta, bot.en_ventana_sin_compra, "US") is True)
+
+trece_cero = datetime(2026, 8, 12, 13, 0, tzinfo=bot.ZONA_NY)  # 180 min para cerrar
+check("en_ventana_sin_compra US a las 13:00 ET (180 min para cerrar) -> False",
+      con_reloj_fijo(trece_cero, bot.en_ventana_sin_compra, "US") is False)
+
+
+# ---------------------------------------------------------------------------
+# 6. analizar_activo: decision de COMPRA/BLOQUEADO/SIN_SENAL con IB simulado
+# ---------------------------------------------------------------------------
+class _Vela:
+    def __init__(self, close):
+        self.close = close
+
+
+class _ContratoFalso:
+    def __init__(self, symbol):
+        self.symbol = symbol
+        self.conId = 12345  # simula contrato ya resuelto
+
+
+class _IBFalso:
+    """Doble de prueba minimo: qualifyContracts no hace nada, y
+    reqHistoricalData siempre devuelve la misma serie alcista de precios
+    (suficiente para que el MACD de cada temporalidad salga alcista)."""
+
+    def __init__(self, precios):
+        self.precios = precios
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 12345  # simula que IBKR resolvio el contrato correctamente
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(p) for p in self.precios]
+
+    def sleep(self, segundos):
+        pass
+
+
+activo_prueba = {"ticker": "TEST", "exchange": "SMART", "currency": "USD", "mercado": "US"}
+
+# Serie alcista LINEAL (pendiente constante), 60 puntos: las 5 temporalidades
+# cortas (incluida 1h) dan alcista, pero la pendiente CONSTANTE (sin
+# acelerar) hace que el histograma de las largas (dia/semana) salga
+# "decreciente" -> bajista (ver SERIE_ACELERANDO_ALTA/BAJA mas abajo).
+# Peticion del usuario (sept. 2026): el atajo de "4 cortas alcistas" TAMBIEN
+# exige que ninguna larga este en contra, asi que aqui NO debe activarse
+# (bug real corregido: antes el atajo ignoraba las largas por completo y
+# compraba igual). Con las 4 cortas alineadas pero las largas en contra,
+# cae en BLOQUEADO (cortas_ok=True, largas_ok=False).
+precios_lineal = [100 + i * 0.3 for i in range(60)]
+ib_falso_lineal = _IBFalso(precios_lineal)
+bot._cache_temporalidades_largas = {}
+_, decision_lineal = bot.analizar_activo(ib_falso_lineal, activo_prueba)
+check("analizar_activo: 4 cortas alcistas pero largas en contra (lineal, sin acelerar) -> "
+      "BLOQUEADO, NO compra por el atajo (bug corregido)",
+      decision_lineal == "BLOQUEADO", f"decision={decision_lineal}")
+
+# Serie alcista que ACELERA (curva exponencial): tambien COMPRA (por el
+# atajo Y por la regla larga, ambas coinciden aqui).
+precios_compra = [100 * (1.02 ** i) for i in range(60)]
+ib_falso_compra = _IBFalso(precios_compra)
+bot._cache_temporalidades_largas = {}
+_, decision_compra = bot.analizar_activo(ib_falso_compra, activo_prueba)
+check("analizar_activo: tendencia alcista ACELERANDO -> decision COMPRA",
+      decision_compra == "COMPRA", f"decision={decision_compra}")
+
+
+# ---------------------------------------------------------------------------
+# 6b. Atajo de las 4 cortas: control fino por temporalidad, usando un IB
+#     simulado que devuelve una serie distinta segun el barSize pedido.
+# ---------------------------------------------------------------------------
+SERIE_ALCISTA = [100 + i * 0.3 for i in range(60)]
+SERIE_BAJISTA = [100 - i * 0.3 for i in range(60)]
+# Para las temporalidades largas, "en contra" exige aceleracion BAJISTA real
+# (una simple caida lineal no basta: como se vio en el test 6, la formula
+# del histograma MACD converge de forma similar en ambas direcciones con
+# pendiente constante, asi que una caida lineal puede dar histograma
+# "creciente" igual que una subida lineal).
+SERIE_ACELERANDO_BAJA = [300 - 100 * (1.02 ** i) for i in range(60)]
+# Para las temporalidades largas, "a favor" tampoco basta con una simple
+# subida lineal (mismo motivo que arriba, en sentido contrario): hace falta
+# aceleracion ALCISTA real para que el histograma salga "creciente".
+SERIE_ACELERANDO_ALTA = [100 * (1.02 ** i) for i in range(60)]
+
+
+class _IBPorTemporalidad:
+    def __init__(self, series_por_barsize):
+        self.series_por_barsize = series_por_barsize
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 12345
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        precios = self.series_por_barsize[kwargs["barSizeSetting"]]
+        return [_Vela(p) for p in precios]
+
+    def sleep(self, segundos):
+        pass
+
+    def positions(self):
+        # Para activos CRYPTO, crear_contrato() llama a
+        # descubrir_exchange_cripto(ib), que necesita este metodo (sin
+        # posiciones previas -> usa el exchange del propio activo).
+        return []
+
+
+# Las 4 cortas alcistas y 1 hora BAJISTA, pero dia/semana ALCISTAS (sin
+# tendencia larga en contra): el atajo debe ganar y dar COMPRA, aunque con
+# la logica antigua (sin atajo) esto habria dado SIN_SENAL (cortas_ok=False
+# porque 1h esta en contra).
+series_atajo = {
+    "1 min": SERIE_ALCISTA, "5 mins": SERIE_ALCISTA, "15 mins": SERIE_ALCISTA,
+    "30 mins": SERIE_ALCISTA,
+    "1 hour": SERIE_BAJISTA, "1 day": SERIE_ACELERANDO_ALTA, "1 week": SERIE_ACELERANDO_ALTA,
+}
+bot._cache_temporalidades_largas = {}
+_, decision_atajo = bot.analizar_activo(_IBPorTemporalidad(series_atajo), activo_prueba)
+check("analizar_activo: 4 cortas alcistas + 1h bajista, dia/semana OK -> COMPRA (el atajo manda)",
+      decision_atajo == "COMPRA", f"decision={decision_atajo}")
+
+# Si SOLO una de las 4 cortas requeridas esta bajista (p.ej. 1 minuto), el
+# atajo NO debe activarse. Con el resto de temporalidades tambien bajistas,
+# la decision cae en SIN_SENAL (no BLOQUEADO, porque cortas_ok tampoco se
+# cumple al fallar 1min).
+series_sin_atajo = {
+    "1 min": SERIE_BAJISTA, "5 mins": SERIE_ALCISTA, "15 mins": SERIE_ALCISTA,
+    "30 mins": SERIE_ALCISTA,
+    "1 hour": SERIE_ALCISTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
+}
+bot._cache_temporalidades_largas = {}
+_, decision_sin_atajo = bot.analizar_activo(_IBPorTemporalidad(series_sin_atajo), activo_prueba)
+check("analizar_activo: si UNA de las 4 cortas esta bajista (y 3 de 7 en contra "
+      "en total) -> el atajo no se activa y tampoco compra por la regla vieja",
+      decision_sin_atajo == "SIN_SENAL", f"decision={decision_sin_atajo}")
+
+# --- Bug real corregido (sept. 2026, petición del usuario): antes, el
+# atajo de "4 cortas alcistas" ignoraba por completo dia/semana, asi que
+# compraba igual aunque la tendencia diaria o semanal fuera claramente
+# bajista -la peor categoria de entrada, contra la tendencia dominante-. Y
+# como el atajo se adelanta a la regla de "1 de 7 en contra", esta ultima
+# NUNCA llegaba a aplicarse en este caso exacto (con las 4 cortas alcistas,
+# lo mas habitual). Ahora el atajo TAMBIEN exige que ninguna larga este en
+# contra. ---
+series_larga_en_contra = {
+    "1 min": SERIE_ALCISTA, "5 mins": SERIE_ALCISTA, "15 mins": SERIE_ALCISTA,
+    "30 mins": SERIE_ALCISTA,
+    "1 hour": SERIE_ACELERANDO_ALTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_ALTA,
+}
+bot._cache_temporalidades_largas = {}
+_, decision_larga_en_contra = bot.analizar_activo(_IBPorTemporalidad(series_larga_en_contra), activo_prueba)
+check("analizar_activo: 4 cortas alcistas pero 'dia' bajista -> BLOQUEADO_TF_LARGA, NO compra "
+      "(antes: bug que compraba igual via el atajo de 4 cortas)",
+      decision_larga_en_contra == "BLOQUEADO_TF_LARGA", f"decision={decision_larga_en_contra}")
+
+
+# ---------------------------------------------------------------------------
+# 6c. Atajo EXCLUSIVO de cripto (1/3/10/20 min, peticion del usuario, sept.
+#     2026): independiente del atajo general (1/5/15/30 min) - debe poder
+#     dar COMPRA aunque el analisis normal de 7 temporalidades NO lo haria.
+# ---------------------------------------------------------------------------
+activo_cripto_prueba = {"ticker": "BTC", "exchange": bot.EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
+bot._exchange_cripto_cache = None
+
+# 5/15/30min, 1h, dia y semana BAJISTAS (el analisis normal daria SIN_SENAL,
+# como en el test anterior con activo_prueba), pero 1/3/10/20 min (el atajo
+# de cripto) TODAS alcistas -> debe dar COMPRA de todos modos.
+series_atajo_cripto = {
+    "1 min": SERIE_ALCISTA, "5 mins": SERIE_BAJISTA, "15 mins": SERIE_BAJISTA, "30 mins": SERIE_BAJISTA,
+    "1 hour": SERIE_BAJISTA, "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
+    "3 mins": SERIE_ALCISTA, "10 mins": SERIE_ALCISTA, "20 mins": SERIE_ALCISTA,
+}
+bot._cache_temporalidades_largas = {}
+_, decision_atajo_cripto = bot.analizar_activo(_IBPorTemporalidad(series_atajo_cripto), activo_cripto_prueba)
+check("analizar_activo CRYPTO: atajo propio (1/3/10/20 min) todas alcistas -> COMPRA, "
+      "aunque el analisis de 7 temporalidades por si solo daria SIN_SENAL",
+      decision_atajo_cripto == "COMPRA", f"decision={decision_atajo_cripto}")
+
+# Igual que arriba, pero con 10 min BAJISTA: el atajo de cripto no debe
+# activarse (hacen falta las 4), y sin el atajo general tampoco activo, la
+# decision cae en la misma SIN_SENAL de siempre.
+series_sin_atajo_cripto = dict(series_atajo_cripto, **{"10 mins": SERIE_BAJISTA})
+bot._exchange_cripto_cache = None
+bot._cache_temporalidades_largas = {}
+_, decision_sin_atajo_cripto = bot.analizar_activo(_IBPorTemporalidad(series_sin_atajo_cripto), activo_cripto_prueba)
+check("analizar_activo CRYPTO: si UNA de las 4 del atajo propio esta bajista (10 min), "
+      "no se activa -> SIN_SENAL",
+      decision_sin_atajo_cripto == "SIN_SENAL", f"decision={decision_sin_atajo_cripto}")
+
+# El atajo de cripto NUNCA se comprueba para acciones (activo_prueba, US):
+# reutiliza el mismo series_atajo_cripto (que SI tiene 3/10/20 min alcistas)
+# pero al ser mercado US no debe importar -> misma SIN_SENAL de antes.
+bot._cache_temporalidades_largas = {}
+_, decision_no_cripto = bot.analizar_activo(_IBPorTemporalidad(series_atajo_cripto), activo_prueba)
+check("analizar_activo: el atajo de 1/3/10/20 min NUNCA se aplica a acciones (mercado US)",
+      decision_no_cripto == "SIN_SENAL", f"decision={decision_no_cripto}")
+
+
+# --- atajo_cripto_alcista() aislado: reutiliza el resultado de 1 minuto en
+#     vez de pedirlo otra vez, y no llama a IBKR si ya viene None o False ---
+class _IBContadorLlamadas:
+    def __init__(self, series_por_barsize):
+        self.series_por_barsize = series_por_barsize
+        self.llamadas = []
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        self.llamadas.append(kwargs["barSizeSetting"])
+        return [_Vela(p) for p in self.series_por_barsize[kwargs["barSizeSetting"]]]
+
+
+ib_contador = _IBContadorLlamadas({})
+check("atajo_cripto_alcista: con un_minuto_alcista=None, no llama a IBKR y devuelve None",
+      bot.atajo_cripto_alcista(ib_contador, None, None) is None and ib_contador.llamadas == [],
+      f"llamadas={ib_contador.llamadas}")
+
+ib_contador_2 = _IBContadorLlamadas({})
+check("atajo_cripto_alcista: con un_minuto_alcista=False, no llama a IBKR y devuelve False",
+      bot.atajo_cripto_alcista(ib_contador_2, None, False) is False and ib_contador_2.llamadas == [],
+      f"llamadas={ib_contador_2.llamadas}")
+
+ib_todas_alcistas = _IBContadorLlamadas({"3 mins": SERIE_ALCISTA, "10 mins": SERIE_ALCISTA, "20 mins": SERIE_ALCISTA})
+check("atajo_cripto_alcista: 1min ya alcista + las otras 3 tambien -> True",
+      bot.atajo_cripto_alcista(ib_todas_alcistas, None, True) is True)
+
+ib_una_bajista = _IBContadorLlamadas({"3 mins": SERIE_ALCISTA, "10 mins": SERIE_BAJISTA, "20 mins": SERIE_ALCISTA})
+check("atajo_cripto_alcista: 1min alcista pero 10min bajista -> False",
+      bot.atajo_cripto_alcista(ib_una_bajista, None, True) is False)
+
+ib_pocos_datos_atajo = _IBContadorLlamadas({"3 mins": [100, 101], "10 mins": SERIE_ALCISTA, "20 mins": SERIE_ALCISTA})
+check("atajo_cripto_alcista: menos de 35 velas en una temporalidad -> None",
+      bot.atajo_cripto_alcista(ib_pocos_datos_atajo, None, True) is None)
+
+
+# Muy pocas velas (menos de 35) -> SIN_DATOS
+ib_falso_pocos_datos = _IBFalso([100, 101, 102])
+bot._cache_temporalidades_largas = {}
+_, decision_pocos = bot.analizar_activo(ib_falso_pocos_datos, activo_prueba)
+check("analizar_activo: menos de 35 velas -> decision SIN_DATOS",
+      decision_pocos == "SIN_DATOS", f"decision={decision_pocos}")
+
+# Serie bajista sostenida -> no deberia ser COMPRA
+precios_venta = [100 - i * 0.3 for i in range(60)]
+ib_falso_venta = _IBFalso(precios_venta)
+bot._cache_temporalidades_largas = {}
+_, decision_venta = bot.analizar_activo(ib_falso_venta, activo_prueba)
+check("analizar_activo: serie bajista sostenida -> decision distinta de COMPRA",
+      decision_venta != "COMPRA", f"decision={decision_venta}")
+
+# Simbolo no resuelto (conId vacio) -> SIMBOLO_NO_RESUELTO
+class _IBFalsoNoResuelto(_IBFalso):
+    def qualifyContracts(self, contrato):
+        contrato.conId = None
+
+
+class _ContratoSinResolver:
+    def __init__(self, *a, **k):
+        self.symbol = a[0] if a else "TEST"
+        self.conId = None
+
+
+orig_stock = bot.Stock
+bot.Stock = lambda *a, **k: _ContratoSinResolver(*a, **k)
+try:
+    bot._cache_temporalidades_largas = {}
+    _, decision_no_resuelto = bot.analizar_activo(_IBFalsoNoResuelto([]), activo_prueba)
+finally:
+    bot.Stock = orig_stock
+check("analizar_activo: conId vacio -> SIMBOLO_NO_RESUELTO",
+      decision_no_resuelto == "SIMBOLO_NO_RESUELTO", f"decision={decision_no_resuelto}")
+
+
+# ---------------------------------------------------------------------------
+# 7. pedir_velas: reintentos ante fallo, y que no reintente si hay exito
+# ---------------------------------------------------------------------------
+class _IBReintentos:
+    def __init__(self, respuestas):
+        self.respuestas = list(respuestas)
+        self.llamadas = 0
+        self.sleeps = []
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        r = self.respuestas[self.llamadas]
+        self.llamadas += 1
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def sleep(self, segundos):
+        self.sleeps.append(segundos)
+
+
+contrato_falso = _ContratoFalso("TEST")
+
+# Se resetea el cortacircuitos global de "datos de mercado caidos" antes de
+# estos tests, para que no dependa de cuantos fallos hayan quedado
+# acumulados de secciones anteriores.
+bot._fallos_seguidos_datos = 0
+bot._aviso_datos_caidos_emitido = False
+
+# Primer intento vacio, segundo intento con datos -> deberia reintentar 1 vez y devolver datos
+ib_reintento_ok = _IBReintentos([[], [_Vela(100)]])
+resultado = bot.pedir_velas(ib_reintento_ok, contrato_falso, "1 D", "1 min")
+check("pedir_velas: reintenta tras respuesta vacia y devuelve datos en el 2o intento",
+      len(resultado) == 1 and ib_reintento_ok.llamadas == 2,
+      f"llamadas={ib_reintento_ok.llamadas}, resultado={resultado}")
+
+# Todos los intentos fallan -> lista vacia, y se agotan los INTENTOS_MAXIMOS
+ib_reintento_fail = _IBReintentos([[], [], []])
+resultado_fail = bot.pedir_velas(ib_reintento_fail, contrato_falso, "1 D", "1 min")
+check("pedir_velas: agota los reintentos y devuelve lista vacia si nunca hay datos",
+      resultado_fail == [] and ib_reintento_fail.llamadas == bot.INTENTOS_MAXIMOS,
+      f"llamadas={ib_reintento_fail.llamadas}")
+
+# Primer intento exitoso -> no debe reintentar
+ib_reintento_exito_directo = _IBReintentos([[_Vela(100)], [_Vela(200)]])
+resultado_directo = bot.pedir_velas(ib_reintento_exito_directo, contrato_falso, "1 D", "1 min")
+check("pedir_velas: exito al primer intento no reintenta",
+      ib_reintento_exito_directo.llamadas == 1, f"llamadas={ib_reintento_exito_directo.llamadas}")
+
+# Excepcion en la llamada -> se trata igual que respuesta vacia (reintenta)
+ib_reintento_excepcion = _IBReintentos([RuntimeError("fallo simulado"), [_Vela(100)]])
+resultado_exc = bot.pedir_velas(ib_reintento_excepcion, contrato_falso, "1 D", "1 min")
+check("pedir_velas: una excepcion en el primer intento no aborta, reintenta y consigue datos",
+      len(resultado_exc) == 1, f"resultado={resultado_exc}")
+
+
+# ---------------------------------------------------------------------------
+# 7a-bis. whatToShow correcto segun el tipo de contrato: 'AGGTRADES' para
+#         CRYPTO (bug real de produccion, sept. 2026: con 'TRADES' -tambien
+#         usado para acciones- reqHistoricalData se quedaba colgado con
+#         TimeoutError para BTC, sin dar un error de permisos claro),
+#         'TRADES' para el resto (acciones US/HK/KR, sin cambios).
+# ---------------------------------------------------------------------------
+class _IBCapturaWhatToShow:
+    def __init__(self):
+        self.what_to_show_recibido = None
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        self.what_to_show_recibido = kwargs.get("whatToShow")
+        return [_Vela(100)]
+
+    def sleep(self, segundos):
+        pass
+
+
+class _ContratoCryptoFalso(_ContratoFalso):
+    secType = "CRYPTO"
+
+
+class _ContratoForexFalso(_ContratoFalso):
+    secType = "CASH"
+
+
+ib_captura_crypto = _IBCapturaWhatToShow()
+bot.pedir_velas(ib_captura_crypto, _ContratoCryptoFalso("BTC"), "1 D", "5 mins")
+check("pedir_velas: contrato CRYPTO pide whatToShow='AGGTRADES'",
+      ib_captura_crypto.what_to_show_recibido == "AGGTRADES",
+      f"whatToShow={ib_captura_crypto.what_to_show_recibido}")
+
+ib_captura_accion = _IBCapturaWhatToShow()
+bot.pedir_velas(ib_captura_accion, _ContratoFalso("AAPL"), "1 D", "5 mins")
+check("pedir_velas: contrato de accion (sin secType CRYPTO) sigue pidiendo whatToShow='TRADES'",
+      ib_captura_accion.what_to_show_recibido == "TRADES",
+      f"whatToShow={ib_captura_accion.what_to_show_recibido}")
+
+ib_captura_forex = _IBCapturaWhatToShow()
+bot.pedir_velas(ib_captura_forex, _ContratoForexFalso("EUR.USD"), "1 D", "5 mins")
+check("pedir_velas: contrato de forex (secType='CASH') pide whatToShow='MIDPOINT'",
+      ib_captura_forex.what_to_show_recibido == "MIDPOINT",
+      f"whatToShow={ib_captura_forex.what_to_show_recibido}")
+
+
+# ---------------------------------------------------------------------------
+# 7b. Cortacircuitos: tras muchos valores SEGUIDOS sin ningun dato (senal de
+#     que TWS/IB Gateway perdio la conexion con los market data farms), deja
+#     de reintentar 3 veces con espera de 15s por cada valor -> solo 1
+#     intento rapido. En produccion esto evito que un ciclo se quedara horas
+#     reintentando ticker a ticker con la conexion de datos caida.
+# ---------------------------------------------------------------------------
+bot._fallos_seguidos_datos = 0
+bot._aviso_datos_caidos_emitido = False
+
+# Peticion del usuario (sept. 2026: "avisame si algo falla"): el aviso del
+# cortacircuitos tambien debe mandarse por Telegram, no solo quedar en el
+# log -para enterarse sin tener que mirar el log a mano-.
+notificar_telegram_original = bot.notificar_telegram
+mensajes_telegram_cortacircuitos = []
+bot.notificar_telegram = lambda mensaje: mensajes_telegram_cortacircuitos.append(mensaje)
+
+# Simula UMBRAL_FALLOS_SEGUIDOS_DATOS valores seguidos sin ningun dato
+for i in range(bot.UMBRAL_FALLOS_SEGUIDOS_DATOS):
+    ib_fallo = _IBReintentos([[], [], []])
+    bot.pedir_velas(ib_fallo, _ContratoFalso(f"FALLO{i}"), "1 D", "1 min")
+
+check(f"cortacircuitos: tras {bot.UMBRAL_FALLOS_SEGUIDOS_DATOS} valores seguidos sin datos, se activa",
+      bot._fallos_seguidos_datos >= bot.UMBRAL_FALLOS_SEGUIDOS_DATOS,
+      f"_fallos_seguidos_datos={bot._fallos_seguidos_datos}")
+
+# Con el cortacircuitos activo, el siguiente valor solo debe intentarlo UNA
+# vez (no 3), para no perder 45s mas en un valor que probablemente tambien
+# vaya a fallar por el mismo motivo de fondo. Este es el primer valor que
+# ve disyuntor_activo=True (el contador llego al umbral al final del valor
+# anterior), asi que es aqui donde se manda el aviso por Telegram.
+ib_siguiente_fallo = _IBReintentos([[], [], []])
+bot.pedir_velas(ib_siguiente_fallo, _ContratoFalso("SIGUIENTE"), "1 D", "1 min")
+check("cortacircuitos activo: solo hace 1 intento (no 3) en el siguiente valor",
+      ib_siguiente_fallo.llamadas == 1, f"llamadas={ib_siguiente_fallo.llamadas}")
+check("cortacircuitos: manda EXACTAMENTE un aviso por Telegram al activarse (no uno por cada valor)",
+      len(mensajes_telegram_cortacircuitos) == 1, f"mensajes={mensajes_telegram_cortacircuitos}")
+
+# En cuanto un valor SI trae datos, el cortacircuitos se desactiva, avisa
+# de la recuperacion por Telegram, y vuelve a reintentar normalmente (3
+# intentos) en el siguiente que falle.
+mensajes_telegram_cortacircuitos.clear()
+ib_recupera = _IBReintentos([[_Vela(100)]])
+bot.pedir_velas(ib_recupera, _ContratoFalso("RECUPERA"), "1 D", "1 min")
+check("cortacircuitos: se desactiva en cuanto un valor trae datos",
+      bot._fallos_seguidos_datos == 0, f"_fallos_seguidos_datos={bot._fallos_seguidos_datos}")
+check("cortacircuitos: avisa por Telegram de la recuperacion",
+      len(mensajes_telegram_cortacircuitos) == 1, f"mensajes={mensajes_telegram_cortacircuitos}")
+
+ib_tras_recuperar = _IBReintentos([[], [], []])
+bot.pedir_velas(ib_tras_recuperar, _ContratoFalso("TRAS_RECUPERAR"), "1 D", "1 min")
+check("tras recuperarse, vuelve a hacer los 3 intentos normales",
+      ib_tras_recuperar.llamadas == bot.INTENTOS_MAXIMOS, f"llamadas={ib_tras_recuperar.llamadas}")
+
+bot.notificar_telegram = notificar_telegram_original
+
+# Se resetea para no afectar a los tests siguientes.
+bot._fallos_seguidos_datos = 0
+bot._aviso_datos_caidos_emitido = False
+
+
+# ---------------------------------------------------------------------------
+# 8. Robustez de revisar_ventas: una posicion que provoca un error
+#    (coste_medio = 0 -> division por cero) NO debe impedir procesar las
+#    demas posiciones ni lanzar una excepcion hacia fuera.
+# ---------------------------------------------------------------------------
+class _Contrato:
+    def __init__(self, symbol, currency="USD"):
+        self.symbol = symbol
+        self.currency = currency
+
+
+class _Posicion:
+    def __init__(self, symbol, position, avgCost, currency="USD"):
+        self.contract = _Contrato(symbol, currency)
+        self.position = position
+        self.avgCost = avgCost
+
+
+class _IBFalsoVentas:
+    """positions() devuelve una posicion con avgCost=0 (provocaria division
+    por cero) seguida de una posicion normal en perdidas (no debe venderse,
+    pero debe LLEGAR a procesarse: si el bug existiera, esta segunda
+    posicion nunca se procesaria)."""
+
+    def __init__(self):
+        self.ordenes_colocadas = []
+        self._posiciones = [
+            _Posicion("BUGGY", 10, 0),          # avgCost=0 -> antes rompia el ciclo entero
+            _Posicion("NORMAL", 5, 100),         # posicion normal, sin beneficio suficiente
+        ]
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        # Precio actual = igual al coste medio -> sin beneficio, no debe vender
+        return [_Vela(100)]
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append((contrato.symbol, orden))
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Submitted"), isDone=lambda: True)
+
+
+ib_falso_ventas = _IBFalsoVentas()
+excepcion_lanzada = None
+es_horario_original_ventas = bot.es_horario_operativo
+bot.es_horario_operativo = lambda mercado: True  # forzar "mercado abierto" durante este test
+try:
+    bot.revisar_ventas(ib_falso_ventas)
+except Exception as e:
+    excepcion_lanzada = e
+finally:
+    bot.es_horario_operativo = es_horario_original_ventas
+
+check("revisar_ventas: una posicion con avgCost=0 no lanza excepcion hacia fuera",
+      excepcion_lanzada is None, f"excepcion={excepcion_lanzada}")
+check("revisar_ventas: no coloca ninguna orden (ninguna posicion cumple venta)",
+      ib_falso_ventas.ordenes_colocadas == [], f"ordenes={ib_falso_ventas.ordenes_colocadas}")
+
+
+# ---------------------------------------------------------------------------
+# 8b. revisar_ventas: si el mercado de una posicion esta CERRADO, no debe
+#     intentar vender aunque el beneficio y el MACD digan que tocaria
+#     vender (esto es exactamente el bug real detectado en produccion con
+#     Hong Kong: se intentaba vender fuera de horario y IBKR cancelaba la
+#     orden, pero el bot lo registraba como si hubiera ido bien).
+# ---------------------------------------------------------------------------
+class _IBFalsoVentasMercadoCerrado(_IBFalsoVentas):
+    def __init__(self):
+        self.ordenes_colocadas = []
+        self._posiciones = [
+            _Posicion("2259", 1400, 100, currency="HKD"),  # con MACD bajista y beneficio alto, "venderia"
+        ]
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(120)]  # +20% de beneficio bruto: cumpliria de sobra el umbral de venta
+
+
+ib_falso_cerrado = _IBFalsoVentasMercadoCerrado()
+bot.es_horario_operativo = lambda mercado: False  # todos los mercados "cerrados"
+try:
+    bot.revisar_ventas(ib_falso_cerrado)
+finally:
+    bot.es_horario_operativo = es_horario_original_ventas
+
+check("revisar_ventas: con el mercado CERRADO, no coloca ninguna orden aunque tocaria vender",
+      ib_falso_cerrado.ordenes_colocadas == [], f"ordenes={ib_falso_cerrado.ordenes_colocadas}")
+
+
+# ---------------------------------------------------------------------------
+# 9. Robustez de revisar_compras: un valor cuya senal de COMPRA revienta al
+#    calcular el precio (ej. fallo de red al pedir la cotizacion) NO debe
+#    impedir que se analice y, si toca, se compre el SIGUIENTE valor de la
+#    lista. Antes del arreglo, una excepcion aqui abortaba el resto del
+#    escaneo completo (US+HK+KR) para ese ciclo.
+# ---------------------------------------------------------------------------
+bot._fallos_seguidos_datos = 0
+bot._aviso_datos_caidos_emitido = False
+
+
+class _IBFalsoCompras:
+    def __init__(self):
+        self.ordenes_colocadas = []
+
+    def accountSummary(self):
+        return [types.SimpleNamespace(tag='NetLiquidation', currency='USD', value='10000')]
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return []
+
+    def sleep(self, segundos):
+        pass
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 999
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        if contrato.symbol == "BAD":
+            raise RuntimeError("fallo de red simulado al pedir precio")
+        # BUENO: serie acelerando -> señal de COMPRA en analizar_activo,
+        # y tambien sirve como precio actual (~ultimo valor de la serie)
+        return [_Vela(100 * (1.02 ** i)) for i in range(60)]
+
+    def reqContractDetails(self, contrato):
+        return [types.SimpleNamespace(minSize=1, sizeIncrement=1)]
+
+    def placeOrder(self, contrato, orden):
+        if contrato.symbol == "CRASH":
+            # Simula un fallo al colocar la orden (p.ej. corte de red justo
+            # en ese instante), DESPUES de que ya se decidio comprar.
+            raise RuntimeError("fallo de red simulado al colocar la orden")
+        self.ordenes_colocadas.append(contrato.symbol)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Submitted"), isDone=lambda: True)
+
+
+activos_prueba_compras = [
+    {"ticker": "BAD",    "exchange": "SMART", "currency": "USD", "mercado": "US"},
+    {"ticker": "CRASH",  "exchange": "SMART", "currency": "USD", "mercado": "US"},
+    {"ticker": "GOOD",   "exchange": "SMART", "currency": "USD", "mercado": "US"},
+]
+
+activos_originales = bot.ACTIVOS
+es_horario_original = bot.es_horario_operativo
+en_ventana_sin_compra_original = bot.en_ventana_sin_compra
+en_postmercado_us_original = bot.en_postmercado_us
+bot.ACTIVOS = activos_prueba_compras
+bot.es_horario_operativo = lambda mercado: True  # forzar "mercado abierto" durante el test
+# En_ventana_sin_compra y en_postmercado_us dependen de la hora REAL
+# respecto al cierre real del mercado; se fuerzan a False para que el test
+# no dependa de a que hora del dia se ejecute (evita falsos negativos si
+# por casualidad se corre dentro de los ultimos 90 min reales antes del
+# cierre de US, o dentro del postmercado real 16:00-20:00 ET).
+bot.en_ventana_sin_compra = lambda mercado: False
+bot.en_postmercado_us = lambda: False
+
+ib_falso_compras = _IBFalsoCompras()
+excepcion_compras = None
+try:
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_falso_compras)
+except Exception as e:
+    excepcion_compras = e
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+    bot.en_postmercado_us = en_postmercado_us_original
+
+check("revisar_compras: un valor que falla al pedir precio no lanza excepcion hacia fuera",
+      excepcion_compras is None, f"excepcion={excepcion_compras}")
+check("revisar_compras: un fallo al COLOCAR LA ORDEN de un valor no aborta el resto del escaneo",
+      "CRASH" not in ib_falso_compras.ordenes_colocadas,
+      f"ordenes_colocadas={ib_falso_compras.ordenes_colocadas}")
+check("revisar_compras: el valor que viene DESPUES del que falla si se llega a comprar",
+      "GOOD" in ib_falso_compras.ordenes_colocadas,
+      f"ordenes_colocadas={ib_falso_compras.ordenes_colocadas}")
+
+
+# ---------------------------------------------------------------------------
+# 10. Ordenes fraccionarias: deben usar cashQty (importe en efectivo) y
+#     totalQuantity=0, NUNCA una cantidad de acciones fraccionaria directa.
+#     Bug real en produccion: IBKR rechazaba (error 10243) toda orden con
+#     totalQuantity fraccionario enviada por API; cashQty es la unica forma
+#     valida de comprar/vender una fraccion de accion via API.
+# ---------------------------------------------------------------------------
+orden_compra_frac = bot.crear_orden_mercado_cash('BUY', 1234.56)
+check("crear_orden_mercado_cash: totalQuantity=0 (nunca fraccionario)",
+      orden_compra_frac.totalQuantity == 0, f"totalQuantity={orden_compra_frac.totalQuantity}")
+check("crear_orden_mercado_cash: cashQty = importe solicitado",
+      abs(orden_compra_frac.cashQty - 1234.56) < 1e-9, f"cashQty={orden_compra_frac.cashQty}")
+
+orden_venta_frac = bot.crear_orden_limitada_cash('SELL', 987.65, 100.0)
+check("crear_orden_limitada_cash: totalQuantity=0 (nunca fraccionario)",
+      orden_venta_frac.totalQuantity == 0, f"totalQuantity={orden_venta_frac.totalQuantity}")
+check("crear_orden_limitada_cash: cashQty = importe solicitado",
+      abs(orden_venta_frac.cashQty - 987.65) < 1e-9, f"cashQty={orden_venta_frac.cashQty}")
+
+check("es_cantidad_fraccionaria: 3.544 es fraccionaria", bot.es_cantidad_fraccionaria(3.544) is True)
+check("es_cantidad_fraccionaria: 5 (entero) no es fraccionaria", bot.es_cantidad_fraccionaria(5) is False)
+check("es_cantidad_fraccionaria: 5.0 (float entero) no es fraccionaria", bot.es_cantidad_fraccionaria(5.0) is False)
+
+
+# ---------------------------------------------------------------------------
+# 10b. revisar_compras (mercado fraccionable): la orden colocada debe llevar
+#     cashQty, no una cantidad de acciones fraccionaria en totalQuantity.
+# ---------------------------------------------------------------------------
+class _IBFalsoComprasFraccionarias(_IBFalsoCompras):
+    def __init__(self):
+        super().__init__()
+        self.ordenes_objeto = []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_objeto.append(orden)
+        return super().placeOrder(contrato, orden)
+
+
+bot.ACTIVOS = [{"ticker": "GOOD", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+ib_falso_frac = _IBFalsoComprasFraccionarias()
+try:
+    # Anclado a sesion regular (10:00 ET): fuera de sesion regular las
+    # fracciones se saltan por completo (fracciones_no_disponibles), lo que
+    # rompe este test si se ejecuta con el reloj real en pre/postmercado.
+    con_reloj_fijo(miercoles_us_abierto, bot.revisar_compras, ib_falso_frac)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("revisar_compras: la orden real colocada en US usa cashQty, no totalQuantity fraccionario",
+      len(ib_falso_frac.ordenes_objeto) == 1
+      and ib_falso_frac.ordenes_objeto[0].totalQuantity == 0
+      and ib_falso_frac.ordenes_objeto[0].cashQty > 0,
+      f"ordenes={[(o.totalQuantity, o.cashQty) for o in ib_falso_frac.ordenes_objeto]}")
+
+
+# ---------------------------------------------------------------------------
+# 11. Historial persistente de fecha de compra inicial, y verificacion de
+#     posicion real tras una orden que no confirma 'Filled'. Se usa un
+#     archivo temporal para no tocar (ni depender de) el historial real del
+#     usuario en su maquina.
+# ---------------------------------------------------------------------------
+import tempfile
+
+archivo_historial_original = bot.ARCHIVO_HISTORIAL_COMPRAS
+directorio_temp = tempfile.mkdtemp()
+bot.ARCHIVO_HISTORIAL_COMPRAS = os.path.join(directorio_temp, "historial_compras_test.json")
+
+try:
+    # cargar_historial_compras sobre un archivo que no existe -> diccionario vacio
+    check("cargar_historial_compras: archivo inexistente -> {}", bot.cargar_historial_compras() == {})
+
+    # registrar + recuperar
+    check("obtener_apertura_registrada: sin registro previo -> None",
+          bot.obtener_apertura_registrada("US", "ZZZ") is None)
+    bot.registrar_apertura_de_posicion("US", "ZZZ")
+    apertura = bot.obtener_apertura_registrada("US", "ZZZ")
+    check("registrar_apertura_de_posicion + obtener_apertura_registrada: recupera un datetime valido",
+          apertura is not None and (datetime.now() - apertura).total_seconds() < 60,
+          f"apertura={apertura}")
+
+    # una compra adicional (promediar a la baja) NO debe machacar la fecha original
+    fecha_original = apertura
+    import time as _time
+    _time.sleep(0.01)
+    # Simulamos que revisar_compras solo registra si cantidad_antes_compra <= 1e-6;
+    # aqui comprobamos directamente la funcion de bajo nivel: si NO se vuelve a
+    # llamar a registrar_apertura_de_posicion (porque ya habia posicion), la
+    # fecha debe seguir siendo la misma.
+    apertura_tras_no_tocar = bot.obtener_apertura_registrada("US", "ZZZ")
+    check("obtener_apertura_registrada: la fecha no cambia si no se vuelve a registrar",
+          apertura_tras_no_tocar == fecha_original)
+
+    # obtener_cantidad_posicion_real / verificar_posicion_tras_orden_no_confirmada
+    class _IBFalsoPosicionReal:
+        def __init__(self, cantidad_tras_consulta):
+            self.cantidad_tras_consulta = cantidad_tras_consulta
+
+        def reqPositions(self):
+            pass
+
+        def positions(self):
+            if self.cantidad_tras_consulta <= 0:
+                return []
+            return [_Posicion("ZZZ", self.cantidad_tras_consulta, 100, currency="USD")]
+
+        def sleep(self, segundos):
+            pass
+
+    contrato_zzz = _ContratoFalso("ZZZ")
+    contrato_zzz.currency = "USD"
+
+    # Caso: la posicion SI cambio de verdad (p.ej. compra que en realidad se
+    # ejecuto pese al estado no confirmado)
+    ib_pos_cambio = _IBFalsoPosicionReal(cantidad_tras_consulta=10)
+    cantidad_verificada = bot.verificar_posicion_tras_orden_no_confirmada(
+        ib_pos_cambio, contrato_zzz, cantidad_antes=0, prefijo_log="TEST")
+    check("verificar_posicion_tras_orden_no_confirmada: detecta que la posicion SI cambio",
+          cantidad_verificada == 10, f"cantidad_verificada={cantidad_verificada}")
+
+    # Caso: la posicion NO cambio (la orden de verdad no se ejecuto)
+    ib_pos_sin_cambio = _IBFalsoPosicionReal(cantidad_tras_consulta=0)
+    cantidad_verificada_2 = bot.verificar_posicion_tras_orden_no_confirmada(
+        ib_pos_sin_cambio, contrato_zzz, cantidad_antes=0, prefijo_log="TEST")
+    check("verificar_posicion_tras_orden_no_confirmada: detecta que la posicion NO cambio",
+          cantidad_verificada_2 == 0, f"cantidad_verificada_2={cantidad_verificada_2}")
+
+    # --- BUG REAL DE PRODUCCION (sept. 2026, caso real: venta de SMCI
+    # confirmada por la propia app de IBKR, pero /hoy seguia mostrando "0
+    # ventas"): cuando una orden de VENTA no confirmaba 'Filled' pero la
+    # posicion SI habia bajado de verdad, no se registraba en el historial
+    # ni se avisaba por Telegram -a diferencia de las COMPRAS, que ya
+    # tenian este tratamiento-. _registrar_venta_a_posteriori() iguala el
+    # mismo tratamiento. ---
+    telegram_capturados = []
+    notificar_telegram_original = bot.notificar_telegram
+    bot.notificar_telegram = lambda msg: telegram_capturados.append(msg)
+    try:
+        # Venta TOTAL detectada a posteriori (posicion quedo en 0).
+        bot._maximo_beneficio_neto_por_posicion = {"US:ZZZ": 2.0}
+        bot._scale_out_realizado = {"US:ZZZ"}
+        bot._registrar_venta_a_posteriori("US", contrato_zzz, cantidad_antes=1.0, cantidad_ahora=0.0,
+                                           precio_actual=41.15, comision_total=1.0, coste_medio=38.0,
+                                           beneficio_pct=8.0, etiqueta_accion="VENTA",
+                                           clave_posicion="US:ZZZ")
+        operaciones = bot.cargar_historial_operaciones()
+        ventas_zzz = [o for o in operaciones if o["ticker"] == "ZZZ" and o["lado"] == "VENTA"]
+        check("_registrar_venta_a_posteriori: registra la venta en el historial aunque el estado "
+              "de la orden no confirmara 'Filled'",
+              len(ventas_zzz) == 1 and abs(ventas_zzz[0]["cantidad"] - 1.0) < 1e-9,
+              f"ventas_zzz={ventas_zzz}")
+        check("_registrar_venta_a_posteriori: SI avisa por Telegram (antes se quedaba muda)",
+              len(telegram_capturados) == 1 and "ZZZ" in telegram_capturados[0],
+              f"telegram_capturados={telegram_capturados}")
+        check("_registrar_venta_a_posteriori: venta TOTAL (posicion a 0) -> olvida el seguimiento del trailing",
+              "US:ZZZ" not in bot._maximo_beneficio_neto_por_posicion,
+              f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+        # Venta PARCIAL detectada a posteriori (queda posicion corriendo):
+        # NO debe olvidar el seguimiento.
+        telegram_capturados.clear()
+        bot._maximo_beneficio_neto_por_posicion = {"US:YYY": 2.0}
+        bot._scale_out_realizado = set()
+        contrato_yyy = _ContratoFalso("YYY")
+        contrato_yyy.currency = "USD"
+        bot._registrar_venta_a_posteriori("US", contrato_yyy, cantidad_antes=10.0, cantidad_ahora=5.0,
+                                           precio_actual=50.0, comision_total=1.0, coste_medio=45.0,
+                                           beneficio_pct=2.0, etiqueta_accion="VENTA PARCIAL",
+                                           clave_posicion="US:YYY")
+        operaciones = bot.cargar_historial_operaciones()
+        ventas_yyy = [o for o in operaciones if o["ticker"] == "YYY" and o["lado"] == "VENTA"]
+        check("_registrar_venta_a_posteriori: venta PARCIAL registra solo la cantidad realmente vendida (5, no 10)",
+              len(ventas_yyy) == 1 and abs(ventas_yyy[0]["cantidad"] - 5.0) < 1e-9,
+              f"ventas_yyy={ventas_yyy}")
+        check("_registrar_venta_a_posteriori: venta PARCIAL (queda posicion) -> SIGUE trackeando el maximo",
+              "US:YYY" in bot._maximo_beneficio_neto_por_posicion,
+              f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+        # Si la posicion no cambio en absoluto, no debe registrar nada.
+        telegram_capturados.clear()
+        operaciones_antes = len(bot.cargar_historial_operaciones())
+        bot._registrar_venta_a_posteriori("US", contrato_zzz, cantidad_antes=1.0, cantidad_ahora=1.0,
+                                           precio_actual=41.15, comision_total=1.0, coste_medio=38.0,
+                                           beneficio_pct=8.0, etiqueta_accion="VENTA",
+                                           clave_posicion="US:ZZZ")
+        check("_registrar_venta_a_posteriori: si la posicion no cambio, NO registra nada ni avisa",
+              len(bot.cargar_historial_operaciones()) == operaciones_antes and telegram_capturados == [],
+              f"telegram_capturados={telegram_capturados}")
+    finally:
+        bot.notificar_telegram = notificar_telegram_original
+        bot._maximo_beneficio_neto_por_posicion = {}
+        bot._scale_out_realizado = set()
+
+    # --- Extremo a extremo: revisar_compras registra la apertura cuando la
+    #     compra se confirma Filled y era una posicion nueva desde cero ---
+    class _IBFalsoCompraFilled:
+        def accountSummary(self):
+            return [types.SimpleNamespace(tag='NetLiquidation', currency='USD', value='10000')]
+
+        def reqPositions(self):
+            pass
+
+        def positions(self):
+            return []
+
+        def sleep(self, segundos):
+            pass
+
+        def qualifyContracts(self, contrato):
+            contrato.conId = 999
+
+        def reqHistoricalData(self, contrato, **kwargs):
+            return [_Vela(100 * (1.02 ** i)) for i in range(60)]
+
+        def reqContractDetails(self, contrato):
+            return [types.SimpleNamespace(minSize=1, sizeIncrement=1)]
+
+        def placeOrder(self, contrato, orden):
+            return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"), isDone=lambda: True)
+
+    bot.ACTIVOS = [{"ticker": "NUEVA", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+    bot.es_horario_operativo = lambda mercado: True
+    bot.en_ventana_sin_compra = lambda mercado: False
+    bot.en_postmercado_us = lambda: False
+    check("obtener_apertura_registrada: NUEVA sin registro previo -> None",
+          bot.obtener_apertura_registrada("US", "NUEVA") is None)
+    try:
+        bot._cache_temporalidades_largas = {}
+        bot.revisar_compras(_IBFalsoCompraFilled())
+    finally:
+        bot.ACTIVOS = activos_originales
+        bot.es_horario_operativo = es_horario_original
+        bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+        bot.en_postmercado_us = en_postmercado_us_original
+
+    check("revisar_compras: una compra Filled de una posicion nueva SI registra la apertura",
+          bot.obtener_apertura_registrada("US", "NUEVA") is not None)
+finally:
+    bot.ARCHIVO_HISTORIAL_COMPRAS = archivo_historial_original
+
+
+# ---------------------------------------------------------------------------
+# 12. obtener_modo_cuenta: detecta cuenta DEMO (prefijo 'DU', convencion de
+#     IBKR) vs REAL vs mixta vs desconocida.
+# ---------------------------------------------------------------------------
+class _IBFalsoCuentas:
+    def __init__(self, cuentas):
+        self.cuentas = cuentas
+
+    def managedAccounts(self):
+        return self.cuentas
+
+
+es_demo, texto = bot.obtener_modo_cuenta(_IBFalsoCuentas(["DU1234567"]))
+check("obtener_modo_cuenta: cuenta DU... -> demo (True)", es_demo is True, f"texto={texto}")
+
+es_demo, texto = bot.obtener_modo_cuenta(_IBFalsoCuentas(["U1234567"]))
+check("obtener_modo_cuenta: cuenta U... (sin DU) -> real (False)", es_demo is False, f"texto={texto}")
+
+es_demo, texto = bot.obtener_modo_cuenta(_IBFalsoCuentas(["DU1111111", "U2222222"]))
+check("obtener_modo_cuenta: mezcla de demo y real -> None (ambiguo)", es_demo is None, f"texto={texto}")
+
+es_demo, texto = bot.obtener_modo_cuenta(_IBFalsoCuentas([]))
+check("obtener_modo_cuenta: sin cuentas -> None (desconocido)", es_demo is None, f"texto={texto}")
+
+
+# ---------------------------------------------------------------------------
+# 13. orden_rechazada_por_codigo + vigilante de congelacion (solo las
+#     piezas que se pueden probar sin arrancar el hilo real, que llamaria a
+#     os._exit y mataria el propio proceso de tests).
+# ---------------------------------------------------------------------------
+class _TradeLogFalso:
+    def __init__(self, errorCode):
+        self.errorCode = errorCode
+
+
+class _TradeFalso:
+    def __init__(self, codigos_error):
+        self.log = [_TradeLogFalso(c) for c in codigos_error]
+
+
+check("orden_rechazada_por_codigo: detecta el codigo 10244 presente",
+      bot.orden_rechazada_por_codigo(_TradeFalso([10349, 10244]), {10244}) is True)
+check("orden_rechazada_por_codigo: False si el codigo no esta",
+      bot.orden_rechazada_por_codigo(_TradeFalso([10349]), {10244}) is False)
+check("orden_rechazada_por_codigo: False con trade.log vacio",
+      bot.orden_rechazada_por_codigo(_TradeFalso([]), {10244}) is False)
+
+# actualizar_latido / log() mantienen viva la señal que vigila el hilo de
+# congelacion (sin arrancar el hilo en si). ARCHIVO_LATIDO/ARCHIVO_PID ya
+# estan redirigidos a una carpeta temporal desde el principio del archivo,
+# para no dejar "latido_bot.txt" ni "bot.pid" tirados en el repo.
+bot._ultimo_latido = 0.0
+bot._ultimo_latido_archivo = 0.0
+bot.actualizar_latido()
+check("actualizar_latido: refresca _ultimo_latido a un valor reciente",
+      bot._ultimo_latido > 0.0)
+check("actualizar_latido: escribe el archivo de latido en disco",
+      os.path.isfile(bot.ARCHIVO_LATIDO))
+
+bot._ultimo_latido = 0.0
+bot.log("mensaje de prueba, no deberia aparecer como fallo")
+check("log(): tambien refresca _ultimo_latido (cada log es una señal de vida)",
+      bot._ultimo_latido > 0.0)
+
+# escribir_pid: guarda el PID del proceso, para que el vigilante externo
+# (vigilante_externo.ps1) sepa que proceso matar si detecta congelacion.
+bot.escribir_pid()
+check("escribir_pid: escribe el PID del proceso actual en el archivo",
+      os.path.isfile(bot.ARCHIVO_PID) and open(bot.ARCHIVO_PID).read().strip() == str(os.getpid()))
+
+
+# ---------------------------------------------------------------------------
+# 14. Plan B ante el error 10244 (valor sin fracciones habilitadas via API):
+#     debe reintentar con acciones ENTERAS en vez de rendirse.
+# ---------------------------------------------------------------------------
+class _IBFalsoRechazoCashQty(_IBFalsoCompras):
+    """cashQty (Plan A) se rechaza con 10244, pero la cantidad fraccionaria
+    puesta DIRECTAMENTE (Plan B) SI se ejecuta -caso confirmado a mano en
+    cuenta real (compra de PFE): la cuenta admite fracciones de verdad, solo
+    rechaza el mecanismo cashQty."""
+
+    def __init__(self):
+        super().__init__()
+        self.ordenes_objeto = []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_objeto.append(orden)
+        if orden.totalQuantity == 0:
+            trade = types.SimpleNamespace(
+                orderStatus=types.SimpleNamespace(status="Cancelled"),
+                isDone=lambda: True,
+                log=[_TradeLogFalso(10244)],
+            )
+            return trade
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
+                                      isDone=lambda: True, log=[])
+
+
+bot.ACTIVOS = [{"ticker": "SINFRACCION", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+ib_falso_cashqty = _IBFalsoRechazoCashQty()
+try:
+    con_reloj_fijo(miercoles_us_abierto, bot.revisar_compras, ib_falso_cashqty)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("Plan B error 10244: se intentaron 2 ordenes (cashQty rechazada + cantidad fraccionaria directa)",
+      len(ib_falso_cashqty.ordenes_objeto) == 2,
+      f"ordenes={[(o.totalQuantity, getattr(o, 'cashQty', None)) for o in ib_falso_cashqty.ordenes_objeto]}")
+check("Plan B error 10244: la primera orden fue por cashQty (totalQuantity=0)",
+      len(ib_falso_cashqty.ordenes_objeto) == 2 and ib_falso_cashqty.ordenes_objeto[0].totalQuantity == 0)
+check("Plan B error 10244: la segunda orden fue la cantidad fraccionaria ORIGINAL puesta directamente "
+      "(no redondeada a entero)",
+      len(ib_falso_cashqty.ordenes_objeto) == 2
+      and bot.es_cantidad_fraccionaria(ib_falso_cashqty.ordenes_objeto[1].totalQuantity),
+      f"totalQuantity={ib_falso_cashqty.ordenes_objeto[1].totalQuantity if len(ib_falso_cashqty.ordenes_objeto) == 2 else 'N/A'}")
+
+
+class _IBFalsoRechazoTotal(_IBFalsoCompras):
+    """Ni cashQty (Plan A) ni la cantidad fraccionaria directa (Plan B)
+    funcionan (10244 y 10243 respectivamente); solo el fallback final a
+    acciones ENTERAS (Plan C) se ejecuta."""
+
+    def __init__(self):
+        super().__init__()
+        self.ordenes_objeto = []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_objeto.append(orden)
+        if orden.totalQuantity == 0:
+            return types.SimpleNamespace(
+                orderStatus=types.SimpleNamespace(status="Cancelled"),
+                isDone=lambda: True,
+                log=[_TradeLogFalso(10244)],
+            )
+        if bot.es_cantidad_fraccionaria(orden.totalQuantity):
+            return types.SimpleNamespace(
+                orderStatus=types.SimpleNamespace(status="Cancelled"),
+                isDone=lambda: True,
+                log=[_TradeLogFalso(10243)],
+            )
+        # La orden de acciones ENTERAS (Plan C, el ultimo recurso) SI se ejecuta
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
+                                      isDone=lambda: True, log=[])
+
+
+bot.ACTIVOS = [{"ticker": "SINFRACCION", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+ib_falso_total = _IBFalsoRechazoTotal()
+try:
+    con_reloj_fijo(miercoles_us_abierto, bot.revisar_compras, ib_falso_total)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("Plan C error 10243+10244: se intentaron las 3 ordenes (cashQty, fraccion directa, acciones enteras)",
+      len(ib_falso_total.ordenes_objeto) == 3,
+      f"ordenes={[(o.totalQuantity, getattr(o, 'cashQty', None)) for o in ib_falso_total.ordenes_objeto]}")
+check("Plan C error 10243+10244: la ultima orden (fallback final) fue por acciones ENTERAS",
+      len(ib_falso_total.ordenes_objeto) == 3
+      and ib_falso_total.ordenes_objeto[2].totalQuantity >= 1
+      and not bot.es_cantidad_fraccionaria(ib_falso_total.ordenes_objeto[2].totalQuantity),
+      f"totalQuantity={ib_falso_total.ordenes_objeto[2].totalQuantity if len(ib_falso_total.ordenes_objeto) == 3 else 'N/A'}")
+
+
+# ---------------------------------------------------------------------------
+# 15. generar_resumen_cierre_mercado: caso real de produccion visto con QCOM
+#     -> el historial persistente guardaba la apertura de una compra
+#     POSTERIOR a la venta que se estaba resumiendo (el valor se volvio a
+#     comprar el mismo dia despues de cerrar esta ronda), asi que la tabla
+#     mostraba "Abierta desde" con una hora DESPUES de "Cerrada a las". Debe
+#     preferir la compra calculada de reqExecutions() (anterior a la venta)
+#     en vez de la fecha registrada. Tambien se comprueba que aparecen los
+#     totales en USD/EUR pedidos.
+# ---------------------------------------------------------------------------
+import contextlib
+import io
+
+
+class _EjecucionFalsa:
+    def __init__(self, side, time, shares, avgPrice, symbol, currency="USD"):
+        self.contract = _Contrato(symbol, currency)
+        self.execution = types.SimpleNamespace(side=side, time=time, shares=shares, avgPrice=avgPrice)
+
+
+class _IBFalsoResumen:
+    def __init__(self, ejecuciones):
+        self._ejecuciones = ejecuciones
+
+    def positions(self):
+        return []
+
+    def reqExecutions(self, filtro):
+        return self._ejecuciones
+
+
+_hoy_resumen = datetime.now()
+_compra_1 = _hoy_resumen.replace(hour=13, minute=0, second=0, microsecond=0)
+_venta = _hoy_resumen.replace(hour=15, minute=0, second=0, microsecond=0)
+_compra_2_posterior = _hoy_resumen.replace(hour=17, minute=0, second=0, microsecond=0)
+
+ejecuciones_qcom = [
+    _EjecucionFalsa("BOT", _compra_1, 10, 100.0, "QCOM"),
+    _EjecucionFalsa("SLD", _venta, 10, 110.0, "QCOM"),
+    _EjecucionFalsa("BOT", _compra_2_posterior, 5, 120.0, "QCOM"),  # ronda NUEVA, tras la venta
+]
+
+archivo_historial_original_resumen = bot.ARCHIVO_HISTORIAL_COMPRAS
+directorio_temp_resumen = tempfile.mkdtemp()
+bot.ARCHIVO_HISTORIAL_COMPRAS = os.path.join(directorio_temp_resumen, "historial_resumen_test.json")
+# El historial registra la apertura de la ronda ACTUAL (la compra de las
+# 17:00), que es posterior a la venta de las 15:00 que se esta resumiendo.
+bot.guardar_historial_compras({bot.clave_historial("US", "QCOM"): _compra_2_posterior.isoformat(timespec="seconds")})
+
+salida_resumen = io.StringIO()
+try:
+    with contextlib.redirect_stdout(salida_resumen):
+        bot.generar_resumen_cierre_mercado(_IBFalsoResumen(ejecuciones_qcom), "US")
+finally:
+    bot.ARCHIVO_HISTORIAL_COMPRAS = archivo_historial_original_resumen
+
+texto_resumen = salida_resumen.getvalue()
+linea_qcom = next((l for l in texto_resumen.splitlines() if l.strip().startswith("QCOM") or "QCOM" in l), "")
+
+check("resumen cierre: la fila de QCOM usa la compra de las 13:00 (previa a la venta), no la de las 17:00",
+      "13:00" in linea_qcom and "17:00" not in linea_qcom,
+      f"linea={linea_qcom!r}")
+check("resumen cierre: la fila de QCOM muestra la venta de las 15:00",
+      "15:00" in linea_qcom, f"linea={linea_qcom!r}")
+check("resumen cierre: aparece el total de ganancia del dia en USD y EUR",
+      "TOTAL ganancia hoy (US)" in texto_resumen and "USD" in texto_resumen and "EUR" in texto_resumen,
+      f"salida={texto_resumen!r}")
+check("resumen cierre: el total invertido de posiciones abiertas sigue mostrando USD y EUR (sin posiciones abiertas aqui, no debe fallar)",
+      "ERROR" not in texto_resumen and "Traceback" not in texto_resumen)
+
+
+# ---------------------------------------------------------------------------
+# 15b. generar_resumen_cierre_mercado: el resumen diario por Telegram SOLO
+#      se manda para CRYPTO (US/HK/KR ya se consultan a demanda desde
+#      telegram_bot_ibkr.py con /cartera, /hoy, etc.)
+# ---------------------------------------------------------------------------
+class _ContratoCriptoParaResumen:
+    def __init__(self, symbol, currency="USD"):
+        self.symbol = symbol
+        self.currency = currency
+        self.secType = "CRYPTO"
+
+
+class _EjecucionFalsaCripto:
+    def __init__(self, side, time, shares, avgPrice, symbol):
+        self.contract = _ContratoCriptoParaResumen(symbol)
+        self.execution = types.SimpleNamespace(side=side, time=time, shares=shares, avgPrice=avgPrice)
+
+
+mensajes_telegram_resumen = []
+notificar_telegram_original = bot.notificar_telegram
+bot.notificar_telegram = lambda mensaje: mensajes_telegram_resumen.append(mensaje)
+
+try:
+    # Mercado US: mismas ejecuciones de QCOM de antes, pero NO debe disparar
+    # ningun mensaje de Telegram.
+    with contextlib.redirect_stdout(io.StringIO()):
+        bot.generar_resumen_cierre_mercado(_IBFalsoResumen(ejecuciones_qcom), "US")
+    check("resumen cierre US: NO manda nada a Telegram",
+          len(mensajes_telegram_resumen) == 0, f"mensajes={mensajes_telegram_resumen}")
+
+    # Mercado CRYPTO: SI debe disparar un mensaje de Telegram con el resumen.
+    _venta_btc = _hoy_resumen.replace(hour=15, minute=0, second=0, microsecond=0)
+    _compra_btc = _hoy_resumen.replace(hour=13, minute=0, second=0, microsecond=0)
+    ejecuciones_btc = [
+        _EjecucionFalsaCripto("BOT", _compra_btc, 0.001, 50000.0, "BTC"),
+        _EjecucionFalsaCripto("SLD", _venta_btc, 0.001, 51000.0, "BTC"),
+    ]
+    with contextlib.redirect_stdout(io.StringIO()):
+        bot.generar_resumen_cierre_mercado(_IBFalsoResumen(ejecuciones_btc), "CRYPTO")
+    check("resumen cierre CRYPTO: SI manda un mensaje a Telegram",
+          len(mensajes_telegram_resumen) == 1, f"mensajes={mensajes_telegram_resumen}")
+    if mensajes_telegram_resumen:
+        mensaje_cripto = mensajes_telegram_resumen[0]
+        check("resumen cripto por Telegram: incluye el titulo del resumen diario",
+              "RESUMEN DIARIO CRYPTO" in mensaje_cripto, f"mensaje={mensaje_cripto!r}")
+        check("resumen cripto por Telegram: incluye el ticker BTC",
+              "BTC" in mensaje_cripto, f"mensaje={mensaje_cripto!r}")
+        check("resumen cripto por Telegram: incluye la ganancia total del dia",
+              "Ganancia total hoy" in mensaje_cripto, f"mensaje={mensaje_cripto!r}")
+finally:
+    bot.notificar_telegram = notificar_telegram_original
+
+
+# ---------------------------------------------------------------------------
+# 16. Pre/postmercado de US: en AMBOS tramos las ordenes ejecutadas deben
+#     ser LIMITADAS al precio exacto (con outsideRth), no a mercado. En
+#     premercado se compra Y se vende con normalidad; en postmercado SOLO
+#     se vende (no se compra) -decision explicita del usuario-.
+# ---------------------------------------------------------------------------
+class _IBFalsoComprasHorario(_IBFalsoCompras):
+    def __init__(self):
+        super().__init__()
+        self.ordenes_objeto = []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_objeto.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
+                                      isDone=lambda: True, log=[])
+
+
+bot.ACTIVOS = [{"ticker": "PREMKT", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+ib_falso_premercado = _IBFalsoComprasHorario()
+premercado_instante = datetime(2026, 8, 12, 6, 0, tzinfo=bot.ZONA_NY)  # miercoles 6:00 ET
+try:
+    con_reloj_fijo(premercado_instante, bot.revisar_compras, ib_falso_premercado)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("revisar_compras en premercado US: coloca exactamente UNA orden (Plan A/B saltados, "
+      "va directo a acciones enteras: las fracciones no funcionan fuera de sesion regular)",
+      len(ib_falso_premercado.ordenes_objeto) == 1,
+      f"ordenes={len(ib_falso_premercado.ordenes_objeto)}")
+if ib_falso_premercado.ordenes_objeto:
+    orden_premercado = ib_falso_premercado.ordenes_objeto[0]
+    check("revisar_compras en premercado US: la orden es LIMITADA (no a mercado)",
+          orden_premercado.orderType == "LMT", f"orderType={orden_premercado.orderType}")
+    check("revisar_compras en premercado US: la orden tiene outsideRth activado",
+          orden_premercado.outsideRth is True)
+    check("revisar_compras en premercado US: la orden es de acciones ENTERAS, no cashQty "
+          "(fracciones_no_disponibles: se salta directo a Plan C)",
+          not bot.es_cantidad_fraccionaria(orden_premercado.totalQuantity)
+          and orden_premercado.totalQuantity >= 1,
+          f"totalQuantity={orden_premercado.totalQuantity}")
+
+# Postmercado: NO debe intentar comprar aunque haya señal de compra.
+ib_falso_postmercado_compras = _IBFalsoComprasHorario()
+postmercado_instante = datetime(2026, 8, 12, 18, 0, tzinfo=bot.ZONA_NY)  # miercoles 18:00 ET
+bot.ACTIVOS = [{"ticker": "POSTMKT_COMPRA", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+try:
+    con_reloj_fijo(postmercado_instante, bot.revisar_compras, ib_falso_postmercado_compras)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+
+check("revisar_compras en postmercado US: NO coloca ninguna orden aunque hay señal de compra",
+      ib_falso_postmercado_compras.ordenes_objeto == [],
+      f"ordenes={ib_falso_postmercado_compras.ordenes_objeto}")
+
+# Ventas: en pre Y postmercado debe vender igual, ambas con orden LIMITADA
+# al precio exacto (con outsideRth), no a mercado.
+class _Contrato2:
+    def __init__(self, symbol, currency="USD"):
+        self.symbol = symbol
+        self.currency = currency
+
+
+class _Posicion2:
+    def __init__(self, symbol, position, avgCost, currency="USD"):
+        self.contract = _Contrato2(symbol, currency)
+        self.position = position
+        self.avgCost = avgCost
+
+
+class _IBFalsoVentasHorario:
+    def __init__(self):
+        self.ordenes_colocadas = []
+        self._posiciones = [_Posicion2("POSTMKT", 10, 100)]
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(120)]  # +20% de beneficio, de sobra para vender
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"),
+                                      isDone=lambda: True, log=[])
+
+
+macd_bajista_original = bot.macd_5min_bajista_2_velas
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: True  # forzar señal de venta (refuerzo)
+
+ib_falso_venta_postmercado = _IBFalsoVentasHorario()
+try:
+    con_reloj_fijo(postmercado_instante, bot.revisar_ventas, ib_falso_venta_postmercado)
+finally:
+    bot.macd_5min_bajista_2_velas = macd_bajista_original
+
+check("revisar_ventas en postmercado US: coloca exactamente una orden (SI se puede vender)",
+      len(ib_falso_venta_postmercado.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_venta_postmercado.ordenes_colocadas}")
+if ib_falso_venta_postmercado.ordenes_colocadas:
+    orden_venta_postmercado = ib_falso_venta_postmercado.ordenes_colocadas[0]
+    check("revisar_ventas en postmercado US: la orden es LIMITADA (no a mercado)",
+          orden_venta_postmercado.orderType == "LMT", f"orderType={orden_venta_postmercado.orderType}")
+    check("revisar_ventas en postmercado US: la orden tiene outsideRth activado",
+          orden_venta_postmercado.outsideRth is True)
+
+# Premercado: SI debe vender tambien, con orden LIMITADA al precio exacto
+# (con outsideRth), no a mercado.
+ib_falso_venta_premercado = _IBFalsoVentasHorario()
+ib_falso_venta_premercado._posiciones = [_Posicion2("PREVENTA", 10, 100)]
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: True
+try:
+    con_reloj_fijo(premercado_instante, bot.revisar_ventas, ib_falso_venta_premercado)
+finally:
+    bot.macd_5min_bajista_2_velas = macd_bajista_original
+
+check("revisar_ventas en premercado US: coloca exactamente una orden",
+      len(ib_falso_venta_premercado.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_venta_premercado.ordenes_colocadas}")
+if ib_falso_venta_premercado.ordenes_colocadas:
+    orden_venta_premercado = ib_falso_venta_premercado.ordenes_colocadas[0]
+    check("revisar_ventas en premercado US: la orden es LIMITADA (no a mercado)",
+          orden_venta_premercado.orderType == "LMT", f"orderType={orden_venta_premercado.orderType}")
+    check("revisar_ventas en premercado US: la orden tiene outsideRth activado",
+          orden_venta_premercado.outsideRth is True)
+
+
+# ---------------------------------------------------------------------------
+# 8c. Criterio de venta de ACCIONES: trailing stop (principal) + refuerzo de
+#     2 velas de 5min bajistas (peticion del usuario, sept. 2026). El umbral
+#     minimo (UMBRAL_BENEFICIO_PCT=0.5%) ya esta en NETO (descontada la
+#     comision de compra+venta, ver mas arriba) antes de armar el trailing.
+# ---------------------------------------------------------------------------
+class _IBFalsoTrailingStop:
+    def __init__(self, avgCost, precio_inicial):
+        self.ordenes_colocadas = []
+        self.ordenes_objeto = []
+        self.precio_actual = precio_inicial
+        self._posiciones = [_Posicion("TRAIL", 10, avgCost)]
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(self.precio_actual)]
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        self.ordenes_objeto.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"), isDone=lambda: True)
+
+
+es_horario_original_trailing = bot.es_horario_operativo
+en_venta_forzada_original = bot.en_ventana_venta_forzada
+macd_2velas_original = bot.macd_5min_bajista_2_velas
+fuera_de_sesion_regular_us_original = bot.fuera_de_sesion_regular_us
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: False  # aislar del mecanismo de venta forzada, no es lo que se prueba aqui
+# Fuera de esto se prueba aparte (lineas 1470/1549/1569): se fuerza a False
+# para que estos tests de sesion REGULAR no dependan de la hora real del
+# sistema (evita falsos negativos si por casualidad se corre fuera de la
+# sesion regular real de NYSE).
+bot.fuera_de_sesion_regular_us = lambda: False
+
+# --- El trailing/salida parcial SOLO se arma a partir de UMBRAL_BENEFICIO_PCT
+#     (0.5%): por debajo de eso, nada puede vender, ni el refuerzo "diga que
+#     si" -nunca se vende con perdida o beneficio insuficiente-.
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: True  # refuerzo siempre "activo"
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+# Precios elegidos para que el beneficio NETO (ya descontada la comision de
+# compra+venta que aplica revisar_ventas) de exactamente el % querido, no
+# el bruto -ver el calculo real en el comentario de cada caso-.
+ib_bajo_umbral = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.27)  # neto +0.2%, por debajo del 0.5%
+try:
+    bot.revisar_ventas(ib_bajo_umbral)
+finally:
+    pass
+check("criterio de venta: por debajo de UMBRAL_BENEFICIO_PCT, NO vende aunque el refuerzo este activo",
+      ib_bajo_umbral.ordenes_colocadas == [], f"ordenes={ib_bajo_umbral.ordenes_colocadas}")
+
+# --- Salida parcial (peticion del usuario, sept. 2026): la PRIMERA vez que
+#     se alcanza el umbral (retroceso=0, sin refuerzo necesario), se vende
+#     PORCENTAJE_SCALE_OUT de la posicion, dejando el resto corriendo -no es
+#     una venta total-. ---
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False  # refuerzo inactivo: la parcial no depende de el
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+ib_parcial = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto justo por encima del umbral (+0.52%), retroceso=0
+try:
+    bot.revisar_ventas(ib_parcial)
+finally:
+    pass
+check("criterio de venta: primera vez en el umbral (retroceso=0) -> SALIDA PARCIAL, sin refuerzo ni retroceso",
+      ib_parcial.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_parcial.ordenes_colocadas}")
+check("criterio de venta: tras la salida parcial, el maximo SIGUE trackeado (queda posicion corriendo)",
+      "US:TRAIL" in bot._maximo_beneficio_neto_por_posicion,
+      f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# Una segunda llamada AL MISMO precio (ya con la parcial hecha) no debe
+# volver a vender: ni hay retroceso (sigue en el maximo) ni refuerzo activo.
+ib_parcial.ordenes_colocadas = []
+bot.revisar_ventas(ib_parcial)
+check("criterio de venta: tras la salida parcial, una segunda llamada sin retroceso NO vende otra vez",
+      ib_parcial.ordenes_colocadas == [], f"ordenes={ib_parcial.ordenes_colocadas}")
+
+# --- Refuerzo (2 velas bajistas) SI puede disparar la VENTA TOTAL del resto,
+#     ya con la parcial hecha, sin necesidad de retroceso del trailing. ---
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: True  # refuerzo activo otra vez
+bot.revisar_ventas(ib_parcial)
+check("criterio de venta: con la parcial ya hecha, el refuerzo de 2 velas SI vende el resto (total)",
+      ib_parcial.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_parcial.ordenes_colocadas}")
+check("criterio de venta: tras la venta total del resto, se olvida el maximo trackeado",
+      "US:TRAIL" not in bot._maximo_beneficio_neto_por_posicion,
+      f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# --- Trailing stop SI puede vender el resto por si solo, sin refuerzo,
+#     cuando el beneficio retrocede TRAILING_STOP_VENTA_PCT puntos desde el
+#     maximo (despues de que la salida parcial ya se hiciera). ---
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False  # refuerzo siempre "inactivo": solo puede vender el trailing
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+ib_trailing = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto +0.52%: arma el trailing -> SALIDA PARCIAL
+try:
+    bot.revisar_ventas(ib_trailing)
+    check("criterio de venta: al armar el trailing (retroceso=0) sin refuerzo, hace la SALIDA PARCIAL (no total)",
+          ib_trailing.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_trailing.ordenes_colocadas}")
+
+    ib_trailing.ordenes_colocadas = []
+    ib_trailing.precio_actual = 101.09  # neto +1.02%: nuevo maximo, sigue sin retroceso
+    bot.revisar_ventas(ib_trailing)
+    check("criterio de venta: nuevo maximo alcanzado (+1.02%), sigue sin retroceso -> NO vende mas",
+          ib_trailing.ordenes_colocadas == [], f"ordenes={ib_trailing.ordenes_colocadas}")
+
+    ib_trailing.precio_actual = 100.78  # neto +0.71%: 0.31 pts desde el maximo de 1.02% -> dispara
+    bot.revisar_ventas(ib_trailing)
+    check("criterio de venta: retrocede >=0.3 pts desde el maximo (1.02% -> 0.71%) -> SI vende el resto (trailing stop)",
+          ib_trailing.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_trailing.ordenes_colocadas}")
+
+    # --- BUG REAL DE PRODUCCION (sept. 2026, casos reales: META y despues
+    # SMCI vendidas con perdidas -0.23%, pese al suelo de MARGEN_MINIMO_VENTA_PCT
+    # 0.5%): la venta principal en sesion regular usaba orden A MERCADO,
+    # sin ningun limite de precio. Ahora usa una orden LIMITADA IOC, igual
+    # que ya hacia cripto: el precio real de ejecucion nunca puede ser
+    # peor que el limite protegido. ---
+    orden_trailing_colocada = ib_trailing.ordenes_objeto[-1]
+    check("venta principal (trailing) en sesion regular: usa orden LIMITADA (no a mercado)",
+          orden_trailing_colocada.orderType == "LMT", f"orderType={orden_trailing_colocada.orderType}")
+    check("venta principal (trailing): time_in_force es IOC",
+          orden_trailing_colocada.tif == "IOC", f"tif={orden_trailing_colocada.tif}")
+    check("venta principal (trailing): el precio limite esta acotado bajo el precio de "
+          "referencia (MARGEN_ORDEN_LIMITADA_VENTA_PCT, 0.2%)",
+          abs(orden_trailing_colocada.lmtPrice - bot.calcular_precio_limite_venta(100.78, "USD")) < 1e-6,
+          f"lmtPrice={orden_trailing_colocada.lmtPrice}")
+finally:
+    bot.es_horario_operativo = es_horario_original_trailing
+    bot.en_ventana_venta_forzada = en_venta_forzada_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original
+    bot.fuera_de_sesion_regular_us = fuera_de_sesion_regular_us_original
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+# Si la orden IOC no se ejecuta (el mercado nunca toco el precio limite
+# protegido -simulado devolviendo estado 'Cancelled' y la posicion SIN
+# cambios-), la posicion debe quedar INTACTA en vez de venderse igualmente
+# mas barato de lo aceptable (lo que pasaba con la orden a mercado).
+class _IBFalsoTrailingIOCNoEjecutada(_IBFalsoTrailingStop):
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        self.ordenes_objeto.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Cancelled"), isDone=lambda: True)
+
+
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: False
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False
+bot.fuera_de_sesion_regular_us = lambda: False
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+telegram_capturados_ioc = []
+notificar_telegram_original_ioc_ibkr = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: telegram_capturados_ioc.append(msg)
+ib_ioc_no_ejecutada = _IBFalsoTrailingIOCNoEjecutada(avgCost=100, precio_inicial=100.59)
+try:
+    bot.revisar_ventas(ib_ioc_no_ejecutada)  # arma el trailing -> parcial (tambien IOC, tambien "Cancelled")
+    ib_ioc_no_ejecutada.precio_actual = 101.09  # nuevo maximo, sin retroceso
+    bot.revisar_ventas(ib_ioc_no_ejecutada)
+    ib_ioc_no_ejecutada.precio_actual = 100.78  # dispara el trailing, pero la IOC no se ejecuta
+    bot.revisar_ventas(ib_ioc_no_ejecutada)
+finally:
+    bot.es_horario_operativo = es_horario_original_trailing
+    bot.en_ventana_venta_forzada = en_venta_forzada_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original
+    bot.fuera_de_sesion_regular_us = fuera_de_sesion_regular_us_original
+    bot.notificar_telegram = notificar_telegram_original_ioc_ibkr
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("venta principal (trailing): si la orden IOC no se ejecuta (posicion sin cambios), "
+      "NO se registra ninguna venta ni se avisa por Telegram",
+      telegram_capturados_ioc == [], f"mensajes={telegram_capturados_ioc}")
+
+# --- Escalones de trailing stop segun el maximo alcanzado (peticion del
+# usuario, sept. 2026): cuanto mas alto el pico, mas margen de retroceso se
+# permite antes de vender -mismo cambio que en bot_alpaca.py-. ---
+check("_margen_trailing_stop: por debajo de 2% -> margen base (TRAILING_STOP_VENTA_PCT, 0.3 pts)",
+      bot._margen_trailing_stop(1.5) == bot.TRAILING_STOP_VENTA_PCT)
+check("_margen_trailing_stop: maximo de 2% a <3% -> margen de 0.5 pts",
+      bot._margen_trailing_stop(2.0) == 0.5 and bot._margen_trailing_stop(2.99) == 0.5)
+check("_margen_trailing_stop: maximo de 3% a <4% -> margen de 0.7 pts",
+      bot._margen_trailing_stop(3.0) == 0.7 and bot._margen_trailing_stop(3.99) == 0.7)
+check("_margen_trailing_stop: maximo de 4% a <5% -> margen de 1.0 pts",
+      bot._margen_trailing_stop(4.0) == 1.0 and bot._margen_trailing_stop(4.99) == 1.0)
+check("_margen_trailing_stop: maximo >= 5% -> margen de 1.5 pts",
+      bot._margen_trailing_stop(5.0) == 1.5 and bot._margen_trailing_stop(9.0) == 1.5)
+
+# Extremo a extremo sobre decidir_accion_venta() directamente (evita tener
+# que calibrar precios que den un % neto exacto tras comision, como hacen
+# los tests de arriba): con un maximo trackeado de 3.5% (escalon 3%-4%,
+# margen 0.7 pts), un retroceso de 0.5 pts NO debe vender -el trailing
+# stop plano de 0.3 pts SI lo habria vendido, esto confirma que el escalon
+# esta realmente en efecto-, pero uno de 0.8 pts SI debe vender.
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+accion, motivo = bot.decidir_accion_venta("US:ESCALON", 3.5, bot.UMBRAL_BENEFICIO_PCT)
+check("escalones trailing stop: primera vez en el umbral (3.5%) -> SALIDA PARCIAL",
+      accion == "VENTA_PARCIAL", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:ESCALON", 3.0, bot.UMBRAL_BENEFICIO_PCT)
+check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroceso de 0.5 pts NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:ESCALON", 2.7, bot.UMBRAL_BENEFICIO_PCT)
+check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroceso de 0.8 pts SI vende",
+      accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
+# --- Suelo explicito: nunca vender por debajo de MARGEN_MINIMO_VENTA_PCT
+# (0.5%, peticion del usuario, sept. 2026, mismo cambio en bot_alpaca.py).
+# Antes era simplemente "no vender en negativo" (>=0%); tras el caso real
+# de una venta con slippage (un +2% de referencia se ejecuto como perdida
+# real), el suelo se sube a un margen de seguridad de 0.5%. ---
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 5.0, bot.UMBRAL_BENEFICIO_PCT)  # arma el trailing en 5%
+check("suelo anti-perdidas: primera vez en el umbral (5%) -> SALIDA PARCIAL",
+      accion == "VENTA_PARCIAL", f"accion={accion}")
+accion, motivo = bot.decidir_accion_venta("US:SUELO", -0.5, bot.UMBRAL_BENEFICIO_PCT)  # retroceso 5.5 pts (>> margen 1.5)
+check("suelo anti-perdidas: retroceso enorme (5.5 pts) pero beneficio ya NEGATIVO (-0.5%) -> NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 0.0, bot.UMBRAL_BENEFICIO_PCT)  # beneficio 0% (< suelo de 0.5%)
+check("suelo anti-perdidas: beneficio 0% (no negativo, pero por debajo del suelo de 0.5%) -> NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 0.49, bot.UMBRAL_BENEFICIO_PCT)  # justo por debajo del suelo
+check("suelo anti-perdidas: beneficio 0.49% (justo por debajo del suelo de 0.5%) -> NO vende",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("US:SUELO", 0.5, bot.UMBRAL_BENEFICIO_PCT)  # justo en el suelo
+check("suelo anti-perdidas: beneficio exactamente 0.5% (el suelo) -> SI vende",
+      accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
+# --- Veto del scale-out por MACD alcista (peticion del usuario, sept.
+# 2026, mismo cambio en bot_alpaca.py, a raiz de revisar el historial real
+# de operaciones de Alpaca: una venta parcial se recompraba casi al
+# instante porque el MACD seguia diciendo "alcista"). decidir_accion_venta()
+# acepta ahora macd_alcista_fn: si devuelve True, se APLAZA el scale-out
+# (sin marcarlo como ya hecho, para poder reintentarlo el siguiente ciclo);
+# el trailing TOTAL nunca se veta. ---
+accion, motivo = bot.decidir_accion_venta("US:VETO", 5.0, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)
+check("veto de scale-out por MACD alcista: en el umbral pero MACD sigue alcista -> se APLAZA (MANTENER)",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+check("veto de scale-out por MACD alcista: NO se marca como ya hecho (se puede reintentar)",
+      "US:VETO" not in bot._scale_out_realizado, f"_scale_out_realizado={bot._scale_out_realizado}")
+accion, motivo = bot.decidir_accion_venta("US:VETO", 5.0, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: False)
+check("veto de scale-out por MACD alcista: si el MACD deja de estar alcista, el scale-out SI se hace",
+      accion == "VENTA_PARCIAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+bot.decidir_accion_venta("US:VETO2", 3.5, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: False)  # scale-out ya hecho, maximo 3.5% (margen 0.7 pts)
+accion, motivo = bot.decidir_accion_venta("US:VETO2", 2.7, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)  # retroceso 0.8 pts (> margen 0.7)
+check("veto de scale-out por MACD alcista: el trailing TOTAL SI dispara aunque el MACD siga "
+      "alcista (solo se veta el scale-out, no la red de seguridad final)",
+      accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
+# --- BUG REAL DE PRODUCCION (sept. 2026, mismo cambio en bot_alpaca.py):
+# el % de beneficio mostrado/registrado se calculaba con precio_actual (el
+# precio de referencia usado para DECIDIR vender), no con el precio REAL
+# de ejecucion (avgFillPrice) -si hay slippage, el % podia tener el signo
+# contrario a lo que realmente paso-. Ahora se recalcula con el precio
+# real antes de notificar/registrar. ---
+class _IBFalsoTrailingStopSlippage(_IBFalsoTrailingStop):
+    """Como _IBFalsoTrailingStop, pero placeOrder() devuelve un
+    avgFillPrice/filled REAL distinto del precio de referencia (precio_actual)
+    usado para decidir -simula el slippage real visto en produccion-."""
+    def __init__(self, avgCost, precio_inicial, precio_real_venta, cantidad_real_venta):
+        super().__init__(avgCost, precio_inicial)
+        self._precio_real_venta = precio_real_venta
+        self._cantidad_real_venta = cantidad_real_venta
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        return types.SimpleNamespace(
+            orderStatus=types.SimpleNamespace(status="Filled", avgFillPrice=self._precio_real_venta,
+                                               filled=self._cantidad_real_venta),
+            isDone=lambda: True)
+
+
+telegram_capturados_slippage = []
+notificar_telegram_original_slippage = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: telegram_capturados_slippage.append(msg)
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: False
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+# Precio de referencia (decision): coste 100, precio_inicial 102 -> +2%
+# neto (tras comision ~0.7%, sigue armando el trailing) -> primera vez en
+# el umbral -> VENTA PARCIAL de 5 (mitad de 10). Precio REAL de ejecucion:
+# 99 (mas bajo que el coste) -> en realidad fue una PERDIDA.
+ib_slippage = _IBFalsoTrailingStopSlippage(avgCost=100, precio_inicial=102.0,
+                                            precio_real_venta=99.0, cantidad_real_venta=5)
+try:
+    bot.revisar_ventas(ib_slippage)
+finally:
+    bot.notificar_telegram = notificar_telegram_original_slippage
+    bot.macd_5min_bajista_2_velas = macd_2velas_original
+    bot.es_horario_operativo = es_horario_original_trailing
+    bot.en_ventana_venta_forzada = en_venta_forzada_original
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("beneficio recalculado con precio real (IBKR): coloca la orden basandose en el precio de "
+      "referencia (arma el trailing)", ib_slippage.ordenes_colocadas == ["TRAIL"],
+      f"ordenes={ib_slippage.ordenes_colocadas}")
+check("beneficio recalculado con precio real (IBKR): el mensaje de Telegram muestra un beneficio "
+      "NEGATIVO (precio de ejecucion 99 vs coste 100), no el positivo de referencia",
+      len(telegram_capturados_slippage) == 1 and "-" in telegram_capturados_slippage[0]
+      and "%)" in telegram_capturados_slippage[0],
+      f"mensajes={telegram_capturados_slippage}")
+operaciones_ibkr_slippage = bot.cargar_historial_operaciones()
+ventas_trail_ibkr = [o for o in operaciones_ibkr_slippage if o["ticker"] == "TRAIL" and o["lado"] == "VENTA"]
+check("beneficio recalculado con precio real (IBKR): el historial (fuente de /hoy) tambien guarda "
+      "el beneficio NEGATIVO real, no el positivo de referencia",
+      bool(ventas_trail_ibkr) and ventas_trail_ibkr[-1]["beneficio_pct"] < 0,
+      f"ultimo_registro={ventas_trail_ibkr[-1] if ventas_trail_ibkr else None}")
+
+
+# ---------------------------------------------------------------------------
+# 8d. Venta forzada: A MERCADO, no limitada (peticion del usuario, sept.
+#     2026) -antes usaba una orden limitada 0.2% por debajo del precio para
+#     intentar mejorar la salida, a cambio de arriesgarse a no ejecutarse a
+#     tiempo antes del cierre; ahora prioriza la ejecucion garantizada-.
+# ---------------------------------------------------------------------------
+class _IBFalsoVentaForzada:
+    def __init__(self, avgCost, precio_actual):
+        self.ordenes_colocadas = []
+        self._posiciones = [_Posicion("FORZADA", 10, avgCost)]
+        self.precio_actual = precio_actual
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(self.precio_actual)]
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"), isDone=lambda: True)
+
+
+es_horario_original_forzada = bot.es_horario_operativo
+en_venta_forzada_original_2 = bot.en_ventana_venta_forzada
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: True  # forzar "dentro de los ultimos 15 min antes del cierre"
+bot._maximo_beneficio_neto_por_posicion = {}
+ib_venta_forzada = _IBFalsoVentaForzada(avgCost=100, precio_actual=101.0)  # +1.0% bruto: dentro del rango 0.5%-2%
+try:
+    bot.revisar_ventas(ib_venta_forzada)
+finally:
+    bot.es_horario_operativo = es_horario_original_forzada
+    bot.en_ventana_venta_forzada = en_venta_forzada_original_2
+    bot._maximo_beneficio_neto_por_posicion = {}
+
+check("venta forzada: coloca exactamente una orden",
+      len(ib_venta_forzada.ordenes_colocadas) == 1, f"ordenes={ib_venta_forzada.ordenes_colocadas}")
+if ib_venta_forzada.ordenes_colocadas:
+    check("venta forzada: la orden es A MERCADO (MKT), no limitada",
+          ib_venta_forzada.ordenes_colocadas[0].orderType == "MKT",
+          f"orderType={ib_venta_forzada.ordenes_colocadas[0].orderType}")
+
+
+# ---------------------------------------------------------------------------
+# 9. Criptomonedas (PAXOS/ZEROHASH, via IBKR)
+# ---------------------------------------------------------------------------
+
+# --- 9a. es_horario_operativo_cripto / es_horario_operativo("CRYPTO") ---
+crypto_24_7_original = bot.CRYPTO_24_7
+
+bot.CRYPTO_24_7 = True
+check("es_horario_operativo CRYPTO con CRYPTO_24_7=True: sabado -> abierto (24/7)",
+      con_reloj_fijo(sabado_us, bot.es_horario_operativo, "CRYPTO") is True)
+
+bot.CRYPTO_24_7 = False
+viernes_15_59 = datetime(2026, 8, 14, 15, 59, tzinfo=bot.ZONA_NY)  # viernes, justo antes del cierre
+check("es_horario_operativo CRYPTO (Basic): viernes 15:59 ET -> abierto",
+      con_reloj_fijo(viernes_15_59, bot.es_horario_operativo, "CRYPTO") is True)
+
+viernes_16_00 = datetime(2026, 8, 14, 16, 0, tzinfo=bot.ZONA_NY)  # viernes, justo el cierre
+check("es_horario_operativo CRYPTO (Basic): viernes 16:00 ET -> cerrado",
+      con_reloj_fijo(viernes_16_00, bot.es_horario_operativo, "CRYPTO") is False)
+
+sabado_cripto = datetime(2026, 8, 15, 12, 0, tzinfo=bot.ZONA_NY)  # sabado a mediodia
+check("es_horario_operativo CRYPTO (Basic): sabado -> cerrado",
+      con_reloj_fijo(sabado_cripto, bot.es_horario_operativo, "CRYPTO") is False)
+
+domingo_2_59 = datetime(2026, 8, 16, 2, 59, tzinfo=bot.ZONA_NY)  # domingo, justo antes de abrir
+check("es_horario_operativo CRYPTO (Basic): domingo 2:59 ET -> cerrado",
+      con_reloj_fijo(domingo_2_59, bot.es_horario_operativo, "CRYPTO") is False)
+
+domingo_3_00 = datetime(2026, 8, 16, 3, 0, tzinfo=bot.ZONA_NY)  # domingo, justo la apertura
+check("es_horario_operativo CRYPTO (Basic): domingo 3:00 ET -> abierto",
+      con_reloj_fijo(domingo_3_00, bot.es_horario_operativo, "CRYPTO") is True)
+
+lunes_cripto = datetime(2026, 8, 17, 10, 0, tzinfo=bot.ZONA_NY)  # lunes normal
+check("es_horario_operativo CRYPTO (Basic): lunes 10:00 ET -> abierto",
+      con_reloj_fijo(lunes_cripto, bot.es_horario_operativo, "CRYPTO") is True)
+
+bot.CRYPTO_24_7 = crypto_24_7_original
+
+
+# --- 9a-bis. justo_hora_resumen_cripto: dispara en una ventana fija diaria
+#     (cripto no tiene cierre real, a diferencia de justo_cerro_mercado) ---
+justo_las_23_55 = datetime(2026, 8, 12, 23, 55, tzinfo=bot.ZONA_NY)
+check("justo_hora_resumen_cripto: justo a la hora fijada -> True",
+      con_reloj_fijo(justo_las_23_55, bot.justo_hora_resumen_cripto) is True)
+
+dos_horas_despues = datetime(2026, 8, 13, 1, 55, tzinfo=bot.ZONA_NY)
+check("justo_hora_resumen_cripto: 2h despues, dentro del margen de 4h -> True",
+      con_reloj_fijo(dos_horas_despues, bot.justo_hora_resumen_cripto) is True)
+
+cinco_horas_despues = datetime(2026, 8, 13, 4, 55, tzinfo=bot.ZONA_NY)
+check("justo_hora_resumen_cripto: 5h despues, fuera del margen de 4h -> False",
+      con_reloj_fijo(cinco_horas_despues, bot.justo_hora_resumen_cripto) is False)
+
+antes_de_hora = datetime(2026, 8, 12, 23, 0, tzinfo=bot.ZONA_NY)
+check("justo_hora_resumen_cripto: antes de la hora fijada -> False",
+      con_reloj_fijo(antes_de_hora, bot.justo_hora_resumen_cripto) is False)
+
+
+# --- 9b. crear_contrato: activo CRYPTO -> objeto Crypto, no Stock ---
+activo_btc = {"ticker": "BTC", "exchange": bot.EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
+
+
+class _IBSinPosicionesCripto:
+    def positions(self):
+        return []
+
+
+bot._exchange_cripto_cache = None  # sin posiciones previas -> usa activo["exchange"] (fallback)
+contrato_btc = bot.crear_contrato(_IBSinPosicionesCripto(), activo_btc)
+check("crear_contrato CRYPTO: devuelve un Crypto (no un Stock)",
+      isinstance(contrato_btc, bot.Crypto), f"tipo={type(contrato_btc)}")
+check("crear_contrato CRYPTO: symbol/exchange/currency correctos",
+      contrato_btc.symbol == "BTC" and contrato_btc.exchange == bot.EXCHANGE_CRYPTO and contrato_btc.currency == "USD")
+
+# --- 9b-bis. crear_contrato CRYPTO: si YA hay una posicion de cripto real
+#     abierta (con su conId/exchange ya resueltos por IBKR), se descubre y
+#     reutiliza ESE exchange en vez de activo["exchange"] -este es el fix
+#     real de produccion (sept. 2026): ni "PAXOS" ni "ZEROHASH" adivinados a
+#     mano tenian datos en la cuenta real, solo el exchange de la posicion
+#     real de la usuaria los tenia. Ver ACTIVOS_CRYPTO para la historia
+#     completa.
+class _ContratoCriptoResuelto:
+    def __init__(self, exchange):
+        self.symbol = "BTC"
+        self.currency = "USD"
+        self.secType = "CRYPTO"
+        self.exchange = exchange
+
+
+class _PosicionCriptoFalsa:
+    def __init__(self, exchange):
+        self.contract = _ContratoCriptoResuelto(exchange)
+        self.position = 0.01
+
+
+class _IBConPosicionCriptoResuelta:
+    def __init__(self, exchange):
+        self._exchange = exchange
+
+    def positions(self):
+        return [_PosicionCriptoFalsa(self._exchange)]
+
+    def qualifyContracts(self, contrato):
+        pass  # no hace falta: la posicion ya viene con exchange relleno
+
+
+bot._exchange_cripto_cache = None
+ib_con_posicion_real = _IBConPosicionCriptoResuelta("UNEXCHANGE_REAL_DESCONOCIDO")
+activo_eth = {"ticker": "ETH", "exchange": bot.EXCHANGE_CRYPTO, "currency": "USD", "mercado": "CRYPTO"}
+contrato_eth = bot.crear_contrato(ib_con_posicion_real, activo_eth)
+check("crear_contrato CRYPTO: descubre el exchange a partir de una posicion real ya abierta",
+      contrato_eth.exchange == "UNEXCHANGE_REAL_DESCONOCIDO", f"exchange={contrato_eth.exchange!r}")
+check("crear_contrato CRYPTO: reutiliza ese exchange descubierto para OTRA moneda (ETH) sin posicion propia",
+      contrato_eth.symbol == "ETH" and contrato_eth.exchange == "UNEXCHANGE_REAL_DESCONOCIDO")
+
+# La cache es de PROCESO: una segunda llamada, incluso con una `ib` distinta
+# que ya NO tiene esa posicion, debe seguir devolviendo el exchange
+# descubierto la primera vez (no se vuelve a preguntar a IBKR en cada
+# ticker/ciclo).
+contrato_btc_cacheado = bot.crear_contrato(_IBSinPosicionesCripto(), activo_btc)
+check("crear_contrato CRYPTO: el exchange descubierto se cachea entre llamadas",
+      contrato_btc_cacheado.exchange == "UNEXCHANGE_REAL_DESCONOCIDO",
+      f"exchange={contrato_btc_cacheado.exchange!r}")
+bot._exchange_cripto_cache = None
+
+
+# --- 9c. mercado_de_posicion / contrato_pertenece_a_mercado: cripto y US
+#     acciones comparten divisa (USD), hay que distinguirlos por secType ---
+class _ContratoConSecType:
+    def __init__(self, symbol, currency, secType, exchange=""):
+        self.symbol = symbol
+        self.currency = currency
+        self.secType = secType
+        self.exchange = exchange
+
+
+class _PosicionConSecType:
+    def __init__(self, symbol, currency, secType, position=1, avgCost=100):
+        self.contract = _ContratoConSecType(symbol, currency, secType)
+        self.position = position
+        self.avgCost = avgCost
+
+
+pos_btc = _PosicionConSecType("BTC", "USD", "CRYPTO")
+pos_aapl = _PosicionConSecType("AAPL", "USD", "STK")
+check("mercado_de_posicion: BTC (secType=CRYPTO, USD) -> 'CRYPTO', no 'US'",
+      bot.mercado_de_posicion(pos_btc) == "CRYPTO")
+check("mercado_de_posicion: AAPL (secType=STK, USD) -> 'US'",
+      bot.mercado_de_posicion(pos_aapl) == "US")
+
+check("contrato_pertenece_a_mercado: BTC pertenece a 'CRYPTO'",
+      bot.contrato_pertenece_a_mercado(pos_btc.contract, "CRYPTO") is True)
+check("contrato_pertenece_a_mercado: BTC NO pertenece a 'US' (aunque comparta divisa USD)",
+      bot.contrato_pertenece_a_mercado(pos_btc.contract, "US") is False)
+check("contrato_pertenece_a_mercado: AAPL pertenece a 'US'",
+      bot.contrato_pertenece_a_mercado(pos_aapl.contract, "US") is True)
+check("contrato_pertenece_a_mercado: AAPL NO pertenece a 'CRYPTO'",
+      bot.contrato_pertenece_a_mercado(pos_aapl.contract, "CRYPTO") is False)
+
+# Un contrato sin atributo secType (p.ej. un doble de prueba antiguo) no debe
+# romper nada: getattr con default lo trata como "no es cripto".
+posicion_sin_sectype = _Posicion("XYZ", 1, 100)
+resultado_sin_sectype = bot.mercado_de_posicion(posicion_sin_sectype)
+check("mercado_de_posicion: contrato SIN atributo secType no revienta, se trata como no-cripto",
+      resultado_sin_sectype == "US", f"resultado={resultado_sin_sectype}")
+
+
+# --- 9d. estimar_comision_cripto: 0.18%, minimo 1.75 USD, tope 1% ---
+# Operacion grande: 0.18% domina sobre el minimo (y no llega al tope del 1%)
+check("estimar_comision_cripto: operacion grande, aplica el 0.18%",
+      abs(bot.estimar_comision_cripto(10_000) - 18.0) < 1e-9,
+      f"obtenido={bot.estimar_comision_cripto(10_000)}")
+
+# Operacion pequeña: 0.18% no llega al minimo (1.75 USD), pero el tope del 1%
+# del valor operado es AUN MENOR que el minimo -> se aplica el tope del 1%,
+# no el minimo (protege operaciones pequeñas de pagar de mas).
+comision_pequena = bot.estimar_comision_cripto(40.0)
+check("estimar_comision_cripto: operacion de 40 USD, el tope del 1% (0.40) gana al minimo (1.75)",
+      abs(comision_pequena - 0.40) < 1e-9, f"obtenido={comision_pequena}")
+
+# Operacion en el rango donde SI se aplica el minimo (el 0.18% no llega a
+# 1.75, pero el 1% del valor si supera 1.75 -> gana el minimo)
+comision_media = bot.estimar_comision_cripto(500.0)
+check("estimar_comision_cripto: operacion de 500 USD, se aplica el minimo de 1.75 USD",
+      abs(comision_media - 1.75) < 1e-9, f"obtenido={comision_media}")
+
+check("estimar_comision_cripto: valor 0 -> comision 0 (no revienta por division por cero)",
+      bot.estimar_comision_cripto(0) == 0.0)
+
+
+# --- crear_orden_limitada_cripto: tif='IOC' explicito (bug real de
+#     produccion, sept. 2026, en dos pasos: 1) LimitOrder() deja tif=''
+#     por defecto, y el exchange real de cripto de la cuenta -ZEROHASHE-
+#     lo rechazaba con "Error 10052: Invalid time in force"; 2) probado
+#     tif='GTC' (documentacion general de IBKR), rechazado con "Error 201:
+#     The crypto buy order must be Minutes or IOC" -esta cuenta solo
+#     admite IOC para comprar cripto, pese a lo que dice la documentacion
+#     general de PAXOS/ZEROHASH-) ---
+orden_cripto_tif = bot.crear_orden_limitada_cripto('BUY', 0.001, 50000.0)
+check("crear_orden_limitada_cripto: tif='IOC' (no vacio, la unica valida para comprar en esta cuenta)",
+      orden_cripto_tif.tif == "IOC", f"tif={orden_cripto_tif.tif!r}")
+
+
+# --- 9e. revisar_compras con un activo CRYPTO: usa LimitOrder con
+#     totalQuantity fraccionario NATIVO (sin cashQty, sin Plan B/C) ---
+class _IBFalsoComprasCripto:
+    def __init__(self):
+        self.ordenes_colocadas = []
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return []
+
+    def sleep(self, segundos):
+        pass
+
+    def accountSummary(self):
+        return [types.SimpleNamespace(tag='NetLiquidation', currency='USD', value='300.0')]
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(50000.0)]  # precio simulado de BTC
+
+    def reqContractDetails(self, contrato):
+        return []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled", filled=None, avgFillPrice=None),
+                                      isDone=lambda: True, log=[])
+
+
+activos_originales_compras = bot.ACTIVOS
+bot.ACTIVOS = [activo_btc]
+analizar_activo_original = bot.analizar_activo
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None  # sin posiciones previas (positions() -> []), usa activo["exchange"]
+
+ib_falso_compras_cripto = _IBFalsoComprasCripto()
+try:
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_falso_compras_cripto)
+finally:
+    bot.ACTIVOS = activos_originales_compras
+    bot.analizar_activo = analizar_activo_original
+
+check("revisar_compras CRYPTO: coloca exactamente una orden",
+      len(ib_falso_compras_cripto.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_compras_cripto.ordenes_colocadas}")
+if ib_falso_compras_cripto.ordenes_colocadas:
+    orden_cripto = ib_falso_compras_cripto.ordenes_colocadas[0]
+    check("revisar_compras CRYPTO: la orden es LIMITADA (no a mercado)",
+          orden_cripto.orderType == "LMT", f"orderType={orden_cripto.orderType}")
+    check("revisar_compras CRYPTO: usa totalQuantity fraccionario (no cashQty)",
+          orden_cripto.totalQuantity > 0, f"totalQuantity={orden_cripto.totalQuantity}")
+    check("revisar_compras CRYPTO: la cantidad es fraccionaria (no redondeada a entero)",
+          bot.es_cantidad_fraccionaria(orden_cripto.totalQuantity),
+          f"totalQuantity={orden_cripto.totalQuantity}")
+
+
+# ---------------------------------------------------------------------------
+# 9e-bis. Limite de exposicion TOTAL en cripto (bug/limite real de
+#     produccion, sept. 2026): IBKR rechaza cualquier compra de cripto que
+#     haga que el CONJUNTO de posiciones de cripto supere el 30% del equity
+#     de la cuenta ("Error 201: ... would cause your crypto account(s) to
+#     exceed..."), independiente de LIMITE_EXPOSICION_PCT (que es por valor
+#     individual). El bot debe detectarlo el mismo y omitir la compra ANTES
+#     de intentarla, con margen de seguridad (25%, no el 30% real de IBKR).
+# ---------------------------------------------------------------------------
+check("calcular_exposicion_total_cripto_usd: suma solo posiciones CRYPTO, ignora acciones (misma USD)",
+      abs(bot.calcular_exposicion_total_cripto_usd(
+          [_PosicionConSecType("BTC", "USD", "CRYPTO", position=0.001, avgCost=50000.0),
+           _Posicion("AAPL", 10, 190.0)]) - 50.0) < 1e-9)
+
+
+class _IBFalsoComprasCriptoCercaDelLimite(_IBFalsoComprasCripto):
+    def positions(self):
+        # NetLiquidation=300 (ver accountSummary), limite del 25% = 75 USD;
+        # esta posicion YA vale 70 USD -> casi no queda margen.
+        return [_PosicionConSecType("ETH", "USD", "CRYPTO", position=0.02, avgCost=3500.0)]
+
+
+bot.ACTIVOS = [activo_btc]
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None
+ib_falso_cerca_del_limite = _IBFalsoComprasCriptoCercaDelLimite()
+try:
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_falso_cerca_del_limite)
+finally:
+    bot.ACTIVOS = activos_originales_compras
+    bot.analizar_activo = analizar_activo_original
+
+check("revisar_compras CRYPTO: NO compra si superaria el limite de exposicion TOTAL en cripto (25%)",
+      len(ib_falso_cerca_del_limite.ordenes_colocadas) == 0,
+      f"ordenes={ib_falso_cerca_del_limite.ordenes_colocadas}")
+
+
+# --- redondear_a_incremento / redondear_precio_a_tick / obtener_detalles_cripto:
+#     bug real de produccion (sept. 2026), en DOS partes - LTC/BCH/SOL/LINK
+#     daban "Error 202: Order Canceled - reason: Invalid order":
+#     1) la CANTIDAD (redondeada siempre a 6 decimales, igual para todas las
+#        monedas) no era un multiplo valido del incremento minimo real de
+#        cada una -se probo a arreglar esto, pero el error PERSISTIO-.
+#     2) la causa real era el PRECIO: `precio_actual` se pasaba tal cual
+#        como precio limite, sin redondear al "tick" de precio valido para
+#        ese contrato. BTC no sufria ninguno de los dos por pura
+#        coincidencia con sus propios valores, no porque el codigo los
+#        tuviera en cuenta.
+check("redondear_a_incremento: redondea HACIA ABAJO al multiplo valido mas cercano",
+      abs(bot.redondear_a_incremento(0.795272, 0.01) - 0.79) < 1e-9,
+      f"resultado={bot.redondear_a_incremento(0.795272, 0.01)}")
+check("redondear_a_incremento: por debajo de un incremento -> 0 (no una cantidad invalida)",
+      bot.redondear_a_incremento(0.008, 0.01) == 0.0)
+check("redondear_a_incremento: incremento 0 o invalido -> no toca la cantidad (fallback)",
+      bot.redondear_a_incremento(0.795272, 0) == 0.795272)
+
+check("redondear_precio_a_tick: redondea al multiplo MAS CERCANO (no siempre hacia abajo)",
+      abs(bot.redondear_precio_a_tick(51.343, 0.01) - 51.34) < 1e-9,
+      f"resultado={bot.redondear_precio_a_tick(51.343, 0.01)}")
+check("redondear_precio_a_tick: tick 0 o invalido -> no toca el precio (fallback)",
+      bot.redondear_precio_a_tick(51.343, 0) == 51.343)
+
+
+class _IBFalsoContractDetailsCripto:
+    def __init__(self, min_size, incremento, min_tick=0.0):
+        self.min_size = min_size
+        self.incremento = incremento
+        self.min_tick = min_tick
+
+    def reqContractDetails(self, contrato):
+        return [types.SimpleNamespace(minSize=self.min_size, sizeIncrement=self.incremento, minTick=self.min_tick)]
+
+
+min_size_ltc, incremento_ltc, tick_ltc = bot.obtener_detalles_cripto(
+    _IBFalsoContractDetailsCripto(0.01, 0.01, 0.01), activo_btc)
+check("obtener_detalles_cripto: devuelve minSize/sizeIncrement/minTick como floats (sin redondear a entero)",
+      min_size_ltc == 0.01 and incremento_ltc == 0.01 and tick_ltc == 0.01,
+      f"min_size={min_size_ltc}, incremento={incremento_ltc}, tick={tick_ltc}")
+
+min_size_sin_datos, incremento_sin_datos, tick_sin_datos = bot.obtener_detalles_cripto(
+    _IBFalsoComprasCripto(), activo_btc)  # reqContractDetails -> [] en este fake
+check("obtener_detalles_cripto: sin datos de IBKR -> (0.0, 0.0, 0.0), no revienta",
+      min_size_sin_datos == 0.0 and incremento_sin_datos == 0.0 and tick_sin_datos == 0.0)
+
+
+# --- Extremo a extremo: revisar_compras CRYPTO respeta el incremento y el
+#     tick reales del exchange (no solo el redondeo fijo a 6 decimales de
+#     antes, y no el precio de la vela tal cual) ---
+class _IBFalsoComprasCriptoConIncremento(_IBFalsoComprasCripto):
+    def reqContractDetails(self, contrato):
+        return [types.SimpleNamespace(minSize=0.01, sizeIncrement=0.01, minTick=0.01)]
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(51.293)]  # precio bajo con ruido de decimales, tipo LTC (con BTC a 50000
+                                 # el importe de prueba ni siquiera llega a 0.01 unidades)
+
+
+bot.ACTIVOS = [activo_btc]
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None
+ib_falso_incremento = _IBFalsoComprasCriptoConIncremento()
+try:
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_falso_incremento)
+finally:
+    bot.ACTIVOS = activos_originales_compras
+    bot.analizar_activo = analizar_activo_original
+
+check("revisar_compras CRYPTO: con sizeIncrement/minTick=0.01, coloca exactamente una orden",
+      len(ib_falso_incremento.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_incremento.ordenes_colocadas}")
+if ib_falso_incremento.ordenes_colocadas:
+    orden_incremento = ib_falso_incremento.ordenes_colocadas[0]
+    cantidad_final = orden_incremento.totalQuantity
+    precio_final = orden_incremento.lmtPrice
+    # Multiplo valido de 0.01: (valor * 100) debe ser un entero (con margen
+    # para ruido de coma flotante).
+    check("revisar_compras CRYPTO: la cantidad final es multiplo del incremento real (0.01), "
+          "no el redondeo fijo a 6 decimales de antes",
+          abs(round(cantidad_final * 100) - cantidad_final * 100) < 1e-6,
+          f"totalQuantity={cantidad_final}")
+    check("revisar_compras CRYPTO: el precio limite final es multiplo del tick real (0.01), "
+          "no el precio de la vela (51.293) tal cual",
+          abs(round(precio_final * 100) - precio_final * 100) < 1e-6,
+          f"lmtPrice={precio_final}")
+
+
+# --- 9f. revisar_ventas con una posicion CRYPTO: usa LimitOrder con
+#     totalQuantity fraccionario nativo, sin pasar por la logica de venta
+#     forzada (que no aplica a cripto, no tiene "cierre diario") ---
+class _IBFalsoVentasCripto:
+    def __init__(self, posiciones):
+        self.ordenes_colocadas = []
+        self._posiciones = posiciones
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def qualifyContracts(self, contrato):
+        # Simula que IBKR resuelve el exchange real a partir del conId de la
+        # posicion (asi es como revisar_ventas completa un contrato CRYPTO
+        # que llega con exchange="" - ver bug real de produccion, error 200,
+        # sept. 2026).
+        contrato.exchange = bot.EXCHANGE_CRYPTO
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(55000.0)]  # +10% sobre el coste medio de 50000
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled", filled=None, avgFillPrice=None),
+                                      isDone=lambda: True, log=[])
+
+
+pos_venta_btc = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCost=50000.0)
+macd_bajista_original_cripto = bot.macd_5min_bajista
+bot.macd_5min_bajista = lambda ib, contrato: True  # forzar señal de venta
+
+# Peticion del usuario (sept. 2026): cripto ahora usa el mismo criterio de
+# venta que acciones (trailing stop + refuerzo + SALIDA PARCIAL) - en la
+# PRIMERA vez que se alcanza el umbral (aqui +10%, muy por encima), se
+# vende solo la mitad (PORCENTAJE_SCALE_OUT), no el 100%.
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+ib_falso_ventas_cripto = _IBFalsoVentasCripto([pos_venta_btc])
+try:
+    bot.revisar_ventas(ib_falso_ventas_cripto)
+finally:
+    bot.macd_5min_bajista = macd_bajista_original_cripto
+
+check("revisar_ventas CRYPTO: coloca exactamente una orden",
+      len(ib_falso_ventas_cripto.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_ventas_cripto.ordenes_colocadas}")
+if ib_falso_ventas_cripto.ordenes_colocadas:
+    orden_venta_cripto = ib_falso_ventas_cripto.ordenes_colocadas[0]
+    check("revisar_ventas CRYPTO: la orden es LIMITADA (no a mercado)",
+          orden_venta_cripto.orderType == "LMT", f"orderType={orden_venta_cripto.orderType}")
+    check("revisar_ventas CRYPTO: primera vez en el umbral -> SALIDA PARCIAL, "
+          "usa totalQuantity fraccionario nativo (no cashQty) por la MITAD de la posicion",
+          abs(orden_venta_cripto.totalQuantity - 0.005) < 1e-9,
+          f"totalQuantity={orden_venta_cripto.totalQuantity}")
+    check("revisar_ventas CRYPTO: accion de venta (SELL)",
+          orden_venta_cripto.action == "SELL", f"action={orden_venta_cripto.action}")
+    check("revisar_ventas CRYPTO: tras la salida parcial, el maximo SIGUE trackeado "
+          "(no se olvida, queda la mitad restante corriendo con el trailing)",
+          "CRYPTO:BTC" in bot._maximo_beneficio_neto_por_posicion,
+          f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# Un segundo ciclo con el precio retrocediendo (dispara el trailing stop):
+# ahora SI debe vender la posicion COMPLETA restante (0.01, la posicion no
+# ha cambiado en este doble de prueba) y olvidar el seguimiento.
+class _IBFalsoVentasCriptoRetroceso(_IBFalsoVentasCripto):
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(50700.0)]  # +1.4% bruto / ~0.7% neto sobre 50000 (por encima del suelo de
+                                   # 0.5%, MARGEN_MINIMO_VENTA_PCT): retroceso claro desde el +10% maximo
+
+
+ib_falso_retroceso_cripto = _IBFalsoVentasCriptoRetroceso([pos_venta_btc])
+try:
+    bot.revisar_ventas(ib_falso_retroceso_cripto)
+finally:
+    pass
+check("revisar_ventas CRYPTO: tras retroceder, VENTA TOTAL de lo que queda (trailing stop)",
+      len(ib_falso_retroceso_cripto.ordenes_colocadas) == 1
+      and abs(ib_falso_retroceso_cripto.ordenes_colocadas[0].totalQuantity - 0.01) < 1e-9,
+      f"ordenes={ib_falso_retroceso_cripto.ordenes_colocadas}")
+check("revisar_ventas CRYPTO: tras la venta total, se olvida el seguimiento",
+      "CRYPTO:BTC" not in bot._maximo_beneficio_neto_por_posicion,
+      f"cache={bot._maximo_beneficio_neto_por_posicion}")
+
+# Bug real de produccion (sept. 2026): el contrato de una posicion CRYPTO
+# que llega de ib.positions() viene con exchange="" (a diferencia de las
+# acciones), y reqHistoricalData lo rechazaba con el error 321 "Please enter
+# exchange". revisar_ventas debe rellenarlo con EXCHANGE_CRYPTO antes de
+# pedir datos.
+check("revisar_ventas CRYPTO: rellena el exchange vacio del contrato antes de pedir datos",
+      pos_venta_btc.contract.exchange == bot.EXCHANGE_CRYPTO,
+      f"exchange={pos_venta_btc.contract.exchange!r}")
+
+
+# ---------------------------------------------------------------------------
+# 9d. UMBRAL_BENEFICIO_CRYPTO_PCT: cripto usa un umbral de ARMADO mas bajo
+#     (0.3%) que acciones (0.5%, sigue en UMBRAL_BENEFICIO_PCT sin cambios),
+#     pero desde que se anadio el suelo de seguridad MARGEN_MINIMO_VENTA_PCT
+#     (0.5%, sept. 2026), NINGUN mercado vende de verdad por debajo de ese
+#     suelo aunque cripto arme el trailing (empiece a trackear el maximo)
+#     antes, a partir de 0.3%. El caso interesante es un beneficio NETO
+#     entre ambos (0.3%-0.5%): arma el trailing (lo trackea) pero NO vende
+#     todavia -antes de anadir el suelo, cripto SI vendia en ese rango-.
+# ---------------------------------------------------------------------------
+check("UMBRAL_BENEFICIO_CRYPTO_PCT es 0.3 (mas bajo que el de acciones, 0.5)",
+      bot.UMBRAL_BENEFICIO_CRYPTO_PCT == 0.3 and bot.UMBRAL_BENEFICIO_PCT == 0.5,
+      f"cripto={bot.UMBRAL_BENEFICIO_CRYPTO_PCT}, acciones={bot.UMBRAL_BENEFICIO_PCT}")
+
+
+class _IBFalsoVentasCriptoUmbral(_IBFalsoVentasCripto):
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(50550.0)]  # +1.1% bruto sobre 50000 -> ~0.4% neto tras comision (~0.7%)
+
+
+pos_venta_btc_umbral = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCost=50000.0)
+bot.macd_5min_bajista = lambda ib, contrato: True
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+ib_falso_umbral = _IBFalsoVentasCriptoUmbral([pos_venta_btc_umbral])
+try:
+    bot.revisar_ventas(ib_falso_umbral)
+finally:
+    bot.macd_5min_bajista = macd_bajista_original_cripto
+
+check("revisar_ventas CRYPTO: con beneficio neto ~0.4% (entre el umbral de armado de cripto, "
+      "0.3%, y el suelo de seguridad, 0.5%) arma el trailing pero NO vende todavia",
+      ib_falso_umbral.ordenes_colocadas == [] and "CRYPTO:BTC" in bot._maximo_beneficio_neto_por_posicion,
+      f"ordenes={ib_falso_umbral.ordenes_colocadas}, cache={bot._maximo_beneficio_neto_por_posicion}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
+
+# ---------------------------------------------------------------------------
+# 9e. Parametro `mercados` de revisar_compras/revisar_ventas: permite
+#     revisar SOLO un subconjunto de mercados (usado por main() para que
+#     CRYPTO corra en su propia cadencia de 1 min, independiente de
+#     US/HK/KR a 4 min - ver CRYPTO_INTERVALO_SEGUNDOS).
+# ---------------------------------------------------------------------------
+activos_mixtos_filtro = [
+    {"ticker": "AAPL", "exchange": "SMART", "currency": "USD", "mercado": "US"},
+    activo_btc,
+]
+activos_originales_filtro = bot.ACTIVOS
+bot.ACTIVOS = activos_mixtos_filtro
+analizar_activo_original_filtro = bot.analizar_activo
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None
+
+ib_falso_compras_filtro = _IBFalsoComprasCripto()
+try:
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_falso_compras_filtro, mercados={"CRYPTO"})
+finally:
+    bot.ACTIVOS = activos_originales_filtro
+    bot.analizar_activo = analizar_activo_original_filtro
+
+check("revisar_compras con mercados={'CRYPTO'}: solo opera BTC, ignora AAPL (mercado US)",
+      len(ib_falso_compras_filtro.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_compras_filtro.ordenes_colocadas}")
+
+pos_venta_aapl_filtro = _Posicion("AAPL", 5, 190.0)
+pos_venta_btc_filtro = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01, avgCost=50000.0)
+bot.macd_5min_bajista = lambda ib, contrato: True
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+ib_falso_ventas_filtro = _IBFalsoVentasCripto([pos_venta_aapl_filtro, pos_venta_btc_filtro])
+try:
+    bot.revisar_ventas(ib_falso_ventas_filtro, mercados={"CRYPTO"})
+finally:
+    bot.macd_5min_bajista = macd_bajista_original_cripto
+
+check("revisar_ventas con mercados={'CRYPTO'}: solo opera BTC, ignora AAPL (mercado US)",
+      len(ib_falso_ventas_filtro.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_ventas_filtro.ordenes_colocadas}")
+
+
+# ---------------------------------------------------------------------------
+# 17. actualizar_tipo_cambio_eur_usd: refresca TIPO_CAMBIO_EUR_USD con el
+#     precio real de mercado (Forex EUR.USD), en vez de dejarlo fijo a mano
+#     - peticion del usuario, sept. 2026. Throttlada: no debe pedir datos
+#     en cada llamada, solo cada INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS.
+# ---------------------------------------------------------------------------
+class _IBFalsoTipoCambio:
+    def __init__(self, precio):
+        self.precio = precio
+        self.llamadas_reqHistoricalData = 0
+        self.contrato_qualificado = None
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 12345
+        self.contrato_qualificado = contrato
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        self.llamadas_reqHistoricalData += 1
+        return [_Vela(self.precio)]
+
+    def sleep(self, segundos):
+        pass
+
+
+tipo_cambio_original = bot.TIPO_CAMBIO_EUR_USD
+ultima_actualizacion_original = bot._ultima_actualizacion_tipo_cambio
+bot.CONTRATO_EUR_USD.conId = None  # fuerza a que qualifyContracts se llame en esta prueba
+
+# Nota: time.monotonic() NO empieza necesariamente en 0 -en un contenedor
+# recien arrancado puede ser un numero pequeño-, asi que para simular "hace
+# mas de INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS" hay que restar desde
+# el "ahora" real, no asumir que 0.0 ya esta suficientemente en el pasado.
+_hace_rato = time.monotonic() - bot.INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS - 1
+try:
+    bot._ultima_actualizacion_tipo_cambio = _hace_rato  # fuerza que la primera llamada SI actualice
+    ib_falso_cambio = _IBFalsoTipoCambio(1.2345)
+    bot.actualizar_tipo_cambio_eur_usd(ib_falso_cambio)
+    check("actualizar_tipo_cambio_eur_usd: actualiza TIPO_CAMBIO_EUR_USD con el precio real",
+          bot.TIPO_CAMBIO_EUR_USD == 1.2345, f"TIPO_CAMBIO_EUR_USD={bot.TIPO_CAMBIO_EUR_USD}")
+    check("actualizar_tipo_cambio_eur_usd: pide velas de un contrato de forex (EUR.USD)",
+          ib_falso_cambio.llamadas_reqHistoricalData == 1)
+
+    # Llamada inmediata siguiente: throttlada, NO debe volver a pedir datos
+    # ni cambiar el valor, aunque el precio simulado sea distinto.
+    ib_falso_cambio_2 = _IBFalsoTipoCambio(9.9999)
+    bot.actualizar_tipo_cambio_eur_usd(ib_falso_cambio_2)
+    check("actualizar_tipo_cambio_eur_usd: una segunda llamada inmediata esta throttlada (no pide datos)",
+          ib_falso_cambio_2.llamadas_reqHistoricalData == 0)
+    check("actualizar_tipo_cambio_eur_usd: el valor no cambia mientras este throttlado",
+          bot.TIPO_CAMBIO_EUR_USD == 1.2345, f"TIPO_CAMBIO_EUR_USD={bot.TIPO_CAMBIO_EUR_USD}")
+
+    # Si falla (sin velas), se mantiene el valor anterior sin excepcion.
+    bot._ultima_actualizacion_tipo_cambio = time.monotonic() - bot.INTERVALO_ACTUALIZACION_TIPO_CAMBIO_SEGUNDOS - 1
+
+    class _IBFalsoTipoCambioSinDatos(_IBFalsoTipoCambio):
+        def reqHistoricalData(self, contrato, **kwargs):
+            self.llamadas_reqHistoricalData += 1
+            return []
+
+    bot.actualizar_tipo_cambio_eur_usd(_IBFalsoTipoCambioSinDatos(1.5))
+    check("actualizar_tipo_cambio_eur_usd: si no hay velas, mantiene el valor anterior sin excepcion",
+          bot.TIPO_CAMBIO_EUR_USD == 1.2345, f"TIPO_CAMBIO_EUR_USD={bot.TIPO_CAMBIO_EUR_USD}")
+finally:
+    bot.TIPO_CAMBIO_EUR_USD = tipo_cambio_original
+    bot._ultima_actualizacion_tipo_cambio = ultima_actualizacion_original
+
+
+# ---------------------------------------------------------------------------
+# 11. MAX_POSICIONES_ABIERTAS y caja disponible (AvailableFunds): peticion
+#     del usuario, sept. 2026 - controles agregados de riesgo, ademas de
+#     LIMITE_EXPOSICION_PCT (por posicion) y LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT.
+# ---------------------------------------------------------------------------
+class _IBFalsoLimitesAgregados:
+    def __init__(self, num_posiciones_existentes, available_funds_usd):
+        self.ordenes_colocadas = []
+        self.ordenes_objeto = []
+        self._num_posiciones_existentes = num_posiciones_existentes
+        self._available_funds_usd = available_funds_usd
+
+    def accountSummary(self):
+        resumen = [types.SimpleNamespace(tag='NetLiquidation', currency='USD', value='100000')]
+        if self._available_funds_usd is not None:
+            resumen.append(types.SimpleNamespace(tag='AvailableFunds', currency='USD',
+                                                   value=str(self._available_funds_usd)))
+        return resumen
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return [_Posicion(f"YA{i}", 1, 100.0) for i in range(self._num_posiciones_existentes)]
+
+    def sleep(self, segundos):
+        pass
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 999
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        # Serie acelerando -> señal de COMPRA en analizar_activo.
+        return [_Vela(100 * (1.02 ** i)) for i in range(60)]
+
+    def reqContractDetails(self, contrato):
+        return [types.SimpleNamespace(minSize=1, sizeIncrement=1)]
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        self.ordenes_objeto.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Submitted"), isDone=lambda: True)
+
+
+activo_prueba_limites = [{"ticker": "NUEVO", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+
+es_horario_original_limites = bot.es_horario_operativo
+en_ventana_sin_compra_original_limites = bot.en_ventana_sin_compra
+en_postmercado_us_original_limites = bot.en_postmercado_us
+activos_originales_limites = bot.ACTIVOS
+bot.ACTIVOS = activo_prueba_limites
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+bot.en_postmercado_us = lambda: False
+try:
+    # Ya hay MAX_POSICIONES_ABIERTAS posiciones distintas abiertas -> un
+    # ticker NUEVO (que no es ninguna de esas) debe omitirse.
+    ib_lleno = _IBFalsoLimitesAgregados(bot.MAX_POSICIONES_ABIERTAS, available_funds_usd=100000)
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_lleno)
+    check("revisar_compras: con MAX_POSICIONES_ABIERTAS ya alcanzado, NO compra un ticker nuevo",
+          ib_lleno.ordenes_colocadas == [], f"ordenes={ib_lleno.ordenes_colocadas}")
+
+    # Con hueco libre (menos posiciones que el limite), SI compra.
+    ib_con_hueco = _IBFalsoLimitesAgregados(bot.MAX_POSICIONES_ABIERTAS - 1, available_funds_usd=100000)
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_con_hueco)
+    check("revisar_compras: con hueco libre bajo MAX_POSICIONES_ABIERTAS, SI compra el ticker nuevo",
+          "NUEVO" in ib_con_hueco.ordenes_colocadas, f"ordenes={ib_con_hueco.ordenes_colocadas}")
+
+    # AvailableFunds insuficiente (menos que el importe de la operacion) ->
+    # se omite aunque haya hueco de posiciones y margen de exposicion.
+    ib_sin_caja = _IBFalsoLimitesAgregados(0, available_funds_usd=1.0)
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_sin_caja)
+    check("revisar_compras: con AvailableFunds insuficiente, NO compra aunque haya señal y hueco",
+          ib_sin_caja.ordenes_colocadas == [], f"ordenes={ib_sin_caja.ordenes_colocadas}")
+
+    # AvailableFunds insuficiente para el importe ESTANDAR pero suficiente
+    # para uno REDUCIDO que deje el margen minimo: compra ese importe
+    # reducido en vez de omitir la compra entera (peticion del usuario,
+    # sept. 2026, igual que en bot_alpaca.py). 350 USD deja margen para al
+    # menos 1 accion entera (~321 USD) incluso si el test corre fuera de
+    # la sesion regular (donde solo se admiten acciones enteras, no
+    # fracciones via API).
+    ib_caja_reducida = _IBFalsoLimitesAgregados(0, available_funds_usd=350.0)
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_caja_reducida)
+    check("revisar_compras: con AvailableFunds insuficiente para el importe estandar pero suficiente "
+          "para uno reducido, SI compra (reducido, dejando el margen minimo)",
+          "NUEVO" in ib_caja_reducida.ordenes_colocadas, f"ordenes={ib_caja_reducida.ordenes_colocadas}")
+    if ib_caja_reducida.ordenes_objeto:
+        importe_esperado = 350.0 - bot.MARGEN_EFECTIVO_MINIMO_USD
+        orden_colocada = ib_caja_reducida.ordenes_objeto[0]
+        importe_real = (orden_colocada.totalQuantity * 321.66968513386416 if orden_colocada.totalQuantity
+                         else orden_colocada.cashQty)
+        check("revisar_compras: el importe reducido usado no supera (fondos - margen minimo), ni "
+              "el importe estandar completo",
+              importe_real <= importe_esperado + 0.01 and importe_real < 1140.0,
+              f"importe_real={importe_real}, esperado_max={importe_esperado}")
+
+    # Sin el tag AvailableFunds en absoluto (p.ej. fallo al leerlo): no debe
+    # romper nada, simplemente no se aplica ese limite concreto.
+    ib_sin_tag = _IBFalsoLimitesAgregados(0, available_funds_usd=None)
+    excepcion_sin_tag = None
+    try:
+        bot._cache_temporalidades_largas = {}
+        bot.revisar_compras(ib_sin_tag)
+    except Exception as e:
+        excepcion_sin_tag = e
+    check("revisar_compras: si AvailableFunds no esta disponible, no lanza excepcion y sigue comprando",
+          excepcion_sin_tag is None and "NUEVO" in ib_sin_tag.ordenes_colocadas,
+          f"excepcion={excepcion_sin_tag}, ordenes={ib_sin_tag.ordenes_colocadas}")
+finally:
+    bot.ACTIVOS = activos_originales_limites
+    bot.es_horario_operativo = es_horario_original_limites
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original_limites
+    bot.en_postmercado_us = en_postmercado_us_original_limites
+
+
+# ---------------------------------------------------------------------------
+# 12. Cache de temporalidades LARGAS (dia/semana): peticion del usuario,
+#     sept. 2026 - con un horizonte de trading de horas, la tendencia
+#     diaria/semanal se usa como filtro de fondo, no como señal de entrada,
+#     asi que no hace falta pedirla de nuevo en cada ciclo: se calcula una
+#     vez por dia natural y se reutiliza el resto del dia.
+# ---------------------------------------------------------------------------
+class _IBContadorPeticiones:
+    """Cuenta cuantas veces se pide CADA barSize por separado, para poder
+    comprobar que 'dia'/'semana' NO se vuelven a pedir en la segunda
+    llamada (cache), mientras que las cortas SI se piden de nuevo cada
+    vez."""
+
+    def __init__(self, precios_por_barsize):
+        self.precios_por_barsize = precios_por_barsize
+        self.peticiones_por_barsize = {}
+
+    def qualifyContracts(self, contrato):
+        contrato.conId = 12345
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        barsize = kwargs["barSizeSetting"]
+        self.peticiones_por_barsize[barsize] = self.peticiones_por_barsize.get(barsize, 0) + 1
+        return [_Vela(p) for p in self.precios_por_barsize[barsize]]
+
+    def sleep(self, segundos):
+        pass
+
+
+activo_cache_largas = {"ticker": "CACHE_TEST", "exchange": "SMART", "currency": "USD", "mercado": "US"}
+precios_por_barsize_cache = {
+    "1 min": SERIE_BAJISTA, "5 mins": SERIE_BAJISTA, "15 mins": SERIE_BAJISTA,
+    "30 mins": SERIE_BAJISTA, "1 hour": SERIE_BAJISTA,
+    "1 day": SERIE_ACELERANDO_BAJA, "1 week": SERIE_ACELERANDO_BAJA,
+}
+TF_DIA = {"nombre": "1 dia", "barSize": "1 day", "duration": "1 Y", "tipo": "larga"}
+
+fraccion_dia_original = bot._fraccion_transcurrida_del_dia
+fraccion_semana_original = bot._fraccion_transcurrida_de_la_semana
+
+# Primero, con el periodo recien EMPEZADO (fraccion baja, modo "cerrada"):
+# comportamiento identico al de un cache normal de "una vez al dia".
+bot._fraccion_transcurrida_del_dia = lambda mercado: 0.1
+bot._fraccion_transcurrida_de_la_semana = lambda mercado: 0.1
+try:
+    bot._cache_temporalidades_largas = {}
+    ib_cache_largas = _IBContadorPeticiones(precios_por_barsize_cache)
+    bot.analizar_activo(ib_cache_largas, activo_cache_largas)
+    bot.analizar_activo(ib_cache_largas, activo_cache_largas)
+
+    check("cache temporalidades largas (modo cerrada): '1 dia' solo se pide UNA vez (2 llamadas)",
+          ib_cache_largas.peticiones_por_barsize.get("1 day") == 1,
+          f"peticiones={ib_cache_largas.peticiones_por_barsize}")
+    check("cache temporalidades largas (modo cerrada): '1 week' solo se pide UNA vez (2 llamadas)",
+          ib_cache_largas.peticiones_por_barsize.get("1 week") == 1,
+          f"peticiones={ib_cache_largas.peticiones_por_barsize}")
+    check("cache temporalidades largas: las CORTAS (p.ej. '1 min') SI se piden en cada llamada (sin cache)",
+          ib_cache_largas.peticiones_por_barsize.get("1 min") == 2,
+          f"peticiones={ib_cache_largas.peticiones_por_barsize}")
+
+    # Si cambia el dia (cache de otra fecha), se vuelve a pedir.
+    for nombre_tf in ("1 dia", "1 semana"):
+        bot._cache_temporalidades_largas["CACHE_TEST"][nombre_tf]["fecha"] = date(2000, 1, 1)
+    bot.analizar_activo(ib_cache_largas, activo_cache_largas)
+    check("cache temporalidades largas: al cambiar de dia, se vuelve a pedir '1 dia'/'1 semana'",
+          ib_cache_largas.peticiones_por_barsize.get("1 day") == 2
+          and ib_cache_largas.peticiones_por_barsize.get("1 week") == 2,
+          f"peticiones={ib_cache_largas.peticiones_por_barsize}")
+
+    # modo "cerrada": usa SOLO barras CERRADAS (iloc[-2] vs iloc[-4], no
+    # iloc[-1] vs iloc[-3]) - bug real corregido (sept. 2026): antes se
+    # comparaba con la barra del dia/semana EN CURSO, ruido puro al
+    # principio del periodo (p.ej. un lunes por la mañana).
+    bot._cache_temporalidades_largas = {}
+    detalle_larga = bot._detalle_larga_cacheado(ib_cache_largas, None, "OTRO_TICKER", TF_DIA, "US")
+    check("cache temporalidades largas (modo cerrada): usa barras cerradas "
+          "(SERIE_ACELERANDO_BAJA -> bajista/False)",
+          detalle_larga is False, f"detalle_larga={detalle_larga}")
+finally:
+    bot._fraccion_transcurrida_del_dia = fraccion_dia_original
+    bot._fraccion_transcurrida_de_la_semana = fraccion_semana_original
+
+# --- Peticion del usuario: a partir del 40% del periodo transcurrido, SI se
+#     tiene en cuenta la vela en curso (iloc[-1] vs iloc[-3]), refrescando
+#     cada hora en vez de en cada ciclo -sigue ahorrando peticiones, pero ya
+#     no se queda con un dato de hace horas una vez hay suficiente
+#     informacion real del dia/semana en marcha-. ---
+bot._fraccion_transcurrida_del_dia = lambda mercado: 0.5  # 50%: por encima del umbral del 40%
+bot._fraccion_transcurrida_de_la_semana = lambda mercado: 0.5
+try:
+    bot._cache_temporalidades_largas = {}
+    ib_cache_en_curso = _IBContadorPeticiones(precios_por_barsize_cache)
+    detalle_en_curso_1 = bot._detalle_larga_cacheado(ib_cache_en_curso, None, "TICKER_EN_CURSO", TF_DIA, "US")
+    check("cache temporalidades largas (modo en_curso, >=40%): usa la vela en curso (iloc[-1] vs iloc[-3])",
+          detalle_en_curso_1 is False, f"detalle={detalle_en_curso_1}")
+
+    # Segunda llamada INMEDIATA (mismo dia, sigue en_curso): no deberia
+    # volver a pedir datos (throttle de 1h), reutiliza el resultado.
+    bot._detalle_larga_cacheado(ib_cache_en_curso, None, "TICKER_EN_CURSO", TF_DIA, "US")
+    check("cache temporalidades largas (modo en_curso): una segunda llamada INMEDIATA no vuelve a pedir "
+          "datos (throttle de 1h)",
+          ib_cache_en_curso.peticiones_por_barsize.get("1 day") == 1,
+          f"peticiones={ib_cache_en_curso.peticiones_por_barsize}")
+
+    # Si ha pasado mas de 1 hora desde la ultima actualizacion, SI se
+    # refresca (aunque sea el mismo dia y siga en modo en_curso).
+    bot._cache_temporalidades_largas["TICKER_EN_CURSO"]["1 dia"]["ultima_actualizacion"] = (
+        time.monotonic() - bot.INTERVALO_REFRESCO_VELA_EN_CURSO_SEGUNDOS - 1)
+    bot._detalle_larga_cacheado(ib_cache_en_curso, None, "TICKER_EN_CURSO", TF_DIA, "US")
+    check("cache temporalidades largas (modo en_curso): pasada 1h desde la ultima actualizacion, se refresca",
+          ib_cache_en_curso.peticiones_por_barsize.get("1 day") == 2,
+          f"peticiones={ib_cache_en_curso.peticiones_por_barsize}")
+finally:
+    bot._fraccion_transcurrida_del_dia = fraccion_dia_original
+    bot._fraccion_transcurrida_de_la_semana = fraccion_semana_original
+
+
+# ---------------------------------------------------------------------------
+# Resumen final
+# ---------------------------------------------------------------------------
+print()
+if fallos:
+    print(f"{len(fallos)} test(s) FALLARON: {fallos}")
+    sys.exit(1)
+else:
+    print("Todos los tests pasaron correctamente.")

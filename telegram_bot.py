@@ -1,0 +1,443 @@
+"""
+telegram_bot.py - control y consulta del bot de Alpaca desde Telegram (movil).
+
+Proceso APARTE del propio bot de trading (bot_alpaca.py) y de su servicio
+systemd (bot-alpaca) -pensado para correr como su propio servicio systemd
+(telegram-bot), en paralelo, sin que un fallo aqui pueda afectar al trading-.
+Usa "long polling" contra la API HTTP de Telegram (metodo getUpdates): no
+hace falta librería extra (`python-telegram-bot`, etc.), solo `requests`,
+que ya es una dependencia transitiva de alpaca-py.
+
+Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
+    /estado      - si el servicio bot-alpaca esta activo o parado
+    /arrancar    - arranca el servicio (systemctl start bot-alpaca)
+    /parar       - para el servicio (systemctl stop bot-alpaca)
+    /actualizar  - git pull en el repo y, si trajo cambios, reinicia bot-alpaca
+                   Y este propio bot de Telegram (con un pequeño retraso, ver
+                   _reiniciar_telegram_bot_diferido()) - para desplegar sin
+                   necesitar un cliente SSH, solo desde Telegram
+    /version     - hash + fecha + mensaje del commit REALMENTE en marcha
+                   ahora mismo (para confirmar si un fix concreto ya esta
+                   desplegado, sin fiarse de la memoria)
+    /cartera     - posiciones abiertas (igual que cartera_alpaca.py)
+    /hoy         - resumen de actividad de hoy (num. compras/ventas y
+                   acciones totales de cada lado) + detalle de las ventas cerradas
+    /ayer        - lo mismo, del dia anterior
+    /semana      - lo mismo, de la semana laboral actual (lunes a hoy)
+    /log         - actividad reciente (compras, ventas, avisos y errores; se
+                   filtran los mensajes rutinarios de cada ciclo -"se
+                   mantiene", "se deja correr", etc.- para que sea una lista
+                   corta y legible, con los numeros en formato español)
+    /ayuda       - lista de comandos
+
+Variables de entorno necesarias (ver ALPACA_NOTES.md):
+    TELEGRAM_BOT_TOKEN   - token del bot, dado por @BotFather
+    TELEGRAM_CHAT_ID     - id numerico de tu chat/usuario de Telegram
+                           (unico chat al que responde; cualquier otro se ignora)
+
+Ademas necesita que el usuario que ejecuta este script tenga permiso para
+arrancar/parar el servicio bot-alpaca SIN contraseña (ver ALPACA_NOTES.md,
+seccion "sudoers" para la regla exacta) -si no, /arrancar y /parar fallaran
+con un error de permisos, pero el resto de comandos (solo lectura) funcionan
+igual.
+"""
+import os
+import re
+import subprocess
+import sys
+import time
+
+import requests
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise SystemExit(
+        "Faltan las variables de entorno TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID. "
+        "Ver ALPACA_NOTES.md para como crear el bot y conseguir estos valores."
+    )
+
+# Import diferido a bot_alpaca / cartera_alpaca: requieren ALPACA_API_KEY y
+# ALPACA_SECRET_KEY ya puestas en el entorno (las mismas que usa el bot).
+import bot_alpaca as bot  # noqa: E402
+import cartera_alpaca as cartera  # noqa: E402
+
+API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+TIMEOUT_LARGO_POLLING_SEGUNDOS = 30  # long polling: la peticion se queda esperando hasta que hay un mensaje nuevo, o hasta este limite
+NOMBRE_SERVICIO_BOT = "bot-alpaca"
+NOMBRE_SERVICIO_TELEGRAM = "telegram-bot"
+
+# /carterapaper (peticion del usuario, sept. 2026): tras pasar el bot a
+# REAL, no habia forma de consultar el estado de la cuenta PAPER (el bot
+# solo mantiene un cliente activo, el de la cuenta con la que opera). Estas
+# dos variables son OPCIONALES: si no estan puestas, /carterapaper avisa
+# con un mensaje claro en vez de fallar. Requieren las claves de la cuenta
+# PAPER, DISTINTAS de ALPACA_API_KEY/ALPACA_SECRET_KEY (que ahora son las
+# de la cuenta REAL).
+ALPACA_PAPER_API_KEY = os.environ.get("ALPACA_PAPER_API_KEY", "")
+ALPACA_PAPER_SECRET_KEY = os.environ.get("ALPACA_PAPER_SECRET_KEY", "")
+_cliente_paper = None  # se crea una sola vez, de forma perezosa (lazy), en _obtener_cliente_paper()
+
+
+def _obtener_cliente_paper():
+    """Crea (la primera vez) y devuelve un TradingClient aparte para la
+    cuenta PAPER, independiente del que usa bot_alpaca.py para operar (que
+    ahora es el de la cuenta REAL). None si faltan las variables de entorno."""
+    global _cliente_paper
+    if not ALPACA_PAPER_API_KEY or not ALPACA_PAPER_SECRET_KEY:
+        return None
+    if _cliente_paper is None:
+        _cliente_paper = bot.TradingClient(ALPACA_PAPER_API_KEY, ALPACA_PAPER_SECRET_KEY, paper=True)
+        bot._forzar_timeout_por_defecto(_cliente_paper)
+    return _cliente_paper
+
+
+def log(mensaje):
+    print(f"[telegram_bot] {mensaje}", flush=True)
+
+
+def enviar_mensaje(texto):
+    try:
+        requests.post(f"{API_URL}/sendMessage",
+                      data={"chat_id": TELEGRAM_CHAT_ID, "text": texto, "parse_mode": "HTML"},
+                      timeout=10)
+    except Exception as e:
+        log(f"No se pudo enviar respuesta a Telegram: {type(e).__name__}: {e}")
+
+
+def escapar_html(texto):
+    return texto.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def ejecutar_systemctl(accion):
+    """Ejecuta 'sudo systemctl <accion> bot-alpaca'. Requiere que el sudoers
+    del usuario permita este comando exacto sin contraseña (ver ALPACA_NOTES.md)."""
+    try:
+        resultado = subprocess.run(
+            ["sudo", "systemctl", accion, NOMBRE_SERVICIO_BOT],
+            capture_output=True, text=True, timeout=20
+        )
+        if resultado.returncode != 0:
+            return f"⚠️ No se pudo {accion} el bot: {resultado.stderr.strip() or resultado.stdout.strip()}"
+        return None
+    except Exception as e:
+        return f"⚠️ Error al intentar {accion} el bot: {type(e).__name__}: {e}"
+
+
+def consultar_estado_servicio():
+    try:
+        resultado = subprocess.run(
+            ["systemctl", "is-active", NOMBRE_SERVICIO_BOT],
+            capture_output=True, text=True, timeout=10
+        )
+        return resultado.stdout.strip()
+    except Exception as e:
+        return f"desconocido ({type(e).__name__})"
+
+
+DIRECTORIO_REPO = os.path.dirname(os.path.abspath(__file__))
+
+
+def consultar_version():
+    """/version (añadido sept. 2026, tras un analisis de operaciones que
+    detecto sospechas de que el codigo commiteado en git no coincidia con
+    el codigo REALMENTE en marcha en el servidor durante varios dias -un
+    fallo de seguridad ya arreglado en el repo pudo seguir activo en
+    produccion por no haberse desplegado a tiempo-. Devuelve el commit
+    actual (hash corto + fecha + mensaje) tal y como lo ve el proceso en
+    marcha, para poder confirmar de un vistazo si un fix concreto ya esta
+    desplegado, sin tener que fiarse de la memoria de cuando se desplego
+    la ultima vez."""
+    try:
+        resultado = subprocess.run(
+            ["git", "log", "-1", "--format=%h %ad %s", "--date=iso"],
+            cwd=DIRECTORIO_REPO, capture_output=True, text=True, timeout=10
+        )
+        if resultado.returncode != 0:
+            return f"⚠️ No se pudo leer el commit actual: {resultado.stderr.strip()}"
+        return f"📌 Commit en marcha ahora mismo:\n<pre>{escapar_html(resultado.stdout.strip())}</pre>"
+    except Exception as e:
+        return f"⚠️ Error al leer el commit actual: {type(e).__name__}: {e}"
+
+
+def _reiniciar_telegram_bot_diferido():
+    """Reinicia el propio servicio telegram-bot (este script), pero con un
+    pequeño retraso ejecutado en un proceso hijo desatendido -si se
+    reiniciara sin retraso, este mismo proceso se mataria a si mismo a
+    mitad de enviar la respuesta de /actualizar a Telegram-. El retraso da
+    tiempo de sobra a que enviar_mensaje() complete esa peticion HTTP antes
+    de que systemctl mate el proceso. Requiere el mismo tipo de permiso de
+    sudoers sin contraseña que /arrancar, /parar y el reinicio de
+    bot-alpaca (ver ALPACA_NOTES.md), pero para 'systemctl restart
+    telegram-bot'."""
+    try:
+        subprocess.Popen(
+            ["bash", "-c", "sleep 3 && sudo systemctl restart telegram-bot"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        return None
+    except Exception as e:
+        return f"⚠️ Error al programar el reinicio de telegram-bot: {type(e).__name__}: {e}"
+
+
+def actualizar_codigo():
+    """/actualizar (peticion del usuario, sept. 2026: poder desplegar
+    cambios sin necesitar un cliente SSH, solo desde Telegram). Hace
+    'git pull' en el repo y, si trajo cambios nuevos, reinicia bot-alpaca
+    Y este propio bot de Telegram (con un pequeño retraso, ver
+    _reiniciar_telegram_bot_diferido()) para que el codigo nuevo entre en
+    marcha en los dos. Requiere que el sudoers del usuario permita
+    'systemctl restart bot-alpaca' y 'systemctl restart telegram-bot' sin
+    contraseña (mismo requisito que /arrancar y /parar, ver
+    ALPACA_NOTES.md) y que el repo no tenga cambios locales sin commitear
+    que choquen con git pull -en ese caso git pull falla limpiamente y no
+    se toca ningun servicio-."""
+    try:
+        resultado_pull = subprocess.run(
+            ["git", "pull"], cwd=DIRECTORIO_REPO, capture_output=True, text=True, timeout=30
+        )
+    except Exception as e:
+        return f"⚠️ Error al ejecutar git pull: {type(e).__name__}: {e}"
+
+    salida_pull = (resultado_pull.stdout + resultado_pull.stderr).strip()
+    if resultado_pull.returncode != 0:
+        return f"⚠️ git pull falló, no se ha tocado el bot:\n<pre>{escapar_html(salida_pull)}</pre>"
+
+    if "Already up to date" in salida_pull or "ya está actualizado" in salida_pull.lower():
+        return f"✅ Ya estaba actualizado, no había cambios nuevos.\n<pre>{escapar_html(salida_pull)}</pre>"
+
+    error_reinicio = ejecutar_systemctl("restart")
+    error_reinicio_telegram = _reiniciar_telegram_bot_diferido()
+
+    if error_reinicio:
+        aviso_telegram = f"\n\n{error_reinicio_telegram}" if error_reinicio_telegram else ""
+        return (f"✅ Código actualizado, pero falló el reinicio de bot-alpaca:\n"
+                f"<pre>{escapar_html(salida_pull)}</pre>\n\n{error_reinicio}{aviso_telegram}")
+
+    if error_reinicio_telegram:
+        return (f"✅ Código actualizado y bot-alpaca reiniciado:\n<pre>{escapar_html(salida_pull)}</pre>\n\n"
+                f"{error_reinicio_telegram}")
+
+    return (f"✅ Código actualizado, bot-alpaca reiniciado ya:\n<pre>{escapar_html(salida_pull)}</pre>\n\n"
+            f"🔄 Este bot de Telegram se reiniciará solo en unos segundos para aplicar el cambio "
+            f"(si te responde con un poco de retraso justo ahora, es por eso).")
+
+
+LIMITE_CARACTERES_LOG_TELEGRAM = 3500  # margen bajo el limite de 4096 de un mensaje de Telegram
+
+
+def _es_linea_separadora(linea):
+    """Lineas puramente decorativas que el propio bot imprime: '====...', o
+    cabeceras de seccion como '##### VENTAS #####' -esto ultimo es
+    redundante en la lista filtrada, ya que cada linea de accion real
+    empieza igualmente por 'VENTAS: TICKER - ...' o 'COMPRAS: TICKER - ...'-."""
+    linea = linea.strip()
+    return not linea or set(linea) <= {"=", "#", "-"} or (linea.startswith("##") and linea.endswith("##"))
+
+
+# Fragmentos de lineas RUTINARIAS (se repiten para cada uno de los ~30
+# tickers en CADA ciclo, cada ~130s) que no aportan nada al ver "que ha
+# hecho el bot" desde el movil -solo las compras/ventas reales, avisos y
+# errores son interesantes-. Lista curada a mano, no exhaustiva: si el
+# texto de estos mensajes cambia en bot_alpaca.py, puede hacer falta
+# actualizar esta lista tambien.
+FRAGMENTOS_RUIDO_LOG = [
+    "Iniciando nuevo ciclo de revision.",
+    "analizando 30 valores en lote",
+    "por debajo del umbral -> se mantiene",
+    "MACD 5min ALCISTA -> se deja correr",
+    "datos insuficientes para MACD",
+    "no se pudo obtener precio",
+    "ya tiene",
+    "dentro de la ventana de no-compra",
+    "no hay posiciones abiertas",
+    "fuera de horario operativo",
+    "no se analiza ningun valor",
+    "Ciclo completado.",
+    "0 señales de compra, 0 errores.",
+]
+
+
+def _es_linea_ruido(linea):
+    return any(fragmento in linea for fragmento in FRAGMENTOS_RUIDO_LOG)
+
+
+_PATRON_DECIMAL = re.compile(r"(?<!\d)(\d+)\.(\d+)")
+
+
+def _numeros_a_formato_es(texto):
+    """Cambia el punto decimal por coma en una linea de log ya escrita (estas
+    lineas nunca llevan separador de miles, asi que basta con este cambio;
+    ver bot.formato_es() para el formateo completo usado en /cartera, /hoy,
+    etc., generado desde los numeros crudos en vez de sobre texto ya
+    formateado)."""
+    return _PATRON_DECIMAL.sub(r"\1,\2", texto)
+
+
+_PATRON_LINEA_LOG = re.compile(r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\]\s?(.*)$")
+_PATRON_BANNER = re.compile(r"^=+\s*(.*[a-zA-Z0-9].*?)\s*=+$")
+
+
+def _formatear_lineas_log(lineas):
+    """Agrupa las lineas del log por fecha (una sola cabecera de fecha, no
+    repetida en cada linea) y muestra solo la hora en cada una -mucho mas
+    facil de leer en el movil que repetir 'AAAA-MM-DD HH:MM:SS' entero en
+    cada linea-. Se saltan las lineas cuyo mensaje queda vacio tras quitar
+    la marca de tiempo (los huecos en blanco que separan tramos del log), y
+    las cabeceras decorativas tipo '========== texto ==========' se
+    muestran sin el relleno de '=', a modo de sub-titulo de seccion."""
+    bloques = []
+    fecha_actual = None
+    for linea in lineas:
+        m = _PATRON_LINEA_LOG.match(linea)
+        fecha, hora, resto = m.groups() if m else (None, None, linea)
+        resto = resto.strip()
+        if not resto:
+            continue
+        resto = escapar_html(_numeros_a_formato_es(resto))
+        if fecha and fecha != fecha_actual:
+            bloques.append(f"📅 <b>{fecha}</b>")
+            fecha_actual = fecha
+        m_banner = _PATRON_BANNER.match(resto)
+        if m_banner:
+            bloques.append(f"▸ <b>{m_banner.group(1)}</b>")
+        elif hora:
+            bloques.append(f"• {hora} {resto}")
+        else:
+            bloques.append(f"• {resto}")
+    return "\n".join(bloques)
+
+
+def obtener_ultimas_lineas_log(n=150):
+    try:
+        # -o cat quita el prefijo propio de journalctl (fecha del sistema,
+        # nombre de host, unidad[PID]:) que duplica la marca de tiempo que ya
+        # pone el propio bot en cada linea.
+        resultado = subprocess.run(
+            ["journalctl", "-u", NOMBRE_SERVICIO_BOT, "-n", str(n), "--no-pager", "-o", "cat"],
+            capture_output=True, text=True, timeout=15
+        )
+        lineas = [l for l in resultado.stdout.splitlines()
+                  if not _es_linea_separadora(l) and not _es_linea_ruido(l)]
+    except Exception as e:
+        return f"No se pudo leer el log: {type(e).__name__}: {e}"
+
+    lista = _formatear_lineas_log(lineas)
+    if not lista:
+        return "📄 <b>ACTIVIDAD RECIENTE</b>\n(sin compras, ventas ni avisos en las últimas líneas del log)"
+
+    if len(lista) > LIMITE_CARACTERES_LOG_TELEGRAM:
+        lista = "(...)\n" + lista[-LIMITE_CARACTERES_LOG_TELEGRAM:]
+    return "📄 <b>ACTIVIDAD RECIENTE</b>\n" + lista
+
+
+AYUDA = (
+    "🤖 Comandos disponibles:\n"
+    "/estado - si el bot esta corriendo o parado\n"
+    "/arrancar - arranca el bot\n"
+    "/parar - para el bot\n"
+    "/actualizar - descarga el codigo mas reciente (git pull) y reinicia el bot de trading y este bot de Telegram\n"
+    "/version - que commit de codigo esta REALMENTE en marcha ahora mismo\n"
+    "/cartera - posiciones abiertas (cuenta activa del bot)\n"
+    "/carterapaper - posiciones abiertas de la cuenta PAPER (aparte de la activa)\n"
+    "/hoy - actividad y operaciones cerradas hoy\n"
+    "/ayer - operaciones cerradas ayer\n"
+    "/semana - operaciones cerradas esta semana\n"
+    "/log - actividad reciente (compras, ventas, avisos)\n"
+    "/ayuda - esta lista"
+)
+
+
+def procesar_comando(texto):
+    comando = texto.strip().split()[0].lower().lstrip("/") if texto.strip() else ""
+
+    if comando == "estado":
+        estado = consultar_estado_servicio()
+        emoji = "🟢" if estado == "active" else "🔴"
+        return f"{emoji} Estado del bot: {estado}"
+
+    if comando == "arrancar":
+        error = ejecutar_systemctl("start")
+        return error or "🟢 Bot arrancado."
+
+    if comando == "parar":
+        error = ejecutar_systemctl("stop")
+        return error or "🔴 Bot parado."
+
+    if comando == "actualizar":
+        return actualizar_codigo()
+
+    if comando == "version":
+        return consultar_version()
+
+    if comando == "cartera":
+        return cartera.formatear_posiciones_abiertas(html=True)
+
+    if comando == "carterapaper":
+        cliente_paper = _obtener_cliente_paper()
+        if cliente_paper is None:
+            return ("⚠️ Faltan las variables de entorno ALPACA_PAPER_API_KEY y/o "
+                    "ALPACA_PAPER_SECRET_KEY -son las claves de la cuenta PAPER, distintas "
+                    "de ALPACA_API_KEY/ALPACA_SECRET_KEY (ahora las de la cuenta REAL). "
+                    "Ver ALPACA_NOTES.md.")
+        return cartera.formatear_posiciones_abiertas(html=True, client=cliente_paper, modo_etiqueta="PAPER")
+
+    if comando in ("hoy", "ayer", "semana"):
+        args_falsos = type("Args", (), {
+            "ayer": comando == "ayer", "semana": comando == "semana", "desde": None, "hasta": None,
+        })()
+        desde, hasta = cartera.calcular_rango(args_falsos)
+        return (cartera.formatear_actividad(desde, hasta, html=True) + "\n\n"
+                + cartera.formatear_operaciones_cerradas(desde, hasta, html=True))
+
+    if comando == "log":
+        return obtener_ultimas_lineas_log()
+
+    if comando in ("ayuda", "start", "help"):
+        return AYUDA
+
+    return "No entiendo ese comando. Escribe /ayuda para ver la lista."
+
+
+def bucle_principal():
+    log("Arrancado. Escuchando mensajes de Telegram (long polling)...")
+    offset = None
+    while True:
+        try:
+            params = {"timeout": TIMEOUT_LARGO_POLLING_SEGUNDOS}
+            if offset is not None:
+                params["offset"] = offset
+            respuesta = requests.get(f"{API_URL}/getUpdates", params=params,
+                                      timeout=TIMEOUT_LARGO_POLLING_SEGUNDOS + 10)
+            respuesta.raise_for_status()
+            datos = respuesta.json()
+
+            for actualizacion in datos.get("result", []):
+                offset = actualizacion["update_id"] + 1
+                mensaje = actualizacion.get("message") or actualizacion.get("edited_message")
+                if not mensaje:
+                    continue
+                chat_id = str(mensaje.get("chat", {}).get("id", ""))
+                texto = mensaje.get("text", "")
+                if chat_id != str(TELEGRAM_CHAT_ID):
+                    log(f"Mensaje ignorado de chat no autorizado ({chat_id}).")
+                    continue
+                if not texto:
+                    continue
+                log(f"Comando recibido: {texto}")
+                try:
+                    respuesta_texto = procesar_comando(texto)
+                except Exception as e:
+                    respuesta_texto = f"⚠️ Error al procesar el comando: {type(e).__name__}: {e}"
+                enviar_mensaje(respuesta_texto)
+        except requests.exceptions.RequestException as e:
+            log(f"Error de red al consultar Telegram: {type(e).__name__}: {e}. Reintentando en 10s...")
+            time.sleep(10)
+        except Exception as e:
+            log(f"ERROR inesperado: {type(e).__name__}: {e}. Reintentando en 10s...")
+            time.sleep(10)
+
+
+if __name__ == "__main__":
+    bucle_principal()
