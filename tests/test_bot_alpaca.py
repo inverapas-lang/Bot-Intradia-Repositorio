@@ -903,6 +903,41 @@ check("venta principal de acciones: si la orden IOC no se ejecuta (mercado nunca
       "limite protegido), NO se registra ninguna venta ni se avisa por Telegram",
       mensajes_ioc_no_ejecutada == [], f"mensajes={mensajes_ioc_no_ejecutada}")
 
+# --- BUG REAL DE PRODUCCION (sept. 2026, el mismo dia que se despliega la
+# venta LIMITADA+IOC de arriba): Alpaca rechaza toda orden con cantidad
+# FRACCIONARIA combinada con IOC ("fractional orders must be DAY orders",
+# codigo 42210000). Casi todas las posiciones reales de este bot son
+# fraccionarias (operaciones de $5-30) -el bug real en produccion: NINGUNA
+# venta principal de acciones llegaba a ejecutarse, la API rechazaba la
+# orden siempre. Para cantidades fraccionarias se usa DAY en su lugar
+# (misma proteccion de precio, solo cambia si se cancela sola al instante
+# o en el siguiente ciclo via cancelar_ordenes_abiertas). ---
+bot.macd_5min_bajista_2_velas = lambda ticker: False
+bot._maximo_beneficio_neto_por_posicion = {"TRAIL": 5.0}
+bot._scale_out_realizado = {"TRAIL"}
+cliente_orden_fraccionaria = _TradingClientFalso(posiciones=[_posicion_trailing(100.0, cantidad=10.3183)])
+bot._trading_client = cliente_orden_fraccionaria
+bot._data_client = _DataClientPrecioFijo(101.0)  # +1%: dispara el trailing
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("venta principal de acciones con cantidad FRACCIONARIA: usa DAY, no IOC (Alpaca rechaza "
+      "fraccionario+IOC con 'fractional orders must be DAY orders')",
+      len(cliente_orden_fraccionaria.ordenes) == 1
+      and cliente_orden_fraccionaria.ordenes[0].time_in_force.value == "day",
+      f"ordenes={cliente_orden_fraccionaria.ordenes}")
+if cliente_orden_fraccionaria.ordenes:
+    check("venta principal de acciones con cantidad FRACCIONARIA: sigue con el mismo precio "
+          "limite acotado (la proteccion de precio no depende del TIF)",
+          abs(cliente_orden_fraccionaria.ordenes[0].limit_price - bot.calcular_precio_limite_venta(101.0)) < 1e-6,
+          f"limit_price={cliente_orden_fraccionaria.ordenes[0].limit_price}")
+
 
 # --- BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de WMT se
 # ejecuto de verdad -aparecio en /cartera- pero /hoy seguia mostrando "0

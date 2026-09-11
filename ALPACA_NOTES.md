@@ -929,6 +929,34 @@ vez de dejarlo sin ningún límite. Mismo cambio en `bot_completo.py` (ver NOTES
 además ya usaba `crear_orden_limitada`/`crear_orden_limitada_cash` para el caso de
 pre/postmercado — solo hacía falta aplicar el mismo mecanismo también en sesión regular).
 
+## BUG CRÍTICO corregido: la venta LIMITADA+IOC no ejecutaba NUNCA con cantidad fraccionaria (sept. 2026)
+
+**Detectado el mismo día que se desplegó el arreglo anterior**, revisando el log en vivo: cada
+intento de venta principal (AMD, CVX, DIS, QCOM) fallaba con
+`APIError: {"code":42210000,"message":"fractional orders must be DAY orders"}`, y la posición se
+quedaba sin vender.
+
+**Causa**: Alpaca **rechaza** cualquier orden con cantidad fraccionaria combinada con
+`TimeInForce.IOC` — solo admite IOC para cantidades enteras; las fraccionarias deben ir con
+`DAY`. Casi todas las posiciones reales de este bot son fraccionarias (operaciones de $5-30 por
+señal), así que el arreglo del bug anterior, aunque correcto en la idea (limitar el precio),
+dejó **inutilizada la venta principal de acciones en sesión regular por completo** — ninguna
+llegaba a colocarse con éxito.
+
+**Arreglo**: `tif_venta = TimeInForce.DAY if es_cantidad_fraccionaria(cantidad_a_vender) else TimeInForce.IOC`.
+Con DAY se mantiene EXACTAMENTE la misma protección de precio (nunca se ejecuta peor que
+`precio_limite`); la única diferencia es que si no se rellena al instante, la orden queda
+abierta en el libro en vez de cancelarse sola — pero `cancelar_ordenes_abiertas()` ya cancela
+cualquier orden abierta de ese ticker al principio del ciclo siguiente antes de intentar otra
+vez, así que el efecto práctico es el mismo (se reintenta o se abandona), solo con la
+granularidad de un ciclo (130s) en vez de instantánea. Las cantidades enteras (poco frecuentes,
+pero posibles) siguen con IOC de verdad.
+
+**Nota**: solo se ha corregido en `bot_alpaca.py` — es un código de error específico de la API
+de Alpaca (`42210000`), no hay evidencia de que IBKR tenga la misma restricción, así que no se
+ha replicado el cambio en `bot_completo.py` sin comprobarlo primero (vigilar su log si aparece
+algo parecido).
+
 ## BUG CRÍTICO corregido: compras/ventas ejecutadas de verdad pero invisibles (sept. 2026)
 
 Caso real reportado por el usuario: una compra de WMT apareció en `/cartera` (la posición

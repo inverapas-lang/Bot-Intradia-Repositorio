@@ -1366,11 +1366,32 @@ def revisar_ventas():
                 # mas rapido que eso, la orden IOC simplemente no se
                 # ejecuta este ciclo (se sigue manteniendo la posicion) en
                 # vez de venderse mas barato de lo aceptable.
+                #
+                # BUG REAL DE PRODUCCION (sept. 2026, el mismo dia que se
+                # despliega este cambio): Alpaca RECHAZA toda orden con
+                # cantidad fraccionaria y TimeInForce.IOC ("fractional
+                # orders must be DAY orders", codigo 42210000) - y casi
+                # todas las posiciones de este bot son fraccionarias (el
+                # tamaño tipico por operacion es de $5-30). El resultado
+                # real: NINGUNA venta principal de acciones llegaba a
+                # ejecutarse, la orden fallaba y la posicion se quedaba sin
+                # vender indefinidamente. Para cantidades fraccionarias se
+                # usa DAY en su lugar -sigue dando la MISMA proteccion de
+                # precio (nunca se ejecuta peor que precio_limite), solo
+                # que si no se rellena al instante la orden queda abierta
+                # en el libro en vez de cancelarse sola; cancelar_ordenes_
+                # abiertas() ya cancela cualquier orden abierta de ese
+                # ticker al principio del SIGUIENTE ciclo, asi que el
+                # efecto practico es el mismo (se reintenta o se abandona)
+                # solo que con la granularidad de un ciclo en vez de
+                # instantanea. Las cantidades ENTERAS (sin fraccion) si
+                # pueden seguir usando IOC, que Alpaca si admite para ellas.
+                tif_venta = TimeInForce.DAY if es_cantidad_fraccionaria(cantidad_a_vender) else TimeInForce.IOC
                 precio_limite = calcular_precio_limite_venta(precio_actual)
                 log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, {motivo} -> "
-                    f"{etiqueta_accion} de {cantidad_a_vender:g} (orden limitada a {precio_limite} USD, IOC).")
+                    f"{etiqueta_accion} de {cantidad_a_vender:g} (orden limitada a {precio_limite} USD, {tif_venta.value.upper()}).")
                 orden = LimitOrderRequest(symbol=ticker, qty=cantidad_a_vender, limit_price=precio_limite,
-                                           side=OrderSide.SELL, time_in_force=TimeInForce.IOC)
+                                           side=OrderSide.SELL, time_in_force=tif_venta)
 
             cancelar_ordenes_abiertas(ticker)
             trade = _trading_client.submit_order(order_data=orden)
