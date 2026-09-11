@@ -992,6 +992,46 @@ TOTAL ganancia/perdida realizada: +4,78 USD (+4,19 EUR)
 
 El formato en texto plano (sin HTML, usado solo internamente) no cambia.
 
+## Herramienta de diagnóstico a posteriori (`diagnostico_operaciones.py`, sept. 2026)
+
+Petición del usuario: revisar de forma crítica si el bot estaba operando correctamente,
+comparando las compras/ventas reales con las velas históricas de Alpaca. Se creó
+`diagnostico_operaciones.py`, un script independiente (no participa en el trading) con dos
+partes:
+
+1. **Emparejamiento de operaciones (offline, sin API)**: `parsear_actividad()` lee el texto
+   tal cual se copia de la pestaña "Activity" de la app de Alpaca (compra/ticker/cantidad/
+   importe/fecha), y `emparejar_round_trips()` casa compras y ventas por FIFO por ticker,
+   calculando el P&L real de cada "round trip" cerrado, el % de beneficio/pérdida y el tiempo
+   en cartera. `informe_round_trips()` marca en rojo cualquier venta por debajo de
+   `MARGEN_MINIMO_VENTA_PCT` (el suelo de seguridad).
+2. **Contexto de velas reales (opcional, `--velas`)**: `obtener_velas_contexto()` pide las
+   velas de 1 minuto reales de Alpaca alrededor de cada venta (usa los mismos clientes
+   `_data_client`/`_crypto_data_client` que `bot_alpaca.py`) para ver si la venta quedó cerca
+   del máximo de esa ventana o si el precio siguió subiendo justo después (venta prematura).
+   Requiere `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` reales en el entorno — esta parte solo se
+   puede ejecutar en el servidor, no en un entorno de desarrollo sin esas claves.
+
+Uso: `python3 diagnostico_operaciones.py --archivo actividad.txt [--velas]`.
+
+**Hallazgo del primer análisis (11 sept. 2026)**: al cruzar las operaciones reales de la
+semana del 4 al 11 de septiembre con los commits de las correcciones de seguridad (suelo del
+0%, luego 0.5%, commits `49b0a27` y `24e0804` del 8 de septiembre), se detectaron 8 ventas por
+debajo del suelo (BCH/USD, SMCI y META entre el 8 y el 10 de septiembre, algunas con pérdida
+real) que **no deberían haber sido posibles si esas correcciones ya estaban desplegadas en el
+servidor** en ese momento. La hipótesis más probable es un **retraso de despliegue**: el
+código se corrigió en el repositorio, pero el proceso en marcha en el servidor tardó en
+reiniciarse con ese código nuevo (`/actualizar` ni siquiera existía todavía el 8 de
+septiembre — solo se añadió el 9 — así que el despliegue de esos días requería SSH manual).
+A partir de las operaciones de QCOM e INTC (10-11 de septiembre, tras el punto en que el suelo
+parece haber entrado en vigor de verdad) ya no se ve ninguna venta por debajo del 0.5%.
+
+**Consecuencia directa**: se añadió el comando `/version` a `telegram_bot.py` (ver la sección
+de "Control y consulta desde el móvil") para poder comprobar en cualquier momento, sin
+depender de la memoria, qué commit está REALMENTE en marcha en el servidor — y así detectar
+antes este tipo de desincronización entre "lo que está arreglado en git" y "lo que está
+corriendo de verdad".
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

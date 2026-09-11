@@ -250,6 +250,27 @@ finally:
     tb.subprocess.run = run_original
 
 
+# --- 4c. /version (peticion derivada de un analisis de operaciones, sept.
+#     2026: sirve para confirmar de un vistazo si un fix concreto ya esta
+#     REALMENTE desplegado en el servidor, sin fiarse de la memoria). ---
+def _run_falso_git_log(cmd, **kwargs):
+    llamadas_subprocess.append(cmd)
+    if cmd[:2] == ["git", "log"]:
+        return types.SimpleNamespace(returncode=0, stdout="abc1234 2026-09-11 10:00:00 +0000 Un commit de prueba\n", stderr="")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="no deberia llamarse")
+
+
+llamadas_subprocess.clear()
+tb.subprocess.run = _run_falso_git_log
+try:
+    resultado_version = tb.procesar_comando("/version")
+    check("/version: devuelve el hash/fecha/mensaje del commit actual (git log -1)",
+          "abc1234" in resultado_version and "Un commit de prueba" in resultado_version,
+          f"resultado={resultado_version!r}")
+finally:
+    tb.subprocess.run = run_original
+
+
 # --- 5. Comando que lanza una excepcion inesperada no rompe el bucle principal ---
 def _formatear_que_falla(html=False):
     raise RuntimeError("fallo simulado en cartera")

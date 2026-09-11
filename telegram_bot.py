@@ -16,6 +16,9 @@ Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
                    Y este propio bot de Telegram (con un pequeño retraso, ver
                    _reiniciar_telegram_bot_diferido()) - para desplegar sin
                    necesitar un cliente SSH, solo desde Telegram
+    /version     - hash + fecha + mensaje del commit REALMENTE en marcha
+                   ahora mismo (para confirmar si un fix concreto ya esta
+                   desplegado, sin fiarse de la memoria)
     /cartera     - posiciones abiertas (igual que cartera_alpaca.py)
     /hoy         - resumen de actividad de hoy (num. compras/ventas y
                    acciones totales de cada lado) + detalle de las ventas cerradas
@@ -134,6 +137,28 @@ def consultar_estado_servicio():
 
 
 DIRECTORIO_REPO = os.path.dirname(os.path.abspath(__file__))
+
+
+def consultar_version():
+    """/version (añadido sept. 2026, tras un analisis de operaciones que
+    detecto sospechas de que el codigo commiteado en git no coincidia con
+    el codigo REALMENTE en marcha en el servidor durante varios dias -un
+    fallo de seguridad ya arreglado en el repo pudo seguir activo en
+    produccion por no haberse desplegado a tiempo-. Devuelve el commit
+    actual (hash corto + fecha + mensaje) tal y como lo ve el proceso en
+    marcha, para poder confirmar de un vistazo si un fix concreto ya esta
+    desplegado, sin tener que fiarse de la memoria de cuando se desplego
+    la ultima vez."""
+    try:
+        resultado = subprocess.run(
+            ["git", "log", "-1", "--format=%h %ad %s", "--date=iso"],
+            cwd=DIRECTORIO_REPO, capture_output=True, text=True, timeout=10
+        )
+        if resultado.returncode != 0:
+            return f"⚠️ No se pudo leer el commit actual: {resultado.stderr.strip()}"
+        return f"📌 Commit en marcha ahora mismo:\n<pre>{escapar_html(resultado.stdout.strip())}</pre>"
+    except Exception as e:
+        return f"⚠️ Error al leer el commit actual: {type(e).__name__}: {e}"
 
 
 def _reiniciar_telegram_bot_diferido():
@@ -313,6 +338,7 @@ AYUDA = (
     "/arrancar - arranca el bot\n"
     "/parar - para el bot\n"
     "/actualizar - descarga el codigo mas reciente (git pull) y reinicia el bot de trading y este bot de Telegram\n"
+    "/version - que commit de codigo esta REALMENTE en marcha ahora mismo\n"
     "/cartera - posiciones abiertas (cuenta activa del bot)\n"
     "/carterapaper - posiciones abiertas de la cuenta PAPER (aparte de la activa)\n"
     "/hoy - actividad y operaciones cerradas hoy\n"
@@ -341,6 +367,9 @@ def procesar_comando(texto):
 
     if comando == "actualizar":
         return actualizar_codigo()
+
+    if comando == "version":
+        return consultar_version()
 
     if comando == "cartera":
         return cartera.formatear_posiciones_abiertas(html=True)
