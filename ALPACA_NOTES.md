@@ -503,16 +503,20 @@ lo mismo desde el propio chat de Telegram:
 1. `git pull` en el directorio del repo (la carpeta donde vive `telegram_bot.py`, no depende del
    directorio de trabajo del proceso).
 2. Si `git pull` falla (p.ej. hay cambios locales sin commitear que chocan con el pull), se avisa
-   con el error exacto y **no se toca el servicio** — hay que resolverlo a mano por SSH.
+   con el error exacto y **no se toca ningún servicio** — hay que resolverlo a mano por SSH.
 3. Si no había cambios nuevos ("Already up to date"), se avisa y tampoco se reinicia nada
-   (evita un reinicio innecesario del bot en marcha).
+   (evita un reinicio innecesario de los bots en marcha).
 4. Si sí trajo cambios, reinicia `bot-alpaca` (`ejecutar_systemctl("restart")`, mismo mecanismo
-   que `/arrancar`/`/parar` — mismo requisito de sudoers sin contraseña).
+   que `/arrancar`/`/parar`) **y también este propio bot de Telegram** (`telegram-bot`).
 
-**Importante**: `/actualizar` **no reinicia el propio proceso de `telegram_bot.py`**
-(sería reiniciarse a sí mismo a mitad de responder al comando, arriesgado). Si el cambio
-desplegado también tocaba `telegram_bot.py`, ese cambio concreto no se aplica hasta reiniciar
-el servicio `telegram-bot` aparte (por SSH) — el propio mensaje de `/actualizar` lo recuerda.
+**Cómo se reinicia a sí mismo sin cortar su propia respuesta** (petición del usuario, sept.
+2026: poder actualizar también `telegram_bot.py` desde el móvil, sin necesitar SSH):
+`_reiniciar_telegram_bot_diferido()` lanza `systemctl restart telegram-bot` en un proceso
+hijo aparte con `sleep 3` por delante, y no espera a que termine (`subprocess.Popen` +
+`start_new_session=True`). Así el proceso actual tiene tiempo de terminar de enviar el mensaje
+de confirmación a Telegram antes de que el hijo lo mate 3 segundos después — si se reiniciara
+inmediatamente en el mismo proceso, se mataría a sí mismo a mitad de la petición HTTP de
+respuesta y el usuario nunca vería la confirmación.
 
 ### Cómo crear el bot de Telegram
 
@@ -539,13 +543,14 @@ TELEGRAM_CHAT_ID=tu_chat_id_numerico
 Van en el mismo sitio que las de Alpaca (el archivo `.env` que lee el
 `EnvironmentFile` de los servicios systemd, ver más abajo).
 
-### Permiso de sudo para arrancar/parar el bot (`/arrancar`, `/parar`)
+### Permiso de sudo para arrancar/parar/reiniciar el bot (`/arrancar`, `/parar`, `/actualizar`)
 
 `telegram_bot.py` corre como el usuario normal (`ubuntu`), pero necesita
-poder ejecutar `systemctl start/stop bot-alpaca` sin que le pida
-contraseña (si no, esos dos comandos fallan con un aviso claro, aunque el
-resto —`/estado`, `/cartera`, `/log`, etc., que son de solo lectura—
-funcionan igual). Para darle permiso, en el servidor:
+poder ejecutar `systemctl start/stop/restart bot-alpaca` y `systemctl
+restart telegram-bot` sin que le pida contraseña (si no, esos comandos
+fallan con un aviso claro, aunque el resto —`/estado`, `/cartera`, `/log`,
+etc., que son de solo lectura— funcionan igual). Para darle permiso, en el
+servidor:
 
 ```bash
 sudo visudo -f /etc/sudoers.d/telegram-bot-alpaca
@@ -555,12 +560,11 @@ Y añade esta línea exacta (sustituye `ubuntu` si tu usuario se llama
 distinto):
 
 ```
-ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl start bot-alpaca, /usr/bin/systemctl stop bot-alpaca
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl start bot-alpaca, /usr/bin/systemctl stop bot-alpaca, /usr/bin/systemctl restart bot-alpaca, /usr/bin/systemctl restart telegram-bot
 ```
 
-Guarda y sal. Esto da permiso **únicamente** para esos dos comandos
-exactos, no para systemctl en general — no relajes esto a `ALL` sin
-necesidad.
+Guarda y sal. Esto da permiso **únicamente** para esos comandos exactos,
+no para systemctl en general — no relajes esto a `ALL` sin necesidad.
 
 ### Servicio systemd de `telegram_bot.py`
 

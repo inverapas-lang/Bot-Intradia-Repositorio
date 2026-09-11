@@ -178,8 +178,20 @@ def _run_falso_pull_con_cambios(cmd, **kwargs):
     return types.SimpleNamespace(returncode=1, stdout="", stderr="comando no reconocido")
 
 
+llamadas_popen = []
+
+
+def _popen_falso(cmd, **kwargs):
+    llamadas_popen.append(cmd)
+    return types.SimpleNamespace()
+
+
+popen_original = tb.subprocess.Popen
+
 llamadas_subprocess.clear()
+llamadas_popen.clear()
 tb.subprocess.run = _run_falso_pull_con_cambios
+tb.subprocess.Popen = _popen_falso
 try:
     resultado_actualizar = tb.procesar_comando("/actualizar")
     check("/actualizar: con cambios nuevos, hace git pull Y reinicia bot-alpaca",
@@ -188,8 +200,14 @@ try:
           f"resultado={resultado_actualizar!r}, llamadas={llamadas_subprocess}")
     check("/actualizar: el mensaje incluye la salida de git pull",
           "abc123" in resultado_actualizar, f"resultado={resultado_actualizar!r}")
+    check("/actualizar: peticion del usuario (sept. 2026) de poder actualizar tambien "
+          "telegram_bot.py desde el movil -> programa su propio reinicio diferido "
+          "(systemctl restart telegram-bot)",
+          len(llamadas_popen) == 1 and "restart telegram-bot" in llamadas_popen[0][-1],
+          f"llamadas_popen={llamadas_popen}")
 finally:
     tb.subprocess.run = run_original
+    tb.subprocess.Popen = popen_original
 
 
 def _run_falso_pull_sin_cambios(cmd, **kwargs):

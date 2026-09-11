@@ -13,10 +13,9 @@ Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
     /arrancar    - arranca el servicio (systemctl start bot-alpaca)
     /parar       - para el servicio (systemctl stop bot-alpaca)
     /actualizar  - git pull en el repo y, si trajo cambios, reinicia bot-alpaca
-                   (para desplegar sin necesitar un cliente SSH, solo desde
-                   Telegram; ver el aviso en el propio codigo sobre
-                   telegram_bot.py -este mismo script- necesitando su propio
-                   reinicio si el cambio le afecta tambien a el)
+                   Y este propio bot de Telegram (con un pequeño retraso, ver
+                   _reiniciar_telegram_bot_diferido()) - para desplegar sin
+                   necesitar un cliente SSH, solo desde Telegram
     /cartera     - posiciones abiertas (igual que cartera_alpaca.py)
     /hoy         - resumen de actividad de hoy (num. compras/ventas y
                    acciones totales de cada lado) + detalle de las ventas cerradas
@@ -64,6 +63,7 @@ import cartera_alpaca as cartera  # noqa: E402
 API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TIMEOUT_LARGO_POLLING_SEGUNDOS = 30  # long polling: la peticion se queda esperando hasta que hay un mensaje nuevo, o hasta este limite
 NOMBRE_SERVICIO_BOT = "bot-alpaca"
+NOMBRE_SERVICIO_TELEGRAM = "telegram-bot"
 
 # /carterapaper (peticion del usuario, sept. 2026): tras pasar el bot a
 # REAL, no habia forma de consultar el estado de la cuenta PAPER (el bot
@@ -136,20 +136,38 @@ def consultar_estado_servicio():
 DIRECTORIO_REPO = os.path.dirname(os.path.abspath(__file__))
 
 
+def _reiniciar_telegram_bot_diferido():
+    """Reinicia el propio servicio telegram-bot (este script), pero con un
+    pequeño retraso ejecutado en un proceso hijo desatendido -si se
+    reiniciara sin retraso, este mismo proceso se mataria a si mismo a
+    mitad de enviar la respuesta de /actualizar a Telegram-. El retraso da
+    tiempo de sobra a que enviar_mensaje() complete esa peticion HTTP antes
+    de que systemctl mate el proceso. Requiere el mismo tipo de permiso de
+    sudoers sin contraseña que /arrancar, /parar y el reinicio de
+    bot-alpaca (ver ALPACA_NOTES.md), pero para 'systemctl restart
+    telegram-bot'."""
+    try:
+        subprocess.Popen(
+            ["bash", "-c", "sleep 3 && sudo systemctl restart telegram-bot"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        return None
+    except Exception as e:
+        return f"⚠️ Error al programar el reinicio de telegram-bot: {type(e).__name__}: {e}"
+
+
 def actualizar_codigo():
     """/actualizar (peticion del usuario, sept. 2026: poder desplegar
     cambios sin necesitar un cliente SSH, solo desde Telegram). Hace
     'git pull' en el repo y, si trajo cambios nuevos, reinicia bot-alpaca
-    para que el codigo nuevo entre en marcha. Requiere que el sudoers del
-    usuario permita 'systemctl restart bot-alpaca' sin contraseña (mismo
-    requisito que /arrancar y /parar, ver ALPACA_NOTES.md) y que el repo no
-    tenga cambios locales sin commitear que choquen con git pull -en ese
-    caso git pull falla limpiamente y no se toca el servicio-.
-
-    NO reinicia el propio proceso de telegram_bot.py (este script): si el
-    cambio tocaba tambien telegram_bot.py, hay que reiniciar el servicio
-    telegram-bot a mano (por SSH, o parando y volviendo a arrancar la
-    Tarea/servicio) para que ese cambio concreto surta efecto."""
+    Y este propio bot de Telegram (con un pequeño retraso, ver
+    _reiniciar_telegram_bot_diferido()) para que el codigo nuevo entre en
+    marcha en los dos. Requiere que el sudoers del usuario permita
+    'systemctl restart bot-alpaca' y 'systemctl restart telegram-bot' sin
+    contraseña (mismo requisito que /arrancar y /parar, ver
+    ALPACA_NOTES.md) y que el repo no tenga cambios locales sin commitear
+    que choquen con git pull -en ese caso git pull falla limpiamente y no
+    se toca ningun servicio-."""
     try:
         resultado_pull = subprocess.run(
             ["git", "pull"], cwd=DIRECTORIO_REPO, capture_output=True, text=True, timeout=30
@@ -165,11 +183,20 @@ def actualizar_codigo():
         return f"✅ Ya estaba actualizado, no había cambios nuevos.\n<pre>{escapar_html(salida_pull)}</pre>"
 
     error_reinicio = ejecutar_systemctl("restart")
-    aviso_telegram = ("\n\n⚠️ Si este cambio también tocaba telegram_bot.py, este propio bot de "
-                       "Telegram necesita un reinicio aparte (por SSH) para aplicarlo.")
+    error_reinicio_telegram = _reiniciar_telegram_bot_diferido()
+
     if error_reinicio:
-        return f"✅ Código actualizado, pero falló el reinicio:\n<pre>{escapar_html(salida_pull)}</pre>\n\n{error_reinicio}{aviso_telegram}"
-    return f"✅ Código actualizado y bot-alpaca reiniciado:\n<pre>{escapar_html(salida_pull)}</pre>{aviso_telegram}"
+        aviso_telegram = f"\n\n{error_reinicio_telegram}" if error_reinicio_telegram else ""
+        return (f"✅ Código actualizado, pero falló el reinicio de bot-alpaca:\n"
+                f"<pre>{escapar_html(salida_pull)}</pre>\n\n{error_reinicio}{aviso_telegram}")
+
+    if error_reinicio_telegram:
+        return (f"✅ Código actualizado y bot-alpaca reiniciado:\n<pre>{escapar_html(salida_pull)}</pre>\n\n"
+                f"{error_reinicio_telegram}")
+
+    return (f"✅ Código actualizado, bot-alpaca reiniciado ya:\n<pre>{escapar_html(salida_pull)}</pre>\n\n"
+            f"🔄 Este bot de Telegram se reiniciará solo en unos segundos para aplicar el cambio "
+            f"(si te responde con un poco de retraso justo ahora, es por eso).")
 
 
 LIMITE_CARACTERES_LOG_TELEGRAM = 3500  # margen bajo el limite de 4096 de un mensaje de Telegram
@@ -285,7 +312,7 @@ AYUDA = (
     "/estado - si el bot esta corriendo o parado\n"
     "/arrancar - arranca el bot\n"
     "/parar - para el bot\n"
-    "/actualizar - descarga el codigo mas reciente (git pull) y reinicia el bot\n"
+    "/actualizar - descarga el codigo mas reciente (git pull) y reinicia el bot de trading y este bot de Telegram\n"
     "/cartera - posiciones abiertas (cuenta activa del bot)\n"
     "/carterapaper - posiciones abiertas de la cuenta PAPER (aparte de la activa)\n"
     "/hoy - actividad y operaciones cerradas hoy\n"
