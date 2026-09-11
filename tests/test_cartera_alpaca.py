@@ -97,6 +97,35 @@ bot.ALPACA_PAPER = paper_original
 bot.obtener_posiciones = obtener_posiciones_original
 
 
+# --- Mismo formato de tabla que las operaciones CERRADAS (peticion del
+# usuario, sept. 2026): Ticker + Cant. (max 4 decimales) + Precio (actual) +
+# % + USD, con "abierta desde" junto al emoji de modo debajo de cada fila,
+# y linea en blanco entre posiciones. ---
+compra_wfc_hace_7d = (datetime.now() - timedelta(days=7, hours=3)).isoformat(timespec="seconds")
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": compra_wfc_hace_7d, "ticker": "WFC", "lado": "COMPRA",
+                "cantidad": 0.058288282, "precio": 89.90, "modo": "REAL"}], f)
+
+bot.ALPACA_PAPER = False
+bot.obtener_posiciones = lambda client=None: [FakePos("WFC", 0.058288282, 89.90, 5.35, 0.15, 0.0288)]
+resultado_abiertas_formato = cartera.formatear_posiciones_abiertas(html=True)
+bot.obtener_posiciones = obtener_posiciones_original
+bot.ALPACA_PAPER = paper_original
+
+check("formatear_posiciones_abiertas (html): la cabecera coincide con la de operaciones "
+      "cerradas (Ticker/Cant./Precio/%/USD)",
+      "Ticker" in resultado_abiertas_formato and "Cant." in resultado_abiertas_formato
+      and "Precio" in resultado_abiertas_formato,
+      f"resultado={resultado_abiertas_formato!r}")
+check("formatear_posiciones_abiertas (html): la cantidad se redondea a maximo 4 decimales",
+      "0.0583" in resultado_abiertas_formato and "0.058288282" not in resultado_abiertas_formato,
+      f"resultado={resultado_abiertas_formato!r}")
+check("formatear_posiciones_abiertas (html): muestra desde cuando esta abierta la posicion, "
+      "junto al emoji de modo (💰)",
+      "💰 abierta desde" in resultado_abiertas_formato and "7d 3h" in resultado_abiertas_formato,
+      f"resultado={resultado_abiertas_formato!r}")
+
+
 # ---------------------------------------------------------------------------
 # 3. formatear_actividad: cuenta compras y ventas del rango correctamente
 # ---------------------------------------------------------------------------

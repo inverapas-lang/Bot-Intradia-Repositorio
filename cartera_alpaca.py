@@ -106,11 +106,37 @@ def formatear_posiciones_abiertas(html=False, client=None, modo_etiqueta=None):
     pl_total_pct = (pl_total_usd / total_invertido * 100) if total_invertido else 0.0
 
     if html:
-        lineas_tabla = [f"  {'Ticker':<7}{'Cant.':>9}{'P/L %':>10}{'P/L USD':>12}"]
+        # Mismo formato de tabla que formatear_operaciones_cerradas() (peticion
+        # del usuario, sept. 2026: que abiertas y cerradas se vean igual) -
+        # Ticker + Cant. (maximo 4 decimales) + Precio (actual, no de venta) +
+        # % + USD, con la fecha de apertura debajo de cada fila junto al
+        # emoji de modo, y una linea en blanco entre una posicion y la
+        # siguiente.
+        operaciones_todas = bot.cargar_historial_operaciones()
+        operaciones_por_ticker = {}
+        for o in operaciones_todas:
+            if o["lado"] in ("COMPRA", "VENTA"):
+                operaciones_por_ticker.setdefault(o["ticker"], []).append(o)
+        for lista in operaciones_por_ticker.values():
+            lista.sort(key=lambda o: o["fecha_hora"])
+        ahora_iso = datetime.now().isoformat(timespec="seconds")
+
+        lineas_tabla = [f"  {'Ticker':<7}{'Cant.':>7}{'Precio':>8}{'%':>8}{'USD':>8}"]
+        modo_emoji = "💰" if modo_actual == "REAL" else "🧪"
         for symbol, cantidad, coste_medio, precio_actual, invertido, pl_usd, pl_eur, pl_pct in filas:
-            lineas_tabla.append(f"{_emoji_pl(pl_usd)} {symbol:<6}{bot.formato_es(cantidad, 2):>9}"
-                                f"{bot.formato_es(pl_pct, signo=True):>9}%{bot.formato_es(pl_usd, signo=True):>12}")
-        tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
+            cantidad_str = f"{round(cantidad, 4):g}"
+            precio_str = bot.formato_es(precio_actual)
+            pct_str = f"{bot.formato_es(pl_pct, signo=True)}%"
+            pl_str = bot.formato_es(pl_usd, signo=True)
+            lineas_tabla.append(f"{_emoji_pl(pl_usd)} {symbol:<6}{cantidad_str:>7}{precio_str:>8}{pct_str:>8}{pl_str:>8}")
+            fecha_apertura = _fecha_apertura_posicion(operaciones_por_ticker.get(symbol, []), ahora_iso, modo_actual)
+            apertura_str = ""
+            if fecha_apertura is not None:
+                duracion = _formatear_duracion(datetime.now() - datetime.fromisoformat(fecha_apertura))
+                apertura_str = f" abierta desde {_formatear_fecha_corta(fecha_apertura)} ({duracion})"
+            lineas_tabla.append(f"  {modo_emoji}{apertura_str}")
+            lineas_tabla.append("")
+        tabla = "<pre>" + "\n".join(lineas_tabla).rstrip() + "</pre>"
         resumen = (f"<b>TOTAL</b> invertido: {bot.formato_es(total_invertido)} USD "
                   f"({bot.formato_es(total_invertido / bot.TIPO_CAMBIO_EUR_USD)} EUR)\n"
                   f"P/L: {bot.formato_es(pl_total_usd, signo=True)} USD "

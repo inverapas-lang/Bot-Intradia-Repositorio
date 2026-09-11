@@ -933,6 +933,38 @@ locales de esa máquina, no tendría sentido correrlo en otro sitio). Para que a
 tener que acordarse, se puede añadir como Tarea Programada de Windows al iniciar sesión (igual
 que se sugiere para `vigilante_externo.ps1`).
 
+## Formato de `/cartera`/`/hoy`/`/ayer`/`/semana` unificado con Alpaca (sept. 2026)
+
+Petición del usuario: que el bot de IBKR dé la misma información y el mismo formato que el de
+Alpaca (`cartera_alpaca.py`), que se había ido puliendo durante esta sesión (tabla alineada,
+columna de precio, tiempo abierta la posición, % sobre lo invertido...). Se actualiza
+`cartera_ibkr.py` para que `formatear_posiciones_abiertas()` y `formatear_operaciones_cerradas()`
+usen la misma tabla:
+
+```
+  Merc. Ticker   Cant.  Precio       %     EUR
+🟢 US    AAPL         2  105,00  +4,00%   +7,89
+  abierta desde 11 SEP (3h)
+
+🟢 HK    700         10   52,00  +4,00%   +2,02
+  abierta desde 11 SEP (3h)
+```
+
+Diferencias necesarias frente a Alpaca (IBKR opera en varios mercados/monedas a la vez, Alpaca
+solo en USD):
+- Se añade una columna **"Merc."** (US/HK/KR/CRYPTO) que Alpaca no necesita.
+- La columna de importe es **EUR** en vez de USD — es la única moneda común a todos los mercados
+  que opera IBKR (USD, HKD, KRW), así que tiene más sentido que fijar un USD que no aplicaría a
+  HK/KR.
+- `_fecha_apertura_posicion()` (para el "abierta desde") es igual que en `cartera_alpaca.py`
+  pero **sin** el filtro por modo REAL/PAPER: IBKR no guarda ese campo en el historial (la cuenta
+  paper/real se distingue por el puerto de conexión al que se conecta `ib.connect()`, no por un
+  campo en cada registro), así que no hace falta ni tiene sentido filtrar por eso aquí. Se agrupa
+  por `clave_historial(mercado, ticker)` en su lugar, para no mezclar un mismo ticker de
+  mercados distintos (aunque en la práctica no debería colisionar).
+- El resto (cantidad a máximo 4 decimales, fecha "DD MES", línea en blanco entre operaciones, %
+  TOTAL sobre lo invertido) es idéntico a Alpaca.
+
 ## Tipo de cambio EUR/USD en tiempo real (añadido sept. 2026, petición del usuario)
 
 Petición explícita: "que el par EUR/USD que utiliza el bot sea el vigente en el momento" —

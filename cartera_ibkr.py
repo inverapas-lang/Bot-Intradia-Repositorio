@@ -68,6 +68,50 @@ def _emoji_pl(valor):
     return "🟢" if valor >= 0 else "🔴"
 
 
+_MESES_ES = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
+
+
+def _formatear_fecha_corta(fecha_hora_iso):
+    """'2026-09-03T15:09:12' -> '03 SEP'. Igual que cartera_alpaca.py (peticion
+    del usuario, sept. 2026: mismo formato de fecha en los dos bots)."""
+    fecha = datetime.fromisoformat(fecha_hora_iso)
+    return f"{fecha.day:02d} {_MESES_ES[fecha.month - 1]}"
+
+
+def _formatear_duracion(delta):
+    """Igual que cartera_alpaca.py."""
+    segundos = int(delta.total_seconds())
+    if segundos < 60:
+        return f"{segundos}s"
+    minutos = segundos // 60
+    if minutos < 60:
+        return f"{minutos}min"
+    horas, minutos_resto = divmod(minutos, 60)
+    if horas < 24:
+        return f"{horas}h {minutos_resto:02d}min" if minutos_resto else f"{horas}h"
+    dias, horas_resto = divmod(horas, 24)
+    return f"{dias}d {horas_resto}h" if horas_resto else f"{dias}d"
+
+
+def _fecha_apertura_posicion(operaciones_clave_ordenadas, hasta_fecha_hora):
+    """Igual que cartera_alpaca.py, pero sin distinguir REAL/PAPER: IBKR no
+    guarda ese campo en el historial (la cuenta paper/real se distingue por
+    el puerto de conexion, no por un campo en el registro), asi que no hace
+    falta filtrar por eso aqui."""
+    cantidad_actual = 0.0
+    fecha_apertura = None
+    for o in operaciones_clave_ordenadas:
+        if o["fecha_hora"] > hasta_fecha_hora:
+            break
+        if o["lado"] == "COMPRA":
+            if cantidad_actual <= 1e-9:
+                fecha_apertura = o["fecha_hora"]
+            cantidad_actual += o["cantidad"]
+        else:
+            cantidad_actual = max(0.0, cantidad_actual - o["cantidad"])
+    return fecha_apertura
+
+
 def formatear_posiciones_abiertas(ib, html=False):
     """Necesita una conexion `ib` ya abierta y conectada: pide reqPositions()
     y el precio actual de cada una en vivo. Ver formatear_posiciones_abiertas
@@ -132,14 +176,38 @@ def formatear_posiciones_abiertas(ib, html=False):
     pl_total_pct = (pl_total_eur / total_invertido_eur * 100) if total_invertido_eur else 0.0
 
     if html:
-        lineas_tabla = [f"  {'Ticker':<8}{'Merc.':<6}{'P/L %':>9}{'P/L EUR':>11}"]
+        # Mismo formato de tabla que cartera_alpaca.py y que
+        # formatear_operaciones_cerradas() de aqui mismo (peticion del
+        # usuario, sept. 2026): Merc. + Ticker + Cant. (max 4 decimales) +
+        # Precio (actual, moneda local) + % + EUR, con "abierta desde"
+        # debajo de cada fila y una linea en blanco entre posiciones.
+        operaciones_todas = bot.cargar_historial_operaciones()
+        operaciones_por_clave = {}
+        for o in operaciones_todas:
+            if o["lado"] in ("COMPRA", "VENTA"):
+                clave = bot.clave_historial(o.get("mercado", "?"), o["ticker"])
+                operaciones_por_clave.setdefault(clave, []).append(o)
+        for lista in operaciones_por_clave.values():
+            lista.sort(key=lambda o: o["fecha_hora"])
+        ahora_iso = datetime.now().isoformat(timespec="seconds")
+
+        lineas_tabla = [f"  {'Merc.':<6}{'Ticker':<7}{'Cant.':>7}{'Precio':>8}{'%':>8}{'EUR':>8}"]
         for mercado, symbol, cantidad, coste_medio, invertido, currency, precio_actual, pl_local, pl_eur, pl_pct in filas:
+            cantidad_str = f"{round(cantidad, 4):g}"
             if pl_eur is None:
-                lineas_tabla.append(f"⚪ {symbol:<7}{mercado:<6}{'N/D':>9}{'N/D':>11}")
+                lineas_tabla.append(f"⚪ {mercado:<6}{symbol:<7}{cantidad_str:>7}{'N/D':>8}{'N/D':>8}{'N/D':>8}")
             else:
-                lineas_tabla.append(f"{_emoji_pl(pl_eur)} {symbol:<7}{mercado:<6}"
-                                    f"{bot.formato_es(pl_pct, signo=True):>8}%{bot.formato_es(pl_eur, signo=True):>11}")
-        tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
+                precio_str = bot.formato_es(precio_actual)
+                pct_str = f"{bot.formato_es(pl_pct, signo=True)}%"
+                pl_str = bot.formato_es(pl_eur, signo=True)
+                lineas_tabla.append(f"{_emoji_pl(pl_eur)} {mercado:<6}{symbol:<7}{cantidad_str:>7}{precio_str:>8}{pct_str:>8}{pl_str:>8}")
+            clave = bot.clave_historial(mercado, symbol)
+            fecha_apertura = _fecha_apertura_posicion(operaciones_por_clave.get(clave, []), ahora_iso)
+            if fecha_apertura is not None:
+                duracion = _formatear_duracion(datetime.now() - datetime.fromisoformat(fecha_apertura))
+                lineas_tabla.append(f"  abierta desde {_formatear_fecha_corta(fecha_apertura)} ({duracion})")
+            lineas_tabla.append("")
+        tabla = "<pre>" + "\n".join(lineas_tabla).rstrip() + "</pre>"
         resumen = (f"<b>TOTAL</b> invertido: {bot.formato_es(total_invertido_eur)} EUR\n"
                   f"P/L: {bot.formato_es(pl_total_eur, signo=True)} EUR "
                   f"({bot.formato_es(pl_total_pct, signo=True)}%)")
@@ -176,45 +244,83 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
     if not ventas:
         return (titulo_html if html else titulo_plano) + "\n(ninguna)"
 
+    # Historial COMPLETO por clave (mercado:ticker, sin restringir al rango
+    # desde/hasta): hace falta para encontrar la compra de apertura de una
+    # posicion que pudo abrirse antes del rango consultado (ver
+    # _fecha_apertura_posicion(), igual que en cartera_alpaca.py).
+    operaciones_por_clave = {}
+    for o in operaciones:
+        if o["lado"] in ("COMPRA", "VENTA"):
+            clave = bot.clave_historial(o.get("mercado", "?"), o["ticker"])
+            operaciones_por_clave.setdefault(clave, []).append(o)
+    for lista in operaciones_por_clave.values():
+        lista.sort(key=lambda o: o["fecha_hora"])
+
     filas = []
     ganancia_total_eur = 0.0
+    coste_total_eur = 0.0
+    importe_total_vendido_eur = 0.0
     for o in ventas:
         cantidad = o["cantidad"]
         coste_medio = o.get("coste_medio")
         precio = o["precio"]
         comision = o.get("comision", 0.0)
         currency = o.get("currency", "?")
+        mercado = o.get("mercado", "?")
         beneficio_pct = o.get("beneficio_pct")
 
         if coste_medio is not None:
             ganancia_local = (precio - coste_medio) * cantidad - comision
             ganancia_eur = bot.valor_en_eur(ganancia_local, currency)
+            coste_total_eur += bot.valor_en_eur(coste_medio * cantidad, currency)
         else:
             ganancia_local = ganancia_eur = None
         ganancia_total_eur += ganancia_eur or 0.0
-        filas.append((o["fecha_hora"], o.get("mercado", "?"), o["ticker"], cantidad, precio,
-                      currency, ganancia_local, ganancia_eur, beneficio_pct))
+        importe_total_vendido_eur += bot.valor_en_eur(cantidad * precio, currency)
+        clave = bot.clave_historial(mercado, o["ticker"])
+        fecha_apertura = _fecha_apertura_posicion(operaciones_por_clave.get(clave, []), o["fecha_hora"])
+        filas.append((o["fecha_hora"], mercado, o["ticker"], cantidad, precio,
+                      currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura))
+
+    beneficio_total_pct = (ganancia_total_eur / coste_total_eur * 100) if coste_total_eur else None
 
     if html:
-        lineas_tabla = [f"  {'Fecha':<12}{'Ticker':<8}{'Gan. EUR':>11}"]
-        for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct in filas:
-            fecha_corta = fecha_hora[5:16].replace("T", " ")  # MM-DD HH:MM
+        # Mismo formato de tabla que cartera_alpaca.py (peticion del usuario,
+        # sept. 2026: que los dos bots den la misma informacion/formato) -
+        # Merc. + Ticker + Cant. (max 4 decimales) + Precio (moneda local) +
+        # % + EUR (aqui en EUR en vez de USD, porque IBKR opera en varias
+        # monedas distintas y el EUR es la unica comun a todas). Debajo de
+        # cada fila, junto al emoji verde/rojo, cuanto llevaba abierta la
+        # posicion, y una linea en blanco entre operaciones.
+        lineas_tabla = [f"  {'Merc.':<6}{'Ticker':<7}{'Cant.':>7}{'Precio':>8}{'%':>8}{'EUR':>8}"]
+        for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura in filas:
             emoji = _emoji_pl(ganancia_eur) if ganancia_eur is not None else "⚪"
-            ganancia_str = f"{bot.formato_es(ganancia_eur, signo=True):>11}" if ganancia_eur is not None else f"{'N/D':>11}"
-            lineas_tabla.append(f"{emoji} {fecha_corta:<12}{ticker:<8}{ganancia_str}")
-        tabla = "<pre>" + "\n".join(lineas_tabla) + "</pre>"
-        resumen = f"<b>TOTAL</b> ganancia/perdida realizada: {bot.formato_es(ganancia_total_eur, signo=True)} EUR"
+            cantidad_str = f"{round(cantidad, 4):g}"
+            precio_str = bot.formato_es(precio)
+            pct_str = f"{bot.formato_es(beneficio_pct, signo=True)}%" if beneficio_pct is not None else "N/D"
+            ganancia_str = bot.formato_es(ganancia_eur, signo=True) if ganancia_eur is not None else "N/D"
+            lineas_tabla.append(f"{emoji} {mercado:<6}{ticker:<7}{cantidad_str:>7}{precio_str:>8}{pct_str:>8}{ganancia_str:>8}")
+            if fecha_apertura is not None:
+                duracion = _formatear_duracion(datetime.fromisoformat(fecha_hora) - datetime.fromisoformat(fecha_apertura))
+                lineas_tabla.append(f"  abierta desde {_formatear_fecha_corta(fecha_apertura)} ({duracion})")
+            lineas_tabla.append("")
+        tabla = "<pre>" + "\n".join(lineas_tabla).rstrip() + "</pre>"
+        pct_total_str = f" ({bot.formato_es(beneficio_total_pct, signo=True)}% sobre lo invertido, {bot.formato_es(coste_total_eur)} EUR)" \
+            if beneficio_total_pct is not None else ""
+        resumen = (f"Importe total vendido: {bot.formato_es(importe_total_vendido_eur)} EUR\n"
+                  f"<b>TOTAL</b> ganancia/perdida realizada: {bot.formato_es(ganancia_total_eur, signo=True)} EUR{pct_total_str}")
         return f"{titulo_html}\n{tabla}\n{resumen}"
 
     lineas = [titulo_plano]
-    for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct in filas:
+    for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura in filas:
         fecha_str = fecha_hora[:16].replace("T", " ")
         ganancia_str = (f", ganancia {bot.formato_es(ganancia_local, signo=True)} {currency} / "
                         f"{bot.formato_es(ganancia_eur, signo=True)} EUR") if ganancia_local is not None else ""
         beneficio_pct_str = f" ({bot.formato_es(beneficio_pct, signo=True)}%)" if beneficio_pct is not None else ""
         lineas.append(f"{fecha_str} {mercado} {ticker}: {bot.formato_es(cantidad, 6)} a {bot.formato_es(precio, 4)} "
                       f"{currency}{ganancia_str}{beneficio_pct_str}")
-    lineas.append(f"TOTAL ganancia/perdida realizada: {bot.formato_es(ganancia_total_eur, signo=True)} EUR")
+    pct_total_str = f" ({bot.formato_es(beneficio_total_pct, signo=True)}% sobre lo invertido)" if beneficio_total_pct is not None else ""
+    lineas.append(f"TOTAL ganancia/perdida realizada: {bot.formato_es(ganancia_total_eur, signo=True)} EUR{pct_total_str}")
     return "\n".join(lineas)
 
 
