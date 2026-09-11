@@ -1098,6 +1098,26 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
     (`beneficio_pct_real`/`beneficio_pct_bruto_real`) contra el precio REAL de ejecución justo
     antes de notificar y registrar, así que tanto Telegram como `/hoy`/`/ayer`/`/semana`
     reflejan lo que económicamente pasó de verdad, no la estimación previa a la orden.
+19. **La venta principal (trailing/refuerzo) SEGUÍA pudiendo ejecutarse con pérdidas, pese al
+    suelo `MARGEN_MINIMO_VENTA_PCT` (caso real, sept. 2026: SMCI vendida con -0,23% de
+    beneficio)**: el bug anterior (#18) arregló que el `%` MOSTRADO reflejara la realidad, pero
+    no arregló la causa de fondo. `MARGEN_MINIMO_VENTA_PCT` solo se comprueba en el momento de
+    **decidir** vender, con `precio_actual` (el precio de referencia, ya con cierto desfase). La
+    orden en sí se mandaba **A MERCADO**, sin ningún límite de precio — así que si el precio
+    seguía cayendo entre la decisión y la ejecución real (justo lo que pasa en una caída rápida,
+    que es cuando más se activa el trailing stop), la venta podía ejecutarse bastante más barata
+    de lo decidido, incluso por debajo del suelo, aunque en el momento de decidir sí lo cumplía.
+    → la venta principal en sesión regular (tanto `VENTA_PARCIAL` como `VENTA_TOTAL`, no la
+    venta forzada, que sigue siendo a mercado a propósito para garantizar la salida antes del
+    cierre) pasa de orden A MERCADO a **orden LIMITADA + IOC**, con el mismo margen de protección
+    que ya usaba cripto (`MARGEN_ORDEN_LIMITADA_VENTA_PCT`, 0,2% por debajo del precio de
+    referencia, vía `calcular_precio_limite_venta()`). Así, el precio real de ejecución nunca
+    puede ser peor que ese límite — si el mercado se mueve más rápido que eso, la orden IOC
+    simplemente no se ejecuta ese ciclo (la posición se mantiene, se reevalúa en el siguiente) en
+    vez de venderse más barata de lo aceptable. Esto reduce el margen de slippage posible de
+    "sin límite" a como mucho ~0,2 puntos adicionales sobre el suelo de 0,5% — no lo elimina por
+    completo (la decisión sigue basándose en un precio de referencia con cierto desfase), pero
+    lo acota a un margen pequeño y conocido en vez de dejarlo abierto.
 
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 

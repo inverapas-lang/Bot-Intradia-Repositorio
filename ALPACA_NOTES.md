@@ -899,6 +899,32 @@ de notificar por Telegram y de guardar en el historial. Así, tanto la notificac
 `/hoy`/`/ayer`/`/semana` reflejan lo que económicamente pasó de verdad, no la estimación
 previa a la orden. Mismo cambio en `bot_completo.py` (ver NOTES.md).
 
+## BUG CRÍTICO corregido: la venta principal seguía pudiendo ejecutarse con pérdidas (sept. 2026)
+
+El bug anterior arregló que el `%` MOSTRADO reflejara la realidad, pero no la causa de fondo:
+caso real, SMCI se vendió con **-0,23% de beneficio**, pese a existir el suelo
+`MARGEN_MINIMO_VENTA_PCT` (0,5%) que en teoría debía impedir vender con pérdidas.
+
+**Causa**: `MARGEN_MINIMO_VENTA_PCT` solo se comprueba al **decidir** vender, contra
+`precio_actual` (el precio de referencia, con cierto desfase inevitable). La orden en sí se
+mandaba **A MERCADO**, sin ningún límite de precio — si el precio seguía cayendo entre la
+decisión y la ejecución real (justo lo que pasa en una caída rápida, que es cuando más se
+activa el trailing stop), la venta se ejecutaba al precio que hubiera en ese momento, aunque
+fuera peor que el suelo decidido.
+
+**Arreglo**: la venta principal en sesión regular (`VENTA_PARCIAL` y `VENTA_TOTAL` del
+trailing/refuerzo — **no** la venta forzada, que sigue siendo a mercado a propósito, para
+garantizar la salida antes del cierre) pasa de `MarketOrderRequest` a `LimitOrderRequest` +
+`TimeInForce.IOC`, con el mismo margen de protección que ya usaba `revisar_ventas_cripto()`
+(`MARGEN_ORDEN_LIMITADA_VENTA_PCT`, 0,2% por debajo del precio de referencia, vía
+`calcular_precio_limite_venta()`). El precio real de ejecución ya no puede ser peor que ese
+límite — si el mercado se mueve más rápido, la orden IOC simplemente no se ejecuta ese ciclo
+(la posición se mantiene, se reevalúa en el siguiente) en vez de venderse más barata de lo
+aceptable. Esto acota el slippage posible a ~0,2 puntos adicionales sobre el suelo de 0,5%, en
+vez de dejarlo sin ningún límite. Mismo cambio en `bot_completo.py` (ver NOTES.md, donde
+además ya usaba `crear_orden_limitada`/`crear_orden_limitada_cash` para el caso de
+pre/postmercado — solo hacía falta aplicar el mismo mecanismo también en sesión regular).
+
 ## BUG CRÍTICO corregido: compras/ventas ejecutadas de verdad pero invisibles (sept. 2026)
 
 Caso real reportado por el usuario: una compra de WMT apareció en `/cartera` (la posición

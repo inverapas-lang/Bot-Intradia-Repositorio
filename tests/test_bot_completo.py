@@ -1580,6 +1580,7 @@ if ib_falso_venta_premercado.ordenes_colocadas:
 class _IBFalsoTrailingStop:
     def __init__(self, avgCost, precio_inicial):
         self.ordenes_colocadas = []
+        self.ordenes_objeto = []
         self.precio_actual = precio_inicial
         self._posiciones = [_Posicion("TRAIL", 10, avgCost)]
 
@@ -1597,14 +1598,21 @@ class _IBFalsoTrailingStop:
 
     def placeOrder(self, contrato, orden):
         self.ordenes_colocadas.append(contrato.symbol)
+        self.ordenes_objeto.append(orden)
         return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"), isDone=lambda: True)
 
 
 es_horario_original_trailing = bot.es_horario_operativo
 en_venta_forzada_original = bot.en_ventana_venta_forzada
 macd_2velas_original = bot.macd_5min_bajista_2_velas
+fuera_de_sesion_regular_us_original = bot.fuera_de_sesion_regular_us
 bot.es_horario_operativo = lambda mercado: True
 bot.en_ventana_venta_forzada = lambda mercado: False  # aislar del mecanismo de venta forzada, no es lo que se prueba aqui
+# Fuera de esto se prueba aparte (lineas 1470/1549/1569): se fuerza a False
+# para que estos tests de sesion REGULAR no dependan de la hora real del
+# sistema (evita falsos negativos si por casualidad se corre fuera de la
+# sesion regular real de NYSE).
+bot.fuera_de_sesion_regular_us = lambda: False
 
 # --- El trailing/salida parcial SOLO se arma a partir de UMBRAL_BENEFICIO_PCT
 #     (0.5%): por debajo de eso, nada puede vender, ni el refuerzo "diga que
@@ -1680,12 +1688,69 @@ try:
     bot.revisar_ventas(ib_trailing)
     check("criterio de venta: retrocede >=0.3 pts desde el maximo (1.02% -> 0.71%) -> SI vende el resto (trailing stop)",
           ib_trailing.ordenes_colocadas == ["TRAIL"], f"ordenes={ib_trailing.ordenes_colocadas}")
+
+    # --- BUG REAL DE PRODUCCION (sept. 2026, casos reales: META y despues
+    # SMCI vendidas con perdidas -0.23%, pese al suelo de MARGEN_MINIMO_VENTA_PCT
+    # 0.5%): la venta principal en sesion regular usaba orden A MERCADO,
+    # sin ningun limite de precio. Ahora usa una orden LIMITADA IOC, igual
+    # que ya hacia cripto: el precio real de ejecucion nunca puede ser
+    # peor que el limite protegido. ---
+    orden_trailing_colocada = ib_trailing.ordenes_objeto[-1]
+    check("venta principal (trailing) en sesion regular: usa orden LIMITADA (no a mercado)",
+          orden_trailing_colocada.orderType == "LMT", f"orderType={orden_trailing_colocada.orderType}")
+    check("venta principal (trailing): time_in_force es IOC",
+          orden_trailing_colocada.tif == "IOC", f"tif={orden_trailing_colocada.tif}")
+    check("venta principal (trailing): el precio limite esta acotado bajo el precio de "
+          "referencia (MARGEN_ORDEN_LIMITADA_VENTA_PCT, 0.2%)",
+          abs(orden_trailing_colocada.lmtPrice - bot.calcular_precio_limite_venta(100.78, "USD")) < 1e-6,
+          f"lmtPrice={orden_trailing_colocada.lmtPrice}")
 finally:
     bot.es_horario_operativo = es_horario_original_trailing
     bot.en_ventana_venta_forzada = en_venta_forzada_original
     bot.macd_5min_bajista_2_velas = macd_2velas_original
+    bot.fuera_de_sesion_regular_us = fuera_de_sesion_regular_us_original
     bot._maximo_beneficio_neto_por_posicion = {}
     bot._scale_out_realizado = set()
+
+# Si la orden IOC no se ejecuta (el mercado nunca toco el precio limite
+# protegido -simulado devolviendo estado 'Cancelled' y la posicion SIN
+# cambios-), la posicion debe quedar INTACTA en vez de venderse igualmente
+# mas barato de lo aceptable (lo que pasaba con la orden a mercado).
+class _IBFalsoTrailingIOCNoEjecutada(_IBFalsoTrailingStop):
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        self.ordenes_objeto.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Cancelled"), isDone=lambda: True)
+
+
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: False
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False
+bot.fuera_de_sesion_regular_us = lambda: False
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+telegram_capturados_ioc = []
+notificar_telegram_original_ioc_ibkr = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: telegram_capturados_ioc.append(msg)
+ib_ioc_no_ejecutada = _IBFalsoTrailingIOCNoEjecutada(avgCost=100, precio_inicial=100.59)
+try:
+    bot.revisar_ventas(ib_ioc_no_ejecutada)  # arma el trailing -> parcial (tambien IOC, tambien "Cancelled")
+    ib_ioc_no_ejecutada.precio_actual = 101.09  # nuevo maximo, sin retroceso
+    bot.revisar_ventas(ib_ioc_no_ejecutada)
+    ib_ioc_no_ejecutada.precio_actual = 100.78  # dispara el trailing, pero la IOC no se ejecuta
+    bot.revisar_ventas(ib_ioc_no_ejecutada)
+finally:
+    bot.es_horario_operativo = es_horario_original_trailing
+    bot.en_ventana_venta_forzada = en_venta_forzada_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original
+    bot.fuera_de_sesion_regular_us = fuera_de_sesion_regular_us_original
+    bot.notificar_telegram = notificar_telegram_original_ioc_ibkr
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("venta principal (trailing): si la orden IOC no se ejecuta (posicion sin cambios), "
+      "NO se registra ninguna venta ni se avisa por Telegram",
+      telegram_capturados_ioc == [], f"mensajes={telegram_capturados_ioc}")
 
 # --- Escalones de trailing stop segun el maximo alcanzado (peticion del
 # usuario, sept. 2026): cuanto mas alto el pico, mas margen de retroceso se

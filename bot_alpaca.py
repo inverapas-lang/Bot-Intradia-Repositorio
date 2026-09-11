@@ -1325,10 +1325,25 @@ def revisar_ventas():
                                            side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
                                            extended_hours=True)
             else:
+                # LIMITADA (no a mercado) con un margen acotado bajo el
+                # precio de referencia (MARGEN_ORDEN_LIMITADA_VENTA_PCT,
+                # 0.2%), IOC -mismo mecanismo que ya usaba cripto-. Bug
+                # real de produccion (sept. 2026, casos reales: META y
+                # despues SMCI vendidas con perdidas): una orden A MERCADO
+                # no tiene ningun limite de precio, asi que el slippage
+                # entre la decision (con beneficio_pct >= el suelo de
+                # MARGEN_MINIMO_VENTA_PCT) y la ejecucion real podia acabar
+                # vendiendo por debajo del suelo, incluso en perdidas. Con
+                # esta orden limitada, el precio de ejecucion real nunca
+                # puede ser peor que precio_limite; si el precio se mueve
+                # mas rapido que eso, la orden IOC simplemente no se
+                # ejecuta este ciclo (se sigue manteniendo la posicion) en
+                # vez de venderse mas barato de lo aceptable.
+                precio_limite = calcular_precio_limite_venta(precio_actual)
                 log(f"VENTAS: {ticker} - {info_posicion} - beneficio {beneficio_pct:.2f}%, {motivo} -> "
-                    f"{etiqueta_accion} de {cantidad_a_vender:g} (orden a mercado).")
-                orden = MarketOrderRequest(symbol=ticker, qty=cantidad_a_vender, side=OrderSide.SELL,
-                                            time_in_force=TimeInForce.DAY)
+                    f"{etiqueta_accion} de {cantidad_a_vender:g} (orden limitada a {precio_limite} USD, IOC).")
+                orden = LimitOrderRequest(symbol=ticker, qty=cantidad_a_vender, limit_price=precio_limite,
+                                           side=OrderSide.SELL, time_in_force=TimeInForce.IOC)
 
             cancelar_ordenes_abiertas(ticker)
             trade = _trading_client.submit_order(order_data=orden)

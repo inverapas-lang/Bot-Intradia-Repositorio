@@ -762,6 +762,84 @@ check("beneficio recalculado con precio real: el historial (fuente de /hoy) tamb
       bool(venta_trail) and abs(venta_trail[-1]["beneficio_pct"] - (-1.0)) < 1e-6,
       f"ultimo_registro={venta_trail[-1] if venta_trail else None}")
 
+# --- BUG REAL DE PRODUCCION (sept. 2026, casos reales: META y despues
+# SMCI vendidas con perdidas -0.23%, pese al suelo de MARGEN_MINIMO_VENTA_PCT
+# 0.5%): la venta principal (trailing/refuerzo) de ACCIONES en sesion
+# regular usaba una orden A MERCADO, sin ningun limite de precio. El
+# suelo anti-perdidas solo se comprobaba en el momento de DECIDIR vender
+# (con el precio de referencia), pero una orden a mercado puede
+# ejecutarse a cualquier precio segundos despues si el mercado se mueve
+# rapido -exactamente lo que paso con SMCI-. Ahora esa venta usa una
+# orden LIMITADA (IOC), igual que ya hacia cripto: el precio real de
+# ejecucion nunca puede ser peor que el limite. ---
+bot.macd_5min_bajista_2_velas = lambda ticker: False
+bot._maximo_beneficio_neto_por_posicion = {"TRAIL": 5.0}
+bot._scale_out_realizado = {"TRAIL"}
+cliente_orden_limitada = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._trading_client = cliente_orden_limitada
+bot._data_client = _DataClientPrecioFijo(101.0)  # +1%: dispara el trailing (retroceso 4 pts >> margen 1.5)
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("venta principal de acciones en sesion regular: usa orden LIMITADA (no a mercado)",
+      len(cliente_orden_limitada.ordenes) == 1 and cliente_orden_limitada.ordenes[0].type.value == "limit",
+      f"ordenes={cliente_orden_limitada.ordenes}")
+if cliente_orden_limitada.ordenes:
+    orden_limitada_venta = cliente_orden_limitada.ordenes[0]
+    check("venta principal de acciones: time_in_force es IOC",
+          orden_limitada_venta.time_in_force.value == "ioc", f"tif={orden_limitada_venta.time_in_force}")
+    check("venta principal de acciones: el precio limite esta acotado bajo el precio de "
+          "referencia (MARGEN_ORDEN_LIMITADA_VENTA_PCT, 0.2%), no sin limite como una orden a mercado",
+          abs(orden_limitada_venta.limit_price - bot.calcular_precio_limite_venta(101.0)) < 1e-6,
+          f"limit_price={orden_limitada_venta.limit_price}")
+
+# Ahora el caso que de verdad importa: si el precio se mueve tan rapido
+# que la orden IOC NO llega a ejecutarse (el mercado nunca toco el limite
+# protegido), la posicion debe quedar INTACTA -sin vender mas barato de
+# lo aceptable- en vez de ejecutarse igualmente como pasaba con la orden
+# a mercado.
+class _TradingClientIOCNoEjecutada(_TradingClientFalso):
+    """IOC que NO se ejecuta (cancelada de inmediato porque el mercado
+    nunca llego al precio limite protegido): get_order_by_id devuelve
+    'canceled' y la posicion NO cambia."""
+    def get_order_by_id(self, order_id):
+        return types.SimpleNamespace(status=types.SimpleNamespace(value="canceled"),
+                                      filled_qty=None, filled_avg_price=None)
+
+
+bot.macd_5min_bajista_2_velas = lambda ticker: False
+bot._maximo_beneficio_neto_por_posicion = {"TRAIL": 5.0}
+bot._scale_out_realizado = {"TRAIL"}
+mensajes_ioc_no_ejecutada = []
+notificar_telegram_original_ioc = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: mensajes_ioc_no_ejecutada.append(msg)
+sleep_original_ioc = bot.time.sleep
+bot.time.sleep = lambda s: None
+cliente_ioc_no_ejecutada = _TradingClientIOCNoEjecutada(posiciones=[_posicion_trailing(100.0)])
+bot._trading_client = cliente_ioc_no_ejecutada
+bot._data_client = _DataClientPrecioFijo(101.0)
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.notificar_telegram = notificar_telegram_original_ioc
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
+    bot.time.sleep = sleep_original_ioc
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("venta principal de acciones: si la orden IOC no se ejecuta (mercado nunca toco el "
+      "limite protegido), NO se registra ninguna venta ni se avisa por Telegram",
+      mensajes_ioc_no_ejecutada == [], f"mensajes={mensajes_ioc_no_ejecutada}")
+
+
 # --- BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de WMT se
 # ejecuto de verdad -aparecio en /cartera- pero /hoy seguia mostrando "0
 # compras" y no llego ningun aviso de Telegram): a diferencia de
