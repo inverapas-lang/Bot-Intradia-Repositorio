@@ -1416,6 +1416,27 @@ def macd_5min_bajista_2_velas(ib, contrato):
     return bool(macd.iloc[-1] < linea_senal.iloc[-1] and macd.iloc[-2] < linea_senal.iloc[-2])
 
 
+def macd_5min_alcista_2_velas(ib, contrato):
+    """Version 'alcista' de macd_5min_bajista_2_velas(): exige que las DOS
+    ultimas velas de 5 min tengan MACD por ENCIMA de su linea de señal.
+
+    Peticion del usuario, sept. 2026 (mismo cambio que en bot_alpaca.py, a
+    raiz de revisar el historial real de operaciones de Alpaca: una venta
+    parcial por scale-out se recompraba casi al instante porque el MACD
+    seguia diciendo "alcista" -las dos señales, trailing stop y MACD, no se
+    hablaban entre si-). Se usa como VETO del scale-out (venta parcial): si
+    el MACD corto sigue claramente alcista, se aplaza la venta parcial en
+    vez de asegurar beneficio y recomprar segundos despues. El trailing
+    stop TOTAL (la red de seguridad final) NO usa este veto -sigue siendo
+    puro precio, sin esperar confirmacion de un indicador lento-."""
+    velas = pedir_velas(ib, contrato, '2 D', '5 mins')
+    if len(velas) < 36:
+        return None
+    cierres = pd.Series([v.close for v in velas])
+    macd, linea_senal, _ = calcular_macd(cierres)
+    return bool(macd.iloc[-1] > linea_senal.iloc[-1] and macd.iloc[-2] > linea_senal.iloc[-2])
+
+
 MARGEN_MINIMO_VENTA_PCT = 0.5  # peticion del usuario, sept. 2026: nunca vender (ni parcial ni
                                  # total, ni por trailing stop ni por refuerzo) con un beneficio
                                  # neto por debajo de este suelo, sea cual sea el umbral de
@@ -1430,7 +1451,7 @@ MARGEN_MINIMO_VENTA_PCT = 0.5  # peticion del usuario, sept. 2026: nunca vender 
                                  # reales por la caida rapida del precio en esos segundos).
 
 
-def decidir_accion_venta(clave, beneficio_pct, umbral):
+def decidir_accion_venta(clave, beneficio_pct, umbral, macd_alcista_fn=None):
     """Logica compartida de venta (trailing stop + salida parcial),
     independiente del mercado -se llama con la misma `clave` que usa
     _maximo_beneficio_neto_por_posicion/_scale_out_realizado (ver
@@ -1438,7 +1459,15 @@ def decidir_accion_venta(clave, beneficio_pct, umbral):
     cripto). Devuelve (accion, motivo), accion en
     {"MANTENER","VENTA_PARCIAL","VENTA_TOTAL"}. NO decide por si sola el
     refuerzo de 2 velas -eso lo comprueba el llamador solo si beneficio_pct
-    ya supera el umbral, para no gastar una peticion de datos de mas-."""
+    ya supera el umbral, para no gastar una peticion de datos de mas-.
+
+    macd_alcista_fn (opcional): callable SIN argumentos que devuelve si el
+    MACD corto sigue claramente alcista para este valor -se llama de forma
+    perezosa, solo justo antes de decidir un scale-out, para no gastar una
+    peticion de datos si no hace falta-. Si devuelve True, se APLAZA el
+    scale-out (VENTA_PARCIAL) a este ciclo -ver macd_5min_alcista_2_velas()
+    para el porque-. El trailing stop TOTAL (disparo_trailing) NUNCA se veta
+    con esto, solo el scale-out."""
     maximo_anterior = _maximo_beneficio_neto_por_posicion.get(clave, beneficio_pct)
     maximo_neto = max(maximo_anterior, beneficio_pct)
     _maximo_beneficio_neto_por_posicion[clave] = maximo_neto
@@ -1465,6 +1494,9 @@ def decidir_accion_venta(clave, beneficio_pct, umbral):
         return "VENTA_TOTAL", (f"trailing stop: retrocedio {retroceso_pct:.2f} pts desde el maximo de "
                                 f"{maximo_neto:.2f}% (margen permitido a ese maximo: {margen_trailing:.2f} pts)")
     if trailing_armado and puede_vender and clave not in _scale_out_realizado:
+        if macd_alcista_fn is not None and macd_alcista_fn():
+            _guardar_estado_venta()
+            return "MANTENER", info + " (scale-out aplazado: MACD 5min sigue claramente alcista)"
         _scale_out_realizado.add(clave)
         _guardar_estado_venta()
         return "VENTA_PARCIAL", f"objetivo alcanzado ({beneficio_pct:.2f}% >= {umbral}%): asegurando el {PORCENTAJE_SCALE_OUT*100:.0f}%"
@@ -1914,7 +1946,8 @@ def revisar_ventas(ib, mercados=None):
                 # ni Plan B/C -ver crear_orden_limitada_cripto()-).
                 clave_posicion_cripto = clave_historial(mercado, contrato.symbol)
                 accion_cripto, motivo_cripto = decidir_accion_venta(
-                    clave_posicion_cripto, beneficio_pct, UMBRAL_BENEFICIO_CRYPTO_PCT)
+                    clave_posicion_cripto, beneficio_pct, UMBRAL_BENEFICIO_CRYPTO_PCT,
+                    macd_alcista_fn=lambda: macd_5min_alcista_2_velas(ib, contrato))
 
                 # El refuerzo tampoco puede vender por debajo del suelo de
                 # seguridad (MARGEN_MINIMO_VENTA_PCT, 0.5%) aunque el umbral
@@ -2055,7 +2088,8 @@ def revisar_ventas(ib, mercados=None):
             # umbral minimo (UMBRAL_BENEFICIO_PCT) ya esta en NETO (descontada
             # la comision de compra+venta, ver mas arriba).
             clave_posicion = clave_historial(mercado, contrato.symbol)
-            accion, motivo = decidir_accion_venta(clave_posicion, beneficio_pct, UMBRAL_BENEFICIO_PCT)
+            accion, motivo = decidir_accion_venta(clave_posicion, beneficio_pct, UMBRAL_BENEFICIO_PCT,
+                                                   macd_alcista_fn=lambda: macd_5min_alcista_2_velas(ib, contrato))
 
             # El refuerzo tampoco puede vender por debajo del suelo de
             # seguridad (MARGEN_MINIMO_VENTA_PCT, 0.5% - coincide con

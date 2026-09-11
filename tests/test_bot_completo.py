@@ -1809,6 +1809,31 @@ check("suelo anti-perdidas: beneficio exactamente 0.5% (el suelo) -> SI vende",
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
 
+# --- Veto del scale-out por MACD alcista (peticion del usuario, sept.
+# 2026, mismo cambio en bot_alpaca.py, a raiz de revisar el historial real
+# de operaciones de Alpaca: una venta parcial se recompraba casi al
+# instante porque el MACD seguia diciendo "alcista"). decidir_accion_venta()
+# acepta ahora macd_alcista_fn: si devuelve True, se APLAZA el scale-out
+# (sin marcarlo como ya hecho, para poder reintentarlo el siguiente ciclo);
+# el trailing TOTAL nunca se veta. ---
+accion, motivo = bot.decidir_accion_venta("US:VETO", 5.0, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)
+check("veto de scale-out por MACD alcista: en el umbral pero MACD sigue alcista -> se APLAZA (MANTENER)",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+check("veto de scale-out por MACD alcista: NO se marca como ya hecho (se puede reintentar)",
+      "US:VETO" not in bot._scale_out_realizado, f"_scale_out_realizado={bot._scale_out_realizado}")
+accion, motivo = bot.decidir_accion_venta("US:VETO", 5.0, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: False)
+check("veto de scale-out por MACD alcista: si el MACD deja de estar alcista, el scale-out SI se hace",
+      accion == "VENTA_PARCIAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+bot.decidir_accion_venta("US:VETO2", 3.5, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: False)  # scale-out ya hecho, maximo 3.5% (margen 0.7 pts)
+accion, motivo = bot.decidir_accion_venta("US:VETO2", 2.7, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)  # retroceso 0.8 pts (> margen 0.7)
+check("veto de scale-out por MACD alcista: el trailing TOTAL SI dispara aunque el MACD siga "
+      "alcista (solo se veta el scale-out, no la red de seguridad final)",
+      accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
 # --- BUG REAL DE PRODUCCION (sept. 2026, mismo cambio en bot_alpaca.py):
 # el % de beneficio mostrado/registrado se calculaba con precio_actual (el
 # precio de referencia usado para DECIDIR vender), no con el precio REAL

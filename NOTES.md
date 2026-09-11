@@ -1119,6 +1119,19 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
     completo (la decisión sigue basándose en un precio de referencia con cierto desfase), pero
     lo acota a un margen pequeño y conocido en vez de dejarlo abierto.
 
+20. **Churn de scale-out + recompra casi inmediata (sept. 2026, detectado al revisar el
+    historial real de Alpaca, mismo cambio en `bot_alpaca.py`)**: el trailing stop vendía la
+    mitad de una posición (scale-out) y el bot recompraba el mismo ticker segundos después,
+    porque el trailing stop y el MACD son señales independientes que no se consultaban entre sí
+    — el trailing stop solo mira el retroceso desde el máximo de esa posición, sin saber si el
+    MACD de fondo seguía diciendo "alcista".
+    → `decidir_accion_venta()` acepta ahora `macd_alcista_fn` (callable perezoso, llamado solo
+    justo antes de decidir un scale-out): si el MACD corto (`macd_5min_alcista_2_velas()`, la
+    versión "alcista" de la ya existente `macd_5min_bajista_2_velas()`) sigue claramente
+    alcista, el scale-out se **aplaza** (no se marca como hecho, se reintenta el siguiente
+    ciclo). El trailing stop TOTAL (la red de seguridad final) **no** usa este veto a propósito
+    — sigue disparando solo por precio, sin esperar confirmación de un indicador lento.
+
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 
 - **`Error 10349` ("Order TIF was set to DAY based on order preset")**: aviso rutinario y

@@ -992,6 +992,33 @@ TOTAL ganancia/perdida realizada: +4,78 USD (+4,19 EUR)
 
 El formato en texto plano (sin HTML, usado solo internamente) no cambia.
 
+## Veto del scale-out por MACD alcista (sept. 2026, a raíz del análisis de operaciones)
+
+Al revisar el historial real (ver la sección de "Herramienta de diagnóstico" más abajo) se
+detectó un patrón de churn en SMCI: el trailing stop vendía la mitad de la posición (scale-out,
+con una pequeña ganancia) y el bot recompraba casi al instante el mismo ticker, porque el
+trailing stop y el MACD son dos señales completamente independientes que no se consultan entre
+sí — el trailing stop solo mira el retroceso desde el máximo de **esa posición concreta**, sin
+saber si el MACD de fondo sigue diciendo "alcista".
+
+**Cambio**: `decidir_accion_venta()` acepta ahora un parámetro opcional `macd_alcista_fn`
+(callable sin argumentos, llamado de forma perezosa solo justo antes de decidir un scale-out,
+para no gastar una petición de datos de más si no hace falta). Si `macd_alcista_fn()` devuelve
+`True` (las 2 últimas velas de 5 min con MACD por encima de su línea de señal —
+`macd_5min_alcista_2_velas()`/`macd_5min_alcista_cripto_2_velas()`, la versión "alcista" de las
+ya existentes `macd_5min_bajista_2_velas()`), el scale-out se **aplaza** (se devuelve
+`MANTENER`, sin marcar `_scale_out_realizado` — se puede reintentar en el siguiente ciclo, no se
+pierde para siempre).
+
+**Deliberadamente el trailing stop TOTAL (`disparo_trailing`, la red de seguridad final) NO usa
+este veto** — sigue disparando solo por precio, sin esperar confirmación de un indicador lento
+como el MACD. Solo el scale-out (la venta parcial, que es la que generó el churn) espera esa
+confirmación. El trade-off asumido: en una subida fuerte y sostenida, el bot puede tardar más en
+asegurar la primera mitad de la ganancia si el MACD tarda en confirmar — a cambio de evitar
+vender y recomprar el mismo ticker en minutos cuando la tendencia de fondo seguía intacta.
+
+Mismo cambio aplicado en `bot_completo.py` (IBKR), con `macd_5min_alcista_2_velas(ib, contrato)`.
+
 ## Herramienta de diagnóstico a posteriori (`diagnostico_operaciones.py`, sept. 2026)
 
 Petición del usuario: revisar de forma crítica si el bot estaba operando correctamente,

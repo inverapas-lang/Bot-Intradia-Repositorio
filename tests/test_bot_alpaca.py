@@ -700,6 +700,44 @@ check("suelo anti-perdidas: beneficio exactamente 0.5% (el suelo) -> SI vende",
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
 
+# --- Veto del scale-out por MACD alcista (peticion del usuario, sept.
+# 2026, a raiz de revisar el historial real: SMCI vendio media posicion por
+# scale-out y recompro casi al instante porque el MACD seguia diciendo
+# "alcista" -las dos señales, trailing stop y MACD, no se hablaban entre
+# si-). decidir_accion_venta() acepta ahora macd_alcista_fn: si devuelve
+# True, se APLAZA el scale-out (sin marcarlo como ya hecho, para poder
+# reintentarlo el siguiente ciclo); el trailing TOTAL nunca se veta. ---
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+accion, motivo = bot.decidir_accion_venta("VETO", 5.0, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)
+check("veto de scale-out por MACD alcista: en el umbral pero MACD sigue alcista -> se APLAZA (MANTENER)",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+check("veto de scale-out por MACD alcista: NO se marca como ya hecho (se puede reintentar)",
+      "VETO" not in bot._scale_out_realizado, f"_scale_out_realizado={bot._scale_out_realizado}")
+
+# Si en el siguiente ciclo el MACD ya no esta alcista, el scale-out SI se hace.
+accion, motivo = bot.decidir_accion_venta("VETO", 5.0, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: False)
+check("veto de scale-out por MACD alcista: si el MACD deja de estar alcista, el scale-out SI se hace",
+      accion == "VENTA_PARCIAL", f"accion={accion}, motivo={motivo}")
+
+# El trailing TOTAL (disparo_trailing) nunca se veta, aunque el MACD siga alcista.
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+bot.decidir_accion_venta("VETO2", 5.0, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)  # arma el maximo en 5%
+accion, motivo = bot.decidir_accion_venta("VETO2", -0.5, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)
+check("veto de scale-out por MACD alcista: el trailing TOTAL nunca se veta por MACD (retroceso "
+      "enorme, beneficio bajo el suelo -> VENTA_TOTAL igualmente NO por venderse en negativo, sino por el suelo)",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+bot.decidir_accion_venta("VETO3", 5.0, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: False)  # scale-out ya hecho
+accion, motivo = bot.decidir_accion_venta("VETO3", 3.4, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)  # retroceso 1.6 pts (> margen 0.7 de ese escalon)
+check("veto de scale-out por MACD alcista: el trailing TOTAL SI dispara aunque el MACD siga "
+      "alcista (solo se veta el scale-out, no la red de seguridad final)",
+      accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+
 # --- BUG REAL DE PRODUCCION (sept. 2026, caso real: venta de META que
 # parecia con beneficio positivo en Telegram pero en realidad se vendio
 # mas barato de lo comprado): el % de beneficio mostrado/registrado se
@@ -761,6 +799,32 @@ check("beneficio recalculado con precio real: el historial (fuente de /hoy) tamb
       "-1% real, no el +2% de referencia",
       bool(venta_trail) and abs(venta_trail[-1]["beneficio_pct"] - (-1.0)) < 1e-6,
       f"ultimo_registro={venta_trail[-1] if venta_trail else None}")
+
+# --- Integracion: revisar_ventas() con macd_5min_alcista_2_velas mockeado
+# a True -el scale-out NO debe llegar a colocar ninguna orden, aunque el
+# precio ya haya llegado al umbral de armado (peticion del usuario, sept.
+# 2026, ver el bloque "veto de scale-out por MACD alcista" mas arriba). ---
+macd_alcista_original_alpaca = bot.macd_5min_alcista_2_velas
+bot.macd_5min_alcista_2_velas = lambda ticker: True
+bot.macd_5min_bajista_2_velas = lambda ticker: False  # refuerzo inactivo, no interfiere en este test
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+cliente_veto = _TradingClientFalso(posiciones=[_posicion_trailing(100.0)])
+bot._trading_client = cliente_veto
+bot._data_client = _DataClientPrecioFijo(102.0)  # +2% -> llega al umbral de armado (scale-out)
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.macd_5min_alcista_2_velas = macd_alcista_original_alpaca
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("integracion: con MACD 5min alcista mockeado, revisar_ventas NO coloca ninguna orden "
+      "aunque el precio llegue al umbral de scale-out",
+      len(cliente_veto.ordenes) == 0, f"ordenes={cliente_veto.ordenes}")
 
 # --- BUG REAL DE PRODUCCION (sept. 2026, casos reales: META y despues
 # SMCI vendidas con perdidas -0.23%, pese al suelo de MARGEN_MINIMO_VENTA_PCT
