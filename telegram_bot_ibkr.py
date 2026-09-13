@@ -27,6 +27,9 @@ Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
                    con dinero real-; hay que confirmar con /estado que ya
                    paro y mandar /arrancar a mano. Si el bot ya estaba
                    parado, arranca directamente con el codigo nuevo.
+    /version     - hash + fecha + mensaje del commit REALMENTE en marcha
+                   ahora mismo (para confirmar si un fix concreto ya esta
+                   desplegado, sin fiarse de la memoria)
     /cartera     - posiciones abiertas en todos los mercados (igual que
                    cartera_ibkr.py), consultando IB Gateway con un clientId
                    propio (no interfiere con el bot si esta corriendo)
@@ -227,6 +230,25 @@ def actualizar_bot():
             f"el código nuevo.")
 
 
+def consultar_version():
+    """/version (peticion del usuario, sept. 2026, mismo comando ya añadido
+    a telegram_bot.py/Alpaca: poder confirmar en cualquier momento que
+    commit esta REALMENTE en marcha, sin depender de la memoria -esto
+    importa mas aun en IBKR, donde /actualizar no reinicia solo el bot
+    tras el 'git pull', hay que confirmarlo a mano con /estado y
+    /arrancar-)."""
+    try:
+        resultado = subprocess.run(
+            ["git", "log", "-1", "--format=%h %ad %s", "--date=iso"],
+            cwd=RUTA_BASE, capture_output=True, text=True, timeout=10
+        )
+        if resultado.returncode != 0:
+            return f"⚠️ No se pudo leer el commit actual: {resultado.stderr.strip()}"
+        return f"📌 Commit en marcha ahora mismo:\n<pre>{escapar_html(resultado.stdout.strip())}</pre>"
+    except Exception as e:
+        return f"⚠️ Error al leer el commit actual: {type(e).__name__}: {e}"
+
+
 def _conectar_cartera():
     ib = bot.IB()
     ib.connect('127.0.0.1', 4002, clientId=cartera.CLIENT_ID_CARTERA, timeout=15)
@@ -334,6 +356,7 @@ AYUDA = (
     "/parar - pide una parada limpia del bot\n"
     "/actualizar - descarga el codigo mas reciente (git pull) y pide la parada "
     "del bot si hace falta; confirma con /estado y manda /arrancar cuando pare\n"
+    "/version - que commit de codigo esta REALMENTE en marcha ahora mismo\n"
     "/cartera - posiciones abiertas en todos los mercados\n"
     "/hoy - actividad y operaciones cerradas hoy\n"
     "/ayer - operaciones cerradas ayer\n"
@@ -357,6 +380,9 @@ def procesar_comando(texto):
 
     if comando == "actualizar":
         return actualizar_bot()
+
+    if comando == "version":
+        return consultar_version()
 
     if comando == "cartera":
         ib = _conectar_cartera()

@@ -965,6 +965,14 @@ solo en USD):
 - El resto (cantidad a máximo 4 decimales, fecha "DD MES", línea en blanco entre operaciones, %
   TOTAL sobre lo invertido) es idéntico a Alpaca.
 
+### `/version` en `telegram_bot_ibkr.py` (sept. 2026)
+
+Mismo comando ya añadido a `telegram_bot.py`/Alpaca: `consultar_version()` hace
+`git log -1 --format="%h %ad %s"` en `RUTA_BASE` y devuelve el resultado tal cual. Importa aún
+más aquí que en Alpaca — `/actualizar` en IBKR no reinicia nada por su cuenta tras el `git pull`
+(hay que confirmar con `/estado` y mandar `/arrancar` a mano), así que `/version` es la forma más
+directa de comprobar qué código quedó realmente en marcha tras ese proceso manual.
+
 ## Tipo de cambio EUR/USD en tiempo real (añadido sept. 2026, petición del usuario)
 
 Petición explícita: "que el par EUR/USD que utiliza el bot sea el vigente en el momento" —

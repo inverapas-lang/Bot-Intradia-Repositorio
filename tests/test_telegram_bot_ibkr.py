@@ -208,6 +208,22 @@ _borrar_si_existe(tib.bot.ARCHIVO_DETENER)
 _vivo_simulado["valor"] = False
 
 
+# --- 3c. /version (peticion del usuario, sept. 2026, mismo comando ya en
+#     telegram_bot.py/Alpaca): confirmar el commit REALMENTE en marcha. ---
+def _run_falso_git_log_ibkr(cmd, **kwargs):
+    if cmd[:2] == ["git", "log"]:
+        return types.SimpleNamespace(returncode=0, stdout="abc1234 2026-09-11 10:00:00 +0000 Un commit de prueba\n", stderr="")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="no deberia llamarse")
+
+
+tib.subprocess.run = _run_falso_git_log_ibkr
+resultado_version_ibkr = tib.procesar_comando("/version")
+check("/version: devuelve el hash/fecha/mensaje del commit actual (git log -1)",
+      "abc1234" in resultado_version_ibkr and "Un commit de prueba" in resultado_version_ibkr,
+      f"resultado={resultado_version_ibkr!r}")
+tib.subprocess.run = run_original_ibkr
+
+
 # --- 4. /cartera, /hoy, /ayer, /semana: dobles de prueba de cartera_ibkr ---
 tib.cartera.formatear_posiciones_abiertas = lambda ib, html=False: "POSICIONES_FALSAS"
 tib.cartera.formatear_operaciones_cerradas = lambda d, h, html=False: f"CERRADAS de {d} a {h}"

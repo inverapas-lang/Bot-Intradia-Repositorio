@@ -281,9 +281,10 @@ check("formatear_operaciones_cerradas (html): sin COMPRA previa en el historial,
       "ZZZ" in cerradas_sin_apertura and "abierta desde" not in cerradas_sin_apertura,
       f"resultado={cerradas_sin_apertura!r}")
 
+fecha_apertura_esperada = cartera._formatear_fecha_corta(compra_hace_3h58.isoformat(timespec="seconds"))
 check("formatear_operaciones_cerradas (html): la fecha de apertura va en formato 'DD MES' "
       "(p.ej. '11 SEP'), no 'MM-DD'",
-      "11 SEP" in cerradas_html_apertura, f"resultado={cerradas_html_apertura!r}")
+      fecha_apertura_esperada in cerradas_html_apertura, f"resultado={cerradas_html_apertura!r}")
 check("formatear_operaciones_cerradas (html): hay una linea en blanco entre una operacion y la siguiente",
       "\n\n" in cerradas_html_apertura, f"resultado={cerradas_html_apertura!r}")
 
