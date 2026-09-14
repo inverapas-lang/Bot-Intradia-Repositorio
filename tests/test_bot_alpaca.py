@@ -800,12 +800,12 @@ check("beneficio recalculado con precio real: el historial (fuente de /hoy) tamb
       bool(venta_trail) and abs(venta_trail[-1]["beneficio_pct"] - (-1.0)) < 1e-6,
       f"ultimo_registro={venta_trail[-1] if venta_trail else None}")
 
-# --- Integracion: revisar_ventas() con macd_5min_alcista_2_velas mockeado
+# --- Integracion: revisar_ventas() con macd_5min_alcista mockeado
 # a True -el scale-out NO debe llegar a colocar ninguna orden, aunque el
 # precio ya haya llegado al umbral de armado (peticion del usuario, sept.
 # 2026, ver el bloque "veto de scale-out por MACD alcista" mas arriba). ---
-macd_alcista_original_alpaca = bot.macd_5min_alcista_2_velas
-bot.macd_5min_alcista_2_velas = lambda ticker: True
+macd_alcista_original_alpaca = bot.macd_5min_alcista
+bot.macd_5min_alcista = lambda ticker: True
 bot.macd_5min_bajista_2_velas = lambda ticker: False  # refuerzo inactivo, no interfiere en este test
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
@@ -817,7 +817,7 @@ try:
 finally:
     bot._trading_client = trading_client_original
     bot._data_client = data_client_original
-    bot.macd_5min_alcista_2_velas = macd_alcista_original_alpaca
+    bot.macd_5min_alcista = macd_alcista_original_alpaca
     bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
     bot._maximo_beneficio_neto_por_posicion = {}
     bot._scale_out_realizado = set()

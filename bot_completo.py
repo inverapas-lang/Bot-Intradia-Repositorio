@@ -1416,25 +1416,33 @@ def macd_5min_bajista_2_velas(ib, contrato):
     return bool(macd.iloc[-1] < linea_senal.iloc[-1] and macd.iloc[-2] < linea_senal.iloc[-2])
 
 
-def macd_5min_alcista_2_velas(ib, contrato):
-    """Version 'alcista' de macd_5min_bajista_2_velas(): exige que las DOS
-    ultimas velas de 5 min tengan MACD por ENCIMA de su linea de señal.
+def macd_5min_alcista(ib, contrato):
+    """Version 'alcista' de macd_5min_bajista(): la ultima vela de 5 min
+    tiene el MACD por ENCIMA de su linea de señal.
 
     Peticion del usuario, sept. 2026 (mismo cambio que en bot_alpaca.py, a
     raiz de revisar el historial real de operaciones de Alpaca: una venta
     parcial por scale-out se recompraba casi al instante porque el MACD
     seguia diciendo "alcista" -las dos señales, trailing stop y MACD, no se
     hablaban entre si-). Se usa como VETO del scale-out (venta parcial): si
-    el MACD corto sigue claramente alcista, se aplaza la venta parcial en
-    vez de asegurar beneficio y recomprar segundos despues. El trailing
-    stop TOTAL (la red de seguridad final) NO usa este veto -sigue siendo
-    puro precio, sin esperar confirmacion de un indicador lento-."""
+    el MACD corto sigue alcista, se aplaza la venta parcial en vez de
+    asegurar beneficio y recomprar segundos despues. El trailing stop TOTAL
+    (la red de seguridad final) NO usa este veto -sigue siendo puro precio,
+    sin esperar confirmacion de un indicador lento-.
+
+    Una sola vela (no las 2 consecutivas de la version original de este
+    veto, macd_5min_alcista_2_velas): un caso real (WMT, en Alpaca) mostro
+    que exigir 2 velas dejaba pasar ventas que se recompraban casi al
+    instante -bastaba con que la vela anterior a la venta ya no fuera
+    alcista para que el veto no se activara, pese a que la señal de compra
+    volviera a activarse enseguida-. Peticion explicita del usuario:
+    prioriza NO vender por encima de mantener el veto estricto."""
     velas = pedir_velas(ib, contrato, '2 D', '5 mins')
-    if len(velas) < 36:
+    if len(velas) < 35:
         return None
     cierres = pd.Series([v.close for v in velas])
     macd, linea_senal, _ = calcular_macd(cierres)
-    return bool(macd.iloc[-1] > linea_senal.iloc[-1] and macd.iloc[-2] > linea_senal.iloc[-2])
+    return bool(macd.iloc[-1] > linea_senal.iloc[-1])
 
 
 MARGEN_MINIMO_VENTA_PCT = 0.5  # peticion del usuario, sept. 2026: nunca vender (ni parcial ni
@@ -1465,7 +1473,7 @@ def decidir_accion_venta(clave, beneficio_pct, umbral, macd_alcista_fn=None):
     MACD corto sigue claramente alcista para este valor -se llama de forma
     perezosa, solo justo antes de decidir un scale-out, para no gastar una
     peticion de datos si no hace falta-. Si devuelve True, se APLAZA el
-    scale-out (VENTA_PARCIAL) a este ciclo -ver macd_5min_alcista_2_velas()
+    scale-out (VENTA_PARCIAL) a este ciclo -ver macd_5min_alcista()
     para el porque-. El trailing stop TOTAL (disparo_trailing) NUNCA se veta
     con esto, solo el scale-out."""
     maximo_anterior = _maximo_beneficio_neto_por_posicion.get(clave, beneficio_pct)
@@ -1947,7 +1955,7 @@ def revisar_ventas(ib, mercados=None):
                 clave_posicion_cripto = clave_historial(mercado, contrato.symbol)
                 accion_cripto, motivo_cripto = decidir_accion_venta(
                     clave_posicion_cripto, beneficio_pct, UMBRAL_BENEFICIO_CRYPTO_PCT,
-                    macd_alcista_fn=lambda: macd_5min_alcista_2_velas(ib, contrato))
+                    macd_alcista_fn=lambda: macd_5min_alcista(ib, contrato))
 
                 # El refuerzo tampoco puede vender por debajo del suelo de
                 # seguridad (MARGEN_MINIMO_VENTA_PCT, 0.5%) aunque el umbral
@@ -2089,7 +2097,7 @@ def revisar_ventas(ib, mercados=None):
             # la comision de compra+venta, ver mas arriba).
             clave_posicion = clave_historial(mercado, contrato.symbol)
             accion, motivo = decidir_accion_venta(clave_posicion, beneficio_pct, UMBRAL_BENEFICIO_PCT,
-                                                   macd_alcista_fn=lambda: macd_5min_alcista_2_velas(ib, contrato))
+                                                   macd_alcista_fn=lambda: macd_5min_alcista(ib, contrato))
 
             # El refuerzo tampoco puede vender por debajo del suelo de
             # seguridad (MARGEN_MINIMO_VENTA_PCT, 0.5% - coincide con

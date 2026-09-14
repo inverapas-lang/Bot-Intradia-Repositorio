@@ -1090,11 +1090,20 @@ saber si el MACD de fondo sigue diciendo "alcista".
 **Cambio**: `decidir_accion_venta()` acepta ahora un parámetro opcional `macd_alcista_fn`
 (callable sin argumentos, llamado de forma perezosa solo justo antes de decidir un scale-out,
 para no gastar una petición de datos de más si no hace falta). Si `macd_alcista_fn()` devuelve
-`True` (las 2 últimas velas de 5 min con MACD por encima de su línea de señal —
-`macd_5min_alcista_2_velas()`/`macd_5min_alcista_cripto_2_velas()`, la versión "alcista" de las
-ya existentes `macd_5min_bajista_2_velas()`), el scale-out se **aplaza** (se devuelve
-`MANTENER`, sin marcar `_scale_out_realizado` — se puede reintentar en el siguiente ciclo, no se
-pierde para siempre).
+`True`, el scale-out se **aplaza** (se devuelve `MANTENER`, sin marcar `_scale_out_realizado` —
+se puede reintentar en el siguiente ciclo, no se pierde para siempre).
+
+**Ajuste (12 sept. 2026, caso real: WMT)**: la versión original exigía las 2 últimas velas de 5
+min con MACD por encima de su línea de señal (`macd_5min_alcista_2_velas()`). En producción,
+WMT vendió media posición por scale-out y el bot la recompró un minuto después — la señal de
+compra (que mira otro combinado de temporalidades) seguía diciendo "sí" aunque el veto, con su
+exigencia de 2 velas consecutivas, no se hubiera activado (bastaba con que la vela justo
+anterior a la venta ya no fuera alcista). A petición explícita del usuario ("me interesa más que
+no se venda, no tanto el cooldown"), se relaja a **una sola vela** (`macd_5min_alcista()`/
+`macd_5min_alcista_cripto()`, la versión de una vela de las ya existentes
+`macd_5min_bajista()`/`macd_5min_bajista_cripto()`) — el veto se activa más a menudo, aplazando
+más scale-outs de los estrictamente necesarios, a cambio de reducir este tipo de churn. Sigue
+sin afectar al trailing stop TOTAL, solo al scale-out.
 
 **Deliberadamente el trailing stop TOTAL (`disparo_trailing`, la red de seguridad final) NO usa
 este veto** — sigue disparando solo por precio, sin esperar confirmación de un indicador lento
