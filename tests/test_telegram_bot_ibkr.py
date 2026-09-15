@@ -53,6 +53,14 @@ def _borrar_si_existe(nombre_archivo):
 _vivo_simulado = {"valor": False}
 tib._proceso_vivo = lambda pid: _vivo_simulado["valor"]
 
+# Las secciones 1-3b prueban el camino de WINDOWS (run.bot.bat + PID +
+# flag de parada); se fuerza EN_LINUX=False aunque esta maquina de pruebas
+# sea Linux, para poder probar ambos caminos sin depender del sistema
+# operativo real (ver la seccion "Linux/systemd" mas abajo para el otro
+# camino). Se restaura el valor real al final de esa sub-seccion.
+en_linux_original = tib.EN_LINUX
+tib.EN_LINUX = False
+
 # --- 1. /estado ---
 _borrar_si_existe(tib.bot.ARCHIVO_PID)
 _borrar_si_existe(tib.bot.ARCHIVO_LATIDO)
@@ -206,6 +214,77 @@ tib.subprocess.run = run_original_ibkr
 _borrar_si_existe(tib.bot.ARCHIVO_PID)
 _borrar_si_existe(tib.bot.ARCHIVO_DETENER)
 _vivo_simulado["valor"] = False
+tib.EN_LINUX = en_linux_original
+
+
+# --- 3b-bis. Camino LINUX/systemd (sept. 2026, petición del usuario: mover
+#     bot_completo.py + telegram_bot_ibkr.py a un servidor en la nube, igual
+#     que Alpaca): /estado, /arrancar, /parar y /actualizar deben usar
+#     systemctl, atomico, igual que telegram_bot.py/Alpaca -sin la espera de
+#     30-60s ni el flag de parada cooperativo, que solo hacen falta en
+#     Windows sin systemd-. ---
+tib.EN_LINUX = True
+llamadas_systemctl = []
+
+
+def _run_falso_systemctl_ok(cmd, **kwargs):
+    llamadas_systemctl.append(cmd)
+    if cmd[:2] == ["systemctl", "is-active"]:
+        return types.SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+    if cmd[:3] == ["sudo", "systemctl", "start"] or cmd[:3] == ["sudo", "systemctl", "stop"] \
+            or cmd[:3] == ["sudo", "systemctl", "restart"]:
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="comando no reconocido")
+
+
+tib.subprocess.run = _run_falso_systemctl_ok
+llamadas_systemctl.clear()
+resultado_estado_linux = tib.consultar_estado()
+check("Linux: /estado consulta 'systemctl is-active bot-ibkr'",
+      ["systemctl", "is-active", "bot-ibkr"] in llamadas_systemctl and "🟢" in resultado_estado_linux,
+      f"resultado={resultado_estado_linux!r}, llamadas={llamadas_systemctl}")
+
+llamadas_systemctl.clear()
+resultado_arrancar_linux = tib.arrancar_bot()
+check("Linux: /arrancar hace 'sudo systemctl start bot-ibkr'",
+      ["sudo", "systemctl", "start", "bot-ibkr"] in llamadas_systemctl and resultado_arrancar_linux.startswith("🟢"),
+      f"resultado={resultado_arrancar_linux!r}, llamadas={llamadas_systemctl}")
+
+llamadas_systemctl.clear()
+resultado_parar_linux = tib.parar_bot()
+check("Linux: /parar hace 'sudo systemctl stop bot-ibkr'",
+      ["sudo", "systemctl", "stop", "bot-ibkr"] in llamadas_systemctl and resultado_parar_linux.startswith("🔴"),
+      f"resultado={resultado_parar_linux!r}, llamadas={llamadas_systemctl}")
+
+# /actualizar en Linux: git pull + reinicio ATOMICO de bot-ibkr (sin la
+# espera de Windows) + reinicio diferido del propio telegram-bot-ibkr.
+llamadas_popen_linux = []
+tib.subprocess.Popen = lambda *a, **k: llamadas_popen_linux.append((a, k))
+
+
+def _run_falso_systemctl_con_git(cmd, **kwargs):
+    llamadas_systemctl.append(cmd)
+    if cmd[:2] == ["git", "pull"]:
+        return types.SimpleNamespace(returncode=0, stdout="Updating abc123..def456\n 2 files changed\n", stderr="")
+    return _run_falso_systemctl_ok(cmd, **kwargs)
+
+
+tib.subprocess.run = _run_falso_systemctl_con_git
+llamadas_systemctl.clear()
+llamadas_popen_linux.clear()
+resultado_actualizar_linux = tib.actualizar_bot()
+check("Linux: /actualizar reinicia bot-ibkr de forma ATOMICA ('restart', no 'stop' + esperar)",
+      ["sudo", "systemctl", "restart", "bot-ibkr"] in llamadas_systemctl,
+      f"resultado={resultado_actualizar_linux!r}, llamadas={llamadas_systemctl}")
+check("Linux: /actualizar programa el reinicio diferido de telegram-bot-ibkr (como Alpaca)",
+      len(llamadas_popen_linux) == 1 and "restart telegram-bot-ibkr" in llamadas_popen_linux[0][0][0][-1],
+      f"llamadas_popen={llamadas_popen_linux}")
+check("Linux: /actualizar NO usa el flag de parada cooperativo (eso es solo para Windows)",
+      not os.path.exists(os.path.join(tib.RUTA_BASE, tib.bot.ARCHIVO_DETENER)))
+
+tib.subprocess.run = run_original_ibkr
+tib.subprocess.Popen = lambda *a, **k: llamadas_popen.append((a, k))
+tib.EN_LINUX = en_linux_original
 
 
 # --- 3c. /version (peticion del usuario, sept. 2026, mismo comando ya en

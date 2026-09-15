@@ -346,7 +346,7 @@ def main():
     desde, hasta = calcular_rango(args)
 
     ib = bot.IB()
-    ib.connect('127.0.0.1', 4002, clientId=CLIENT_ID_CARTERA)
+    ib.connect(bot.IBKR_HOST, 4002, clientId=CLIENT_ID_CARTERA)
     try:
         print(f"Cartera IBKR - operaciones cerradas: {desde} a {hasta}\n")
         print(formatear_posiciones_abiertas(ib))

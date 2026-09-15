@@ -47,6 +47,7 @@ Revisa bien la configuracion antes de dejarlo corriendo desatendido.
 import json
 import math
 import os
+import signal
 import threading
 import time
 from datetime import date, datetime, time as dt_time, timedelta, timezone
@@ -565,9 +566,36 @@ INTERVALO_MIN_ESCRITURA_LATIDO_SEGUNDOS = 10  # no reescribir el archivo en CADA
 # todo (ver run.bot.bat).
 ARCHIVO_DETENER = "detener_bot.flag"
 
+# Host de IB Gateway/TWS (sept. 2026, petición del usuario: migrar
+# bot_completo.py + telegram_bot_ibkr.py a un servidor en la nube, mientras
+# IB Gateway sigue de momento en el PC). Antes iba fijo a '127.0.0.1'
+# -asumiendo que este script corre en la MISMA maquina que IB Gateway-;
+# ahora se puede apuntar a la IP del PC (o la del servidor que aloje IB
+# Gateway en el futuro) sin tocar el codigo. Ver NOTES.md para la
+# configuracion necesaria en IB Gateway (IP de confianza, API habilitada)
+# para aceptar conexiones que no sean localhost.
+IBKR_HOST = os.environ.get("IBKR_HOST", "127.0.0.1")
+
 
 def peticion_de_parada_pendiente():
     return os.path.exists(ARCHIVO_DETENER)
+
+
+def _manejar_sigterm(signum, frame):
+    """Parada limpia al recibir SIGTERM (p.ej. 'systemctl stop' en un
+    despliegue en la nube con systemd, sept. 2026): en vez de dejar que
+    Python termine el proceso de golpe -pudiendo interrumpir una orden a
+    medio colocar-, se limita a crear el mismo archivo de señal que ya usa
+    /parar de telegram_bot_ibkr.py (ARCHIVO_DETENER); el bucle principal lo
+    ve en su siguiente vuelta (maximo 30s) y sale limpio por su cuenta. En
+    Windows (run.bot.bat, sin systemd) esta señal nunca llega, asi que este
+    handler no cambia nada del comportamiento existente ahi."""
+    log(f"Señal SIGTERM recibida: pidiendo parada limpia (igual que /parar).")
+    try:
+        with open(ARCHIVO_DETENER, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except OSError as e:
+        log(f"No se pudo crear el archivo de parada al recibir SIGTERM: {type(e).__name__}: {e}")
 
 
 def actualizar_latido():
@@ -3230,6 +3258,7 @@ def on_error_ib(reqId, errorCode, errorString, contract=None):
 
 def main():
     evitar_suspension_windows()
+    signal.signal(signal.SIGTERM, _manejar_sigterm)
     escribir_pid()
     actualizar_latido()
     cargar_estado_venta()
@@ -3248,7 +3277,7 @@ def main():
             pass
 
     ib = IB()
-    ib.connect('127.0.0.1', 4002, clientId=1)
+    ib.connect(IBKR_HOST, 4002, clientId=1)
     ib.RequestTimeout = 30  # segundos: evita que cualquier peticion se quede colgada sin limite
     ib.errorEvent += on_error_ib
     modo_texto = avisar_modo_cuenta(ib)
@@ -3277,7 +3306,7 @@ def main():
                     except Exception:
                         pass
                     try:
-                        ib.connect('127.0.0.1', 4002, clientId=1)
+                        ib.connect(IBKR_HOST, 4002, clientId=1)
                         ib.RequestTimeout = 30
                         # No hace falta volver a registrar on_error_ib: es el mismo
                         # objeto `ib`, y el listener de errorEvent sobrevive a

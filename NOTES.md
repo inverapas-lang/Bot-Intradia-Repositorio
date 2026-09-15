@@ -1198,6 +1198,105 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
 - Si una orden se cancela de verdad (no el aviso benigno), **no se reintenta automáticamente**
   — se deja que el siguiente ciclo (4 min después) reevalúe la señal desde cero.
 
+## Migrar el bot de IBKR a un servidor en la nube (sept. 2026, petición del usuario)
+
+Petición del usuario: dejar de depender de que el PC esté encendido para tener corriendo
+`bot_completo.py`, `telegram_bot_ibkr.py`, IB Gateway y el vigilante externo. Se decide empezar
+por mover **`bot_completo.py` + `telegram_bot_ibkr.py`** al mismo servidor EC2 que ya usa
+Alpaca (como servicios nuevos, separados de los de Alpaca) — IB Gateway se queda de momento en
+el PC, será el siguiente paso.
+
+### Cambios en el código (ya hechos)
+
+1. **`IBKR_HOST`** (nueva variable de entorno en `bot_completo.py`, por defecto `127.0.0.1`):
+   antes la conexión a IB Gateway estaba fija a `127.0.0.1` en 4 sitios (`bot_completo.py` x2,
+   `cartera_ibkr.py`, `telegram_bot_ibkr.py`), asumiendo que todo corría en la misma máquina que
+   IB Gateway. Ahora se puede apuntar a la IP del PC (o la de un futuro servidor que aloje IB
+   Gateway) sin tocar código — solo hay que poner `IBKR_HOST=<ip-del-pc>` en el `.env` del
+   servidor en la nube. `cartera_ibkr.py` y `telegram_bot_ibkr.py` leen `bot.IBKR_HOST`, no
+   tienen su propia variable.
+2. **Parada limpia compatible con `systemd`**: `bot_completo.py` registra un manejador de
+   `SIGTERM` (`_manejar_sigterm()`) que simplemente crea el mismo archivo de señal que ya usa
+   `/parar` (`ARCHIVO_DETENER`) — así, `systemctl stop bot-ibkr` dispara la misma parada
+   cooperativa de siempre (el bucle principal la ve en su siguiente vuelta, máx. 30s, sin
+   interrumpir una orden a medio colocar) en vez de que systemd mate el proceso de golpe tras su
+   timeout. En Windows esta señal nunca llega, así que no cambia nada ahí.
+3. **`telegram_bot_ibkr.py` funciona en los DOS entornos** (`EN_LINUX = platform.system() !=
+   "Windows"`, detectado automáticamente):
+   - **Windows** (como hasta ahora): `run.bot.bat` + archivo de PID + archivo de señal de
+     parada, sin systemd. `/actualizar` sigue en DOS PASOS (parar y esperar confirmación manual
+     con `/estado` + `/arrancar`) porque ahí parar no es atómico.
+   - **Linux** (nuevo): usa `systemctl` para `bot-ibkr`, igual que `telegram_bot.py`/Alpaca —
+     `/estado`, `/arrancar`, `/parar` son directos y atómicos, y `/actualizar` reinicia
+     `bot-ibkr` con `systemctl restart` (sin la espera de 30-60s de Windows) y programa además
+     el reinicio diferido de su propio servicio (`telegram-bot-ibkr`), igual que
+     `_reiniciar_telegram_bot_diferido()` en Alpaca.
+
+### Desplegar en el servidor (pendiente de hacer)
+
+1. Clonar el repo en el EC2 (o reutilizar el checkout de Alpaca si están en la misma máquina,
+   pero en una carpeta separada — no mezclar los `.env`, el historial ni los archivos de estado
+   de los dos bots).
+2. Variables de entorno nuevas en el `.env` de IBKR: `IBKR_HOST=<ip-o-hostname-del-pc>`,
+   además de `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` (puede ser el mismo bot de Telegram que
+   Alpaca, o uno nuevo).
+3. Sudoers, igual que Alpaca pero con los nombres de servicio de IBKR:
+   ```bash
+   sudo visudo -f /etc/sudoers.d/telegram-bot-ibkr
+   ```
+   ```
+   ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl start bot-ibkr, /usr/bin/systemctl stop bot-ibkr, /usr/bin/systemctl restart bot-ibkr, /usr/bin/systemctl restart telegram-bot-ibkr
+   ```
+4. Servicio systemd de `bot_completo.py` (`/etc/systemd/system/bot-ibkr.service`):
+   ```ini
+   [Unit]
+   Description=Bot de trading IBKR
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/IBKR
+   EnvironmentFile=/home/ubuntu/IBKR/.env
+   ExecStart=/home/ubuntu/IBKR/venv/bin/python /home/ubuntu/IBKR/bot_completo.py
+   Restart=always
+   RestartSec=10
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+5. Servicio systemd de `telegram_bot_ibkr.py` (`/etc/systemd/system/telegram-bot-ibkr.service`):
+   igual que el de arriba, pero `ExecStart=.../python /home/ubuntu/IBKR/telegram_bot_ibkr.py`.
+6. `sudo systemctl daemon-reload && sudo systemctl enable bot-ibkr telegram-bot-ibkr && sudo systemctl start bot-ibkr telegram-bot-ibkr`.
+
+### Configurar IB Gateway/TWS para aceptar conexiones remotas (pendiente de hacer, en el PC)
+
+Por defecto IB Gateway/TWS solo acepta conexiones desde `127.0.0.1` (la misma máquina). Para que
+`bot_completo.py` en la nube pueda conectarse desde fuera:
+
+1. En IB Gateway/TWS: **Configure → Settings → API → Settings**.
+2. Marcar **"Enable ActiveX and Socket Clients"** (ya debería estar marcado, es lo que usa el
+   bot ahora mismo en local).
+3. **Desmarcar** "Allow connections from localhost only" (si está marcada, es la que bloquea
+   todo lo que no sea `127.0.0.1`).
+4. En **"Trusted IPs"**, añadir la IP pública **fija** del servidor EC2 (si el EC2 no tiene IP
+   elástica/fija asignada, asignar una — una IP que cambie en cada reinicio del servidor rompería
+   esto silenciosamente). **No dejar el campo vacío ni poner un rango amplio** — la API de IBKR
+   no tiene autenticación propia más allá de esta lista de IPs, así que es el único control de
+   acceso real.
+5. En el router/firewall del PC: abrir (redirigir) el puerto de la API (4002 para el Gateway de
+   paper, 4001 para real — el bot usa 4002 ahora mismo) hacia el PC, **solo permitiendo la IP del
+   EC2** si el router lo permite (no abrirlo a todo internet).
+6. Reiniciar IB Gateway/TWS para que los cambios de "Trusted IPs" surtan efecto.
+7. Probar la conexión desde el EC2 antes de mover nada más: con `IBKR_HOST` puesto a la IP
+   pública del PC, ejecutar `python3 cartera_ibkr.py` en el EC2 y comprobar que devuelve las
+   posiciones reales sin error de conexión.
+
+**Riesgo a tener en cuenta**: expones el puerto de trading de IBKR a internet (aunque
+restringido a una IP). Si la IP pública del PC cambia (router doméstico sin IP fija) o la del EC2
+cambia, la conexión se corta con un error claro (no en silencio) — pero conviene revisarlo si
+algo deja de funcionar tras un corte de luz/reinicio del router.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

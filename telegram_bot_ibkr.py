@@ -2,12 +2,18 @@
 telegram_bot_ibkr.py - control y consulta del bot de IBKR (bot_completo.py)
 desde Telegram (movil).
 
-Proceso APARTE del propio bot de trading. Pensado para Windows (el PC donde
-corre IB Gateway/TWS y bot_completo.py), a diferencia de telegram_bot.py
-(Alpaca en AWS/Linux con systemd) -aqui no hay systemd, asi que arrancar y
-parar el bot se hace de otra forma, ver mas abajo-. Usa "long polling"
-contra la API HTTP de Telegram (metodo getUpdates): no hace falta libreria
-extra, solo `requests`.
+Proceso APARTE del propio bot de trading. Funciona en DOS entornos
+distintos, detectados automaticamente (ver EN_LINUX):
+  - Windows (el PC donde tradicionalmente corre IB Gateway/TWS y
+    bot_completo.py): sin systemd, arrancar/parar/actualizar usan
+    run.bot.bat + un archivo de PID + un archivo de señal de parada.
+  - Linux (sept. 2026, petición del usuario: migrar bot_completo.py +
+    telegram_bot_ibkr.py a un servidor en la nube, igual que Alpaca, mientras
+    IB Gateway sigue de momento en el PC -ver IBKR_HOST en bot_completo.py-):
+    con systemd, arrancar/parar/actualizar son iguales que en
+    telegram_bot.py/Alpaca (systemctl, atomico).
+Usa "long polling" contra la API HTTP de Telegram (metodo getUpdates): no
+hace falta libreria extra, solo `requests`.
 
 Comandos soportados (solo responde al chat autorizado, TELEGRAM_CHAT_ID):
     /estado      - si bot_completo.py esta corriendo (PID vivo) y si esta
@@ -57,6 +63,7 @@ dejarlo como una ventana de CMD mas, o como Tarea Programada de Windows
 para que arranque solo al iniciar sesion (ver NOTES.md).
 """
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -82,6 +89,19 @@ API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TIMEOUT_LARGO_POLLING_SEGUNDOS = 30
 RUTA_BASE = os.path.dirname(os.path.abspath(__file__))
 RUTA_RUN_BOT_BAT = os.path.join(RUTA_BASE, "run.bot.bat")
+
+# En Linux (sept. 2026, petición del usuario: mover bot_completo.py +
+# telegram_bot_ibkr.py a un servidor en la nube, igual que ya se hizo con
+# Alpaca) SI hay systemd, así que arrancar/parar/reiniciar es atómico -a
+# diferencia de Windows, donde el proceso viejo tarda hasta 30-60s en morir
+# de verdad tras la señal de parada, y lanzar uno nuevo antes de eso podría
+# dejar DOS instancias corriendo con dinero real-. EN_LINUX decide qué
+# mecanismo usar en cada función; el resto del código (PID, latido, flag de
+# parada) sigue funcionando igual en los dos sistemas operativos, solo
+# cambia CÓMO se arranca/para/reinicia el proceso.
+EN_LINUX = platform.system() != "Windows"
+NOMBRE_SERVICIO_BOT = "bot-ibkr"
+NOMBRE_SERVICIO_TELEGRAM = "telegram-bot-ibkr"
 
 
 def log(mensaje):
@@ -132,7 +152,39 @@ def _segundos_desde_ultimo_latido():
     return time.time() - os.path.getmtime(ruta)
 
 
+def _ejecutar_systemctl(accion, servicio):
+    """Igual que ejecutar_systemctl() de telegram_bot.py/Alpaca: requiere
+    que el sudoers del usuario permita este comando exacto sin contraseña
+    (ver NOTES.md)."""
+    try:
+        resultado = subprocess.run(
+            ["sudo", "systemctl", accion, servicio],
+            capture_output=True, text=True, timeout=20
+        )
+        if resultado.returncode != 0:
+            return f"⚠️ No se pudo {accion} {servicio}: {resultado.stderr.strip() or resultado.stdout.strip()}"
+        return None
+    except Exception as e:
+        return f"⚠️ Error al intentar {accion} {servicio}: {type(e).__name__}: {e}"
+
+
+def _consultar_estado_servicio(servicio):
+    try:
+        resultado = subprocess.run(
+            ["systemctl", "is-active", servicio],
+            capture_output=True, text=True, timeout=10
+        )
+        return resultado.stdout.strip()
+    except Exception as e:
+        return f"desconocido ({type(e).__name__})"
+
+
 def consultar_estado():
+    if EN_LINUX:
+        estado = _consultar_estado_servicio(NOMBRE_SERVICIO_BOT)
+        emoji = "🟢" if estado == "active" else "🔴"
+        return f"{emoji} Estado del bot ({NOMBRE_SERVICIO_BOT}): {estado}"
+
     pid = _pid_registrado()
     if pid is None or not _proceso_vivo(pid):
         return "🔴 Bot parado (no hay ningun proceso con el PID registrado)."
@@ -148,6 +200,10 @@ def consultar_estado():
 
 
 def arrancar_bot():
+    if EN_LINUX:
+        error = _ejecutar_systemctl("start", NOMBRE_SERVICIO_BOT)
+        return error or f"🟢 Bot arrancado ({NOMBRE_SERVICIO_BOT})."
+
     pid = _pid_registrado()
     if pid is not None and _proceso_vivo(pid):
         return "⚠️ El bot ya esta corriendo (usa /estado para comprobarlo)."
@@ -173,6 +229,10 @@ def arrancar_bot():
 
 
 def parar_bot():
+    if EN_LINUX:
+        error = _ejecutar_systemctl("stop", NOMBRE_SERVICIO_BOT)
+        return error or f"🔴 Bot parado ({NOMBRE_SERVICIO_BOT})."
+
     pid = _pid_registrado()
     if pid is None or not _proceso_vivo(pid):
         return "⚠️ El bot ya esta parado."
@@ -187,21 +247,45 @@ def parar_bot():
         return f"⚠️ No se pudo solicitar la parada: {type(e).__name__}: {e}"
 
 
+def _reiniciar_telegram_bot_ibkr_diferido():
+    """Igual que _reiniciar_telegram_bot_diferido() de telegram_bot.py/Alpaca:
+    reinicia el propio servicio (telegram-bot-ibkr) con un pequeño retraso en
+    un proceso hijo desatendido, para dar tiempo a que este mensaje de
+    /actualizar termine de enviarse antes de que el proceso muera. Solo en
+    Linux -en Windows no hay systemd, este script sigue sin poder
+    reiniciarse a si mismo-."""
+    try:
+        subprocess.Popen(
+            ["bash", "-c", f"sleep 3 && sudo systemctl restart {NOMBRE_SERVICIO_TELEGRAM}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        return None
+    except Exception as e:
+        return f"⚠️ Error al programar el reinicio de {NOMBRE_SERVICIO_TELEGRAM}: {type(e).__name__}: {e}"
+
+
 def actualizar_bot():
     """/actualizar (peticion del usuario, sept. 2026: poder desplegar
-    cambios sin necesitar un cliente SSH, solo desde Telegram) - version en
-    DOS PASOS (opcion elegida explicitamente por el usuario en vez de la
-    bloqueante con espera activa). Aqui parar NO es atomico como 'systemctl
-    restart': es cooperativo y asincrono (run.bot.bat en Windows, sin
+    cambios sin necesitar un cliente SSH, solo desde Telegram).
+
+    En LINUX (desplegado con systemd, ver NOTES.md): igual que /actualizar
+    de telegram_bot.py/Alpaca -hace git pull y, si trajo cambios, reinicia
+    bot-ibkr de forma ATOMICA ('systemctl restart', sin la espera de 30-60s
+    de Windows) y programa el reinicio de este propio proceso
+    (telegram-bot-ibkr) con un pequeño retraso.
+
+    En WINDOWS: version en DOS PASOS (opcion elegida explicitamente por el
+    usuario en su momento, en vez de la bloqueante con espera activa). Aqui
+    parar NO es atomico: es cooperativo y asincrono (run.bot.bat, sin
     systemd) - el bot tarda hasta 30-60s en detenerse de verdad tras la
     señal. Lanzar run.bot.bat de nuevo ANTES de que el proceso viejo muera
     del todo dejaria DOS instancias corriendo a la vez con dinero real -el
-    riesgo mas serio a evitar-, asi que esta funcion NUNCA arranca nada
-    automaticamente tras pedir la parada: hace git pull y, si el bot estaba
-    corriendo, pide la parada (igual que /parar) y devuelve el mensaje
-    diciendo que hay que confirmar con /estado y mandar /arrancar a mano
-    cuando se vea parado. Si el bot ya estaba parado de antemano, arranca
-    directamente (no hay nada que esperar)."""
+    riesgo mas serio a evitar-, asi que en Windows esta funcion NUNCA
+    arranca nada automaticamente tras pedir la parada: hace git pull y, si
+    el bot estaba corriendo, pide la parada (igual que /parar) y devuelve
+    el mensaje diciendo que hay que confirmar con /estado y mandar
+    /arrancar a mano cuando se vea parado. Si el bot ya estaba parado de
+    antemano, arranca directamente (no hay nada que esperar)."""
     try:
         resultado_pull = subprocess.run(
             ["git", "pull"], cwd=RUTA_BASE, capture_output=True, text=True, timeout=30
@@ -215,6 +299,20 @@ def actualizar_bot():
 
     if "Already up to date" in salida_pull or "ya está actualizado" in salida_pull.lower():
         return f"✅ Ya estaba actualizado, no había cambios nuevos.\n<pre>{escapar_html(salida_pull)}</pre>"
+
+    if EN_LINUX:
+        error_reinicio = _ejecutar_systemctl("restart", NOMBRE_SERVICIO_BOT)
+        error_reinicio_telegram = _reiniciar_telegram_bot_ibkr_diferido()
+        if error_reinicio:
+            aviso = f"\n\n{error_reinicio_telegram}" if error_reinicio_telegram else ""
+            return (f"✅ Código actualizado, pero falló el reinicio de {NOMBRE_SERVICIO_BOT}:\n"
+                    f"<pre>{escapar_html(salida_pull)}</pre>\n\n{error_reinicio}{aviso}")
+        if error_reinicio_telegram:
+            return (f"✅ Código actualizado y {NOMBRE_SERVICIO_BOT} reiniciado:\n"
+                    f"<pre>{escapar_html(salida_pull)}</pre>\n\n{error_reinicio_telegram}")
+        return (f"✅ Código actualizado, {NOMBRE_SERVICIO_BOT} reiniciado ya:\n"
+                f"<pre>{escapar_html(salida_pull)}</pre>\n\n"
+                f"🔄 Este bot de Telegram se reiniciará solo en unos segundos para aplicar el cambio.")
 
     pid = _pid_registrado()
     bot_estaba_corriendo = pid is not None and _proceso_vivo(pid)
@@ -251,7 +349,7 @@ def consultar_version():
 
 def _conectar_cartera():
     ib = bot.IB()
-    ib.connect('127.0.0.1', 4002, clientId=cartera.CLIENT_ID_CARTERA, timeout=15)
+    ib.connect(bot.IBKR_HOST, 4002, clientId=cartera.CLIENT_ID_CARTERA, timeout=15)
     return ib
 
 
