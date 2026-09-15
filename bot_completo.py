@@ -295,6 +295,10 @@ CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto (peticion del usua
                                  # escapar movimientos cortos. Corre en su propia cadencia dentro
                                  # de main(), independiente del ciclo de US/HK/KR (ver ciclo_completo()
                                  # con el parametro `mercados`).
+INTERVALO_REVISION_HISTORIAL_SEGUNDOS = 1800  # 30 min: comprobacion periodica de que el
+                                 # historial local explica todas las acciones que IBKR dice
+                                 # tener (ver verificar_historial_completo(), mismo bug real que en
+                                 # bot_alpaca.py/Alpaca, sept. 2026)
 LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera (en USD equivalente) por valor
 
 # Bug/limite real de produccion (sept. 2026): IBKR rechaza cualquier compra de
@@ -1842,6 +1846,57 @@ def obtener_cantidad_posicion_real(ib, ticker, currency):
     return 0.0
 
 
+_CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
+
+
+def verificar_historial_completo(ib):
+    """Version IBKR de la comprobacion equivalente de bot_alpaca.py (bug
+    real, sept. 2026: una compra REAL de T se ejecuto de verdad en Alpaca
+    pero nunca quedo registrada en el historial local, probablemente porque
+    la confirmacion de la orden tardo mas que la ventana de espera). Compara
+    periodicamente, para cada posicion abierta en IBKR, la cantidad real
+    contra la cantidad neta (compras menos ventas) que explica
+    ARCHIVO_HISTORIAL_OPERACIONES, y avisa por Telegram si IBKR tiene mas
+    acciones de las que el historial explica -a diferencia de
+    bot_alpaca.py, aqui no hace falta distinguir REAL/PAPER: esa distincion
+    la da el puerto de conexion (ib.connect()), no un campo del historial-.
+    Solo avisa una vez por mercado+ticker mientras el hueco siga abierto."""
+    cantidades_historial = {}
+    for o in cargar_historial_operaciones():
+        clave = clave_historial(o["mercado"], o["ticker"])
+        cantidades_historial[clave] = cantidades_historial.get(clave, 0.0) + (
+            o["cantidad"] if o["lado"] == "COMPRA" else -o["cantidad"]
+        )
+    ib.reqPositions()
+    ib.sleep(1)
+    claves_con_posicion = set()
+    for pos in ib.positions():
+        if pos.position <= 0:
+            continue
+        mercado = mercado_de_posicion(pos)
+        ticker = pos.contract.symbol
+        clave = clave_historial(mercado, ticker)
+        claves_con_posicion.add(clave)
+        cantidad_real = pos.position
+        cantidad_historial = cantidades_historial.get(clave, 0.0)
+        if cantidad_real - cantidad_historial > 1e-6:
+            if clave not in _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO:
+                _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO.add(clave)
+                log(f"AVISO: {ticker} ({mercado}) tiene {cantidad_real} en IBKR pero el historial "
+                    f"solo explica {cantidad_historial}. Puede faltar registrar una compra.")
+                notificar_telegram(
+                    f"⚠️ <b>Historial incompleto: {ticker} ({mercado})</b>\n"
+                    f"IBKR tiene {formato_es(cantidad_real, 4)} pero el historial local solo "
+                    f"explica {formato_es(cantidad_historial, 4)}.\n"
+                    f"Puede que falte registrar una compra (revisar las ejecuciones de IBKR)."
+                )
+        else:
+            _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO.discard(clave)
+    for clave in list(_CLAVES_AVISADAS_HISTORIAL_INCOMPLETO):
+        if clave not in claves_con_posicion:
+            _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO.discard(clave)
+
+
 def verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad_antes, prefijo_log):
     """Cuando una orden no termina en estado 'Filled', el objeto Trade que
     seguimos puede no reflejar lo que realmente paso: se ha visto en
@@ -3354,6 +3409,7 @@ def main():
     # de mercados; 0.0 fuerza a que ambos corran en la primera vuelta.
     proxima_revision_cripto = 0.0
     proxima_revision_otros = 0.0
+    proxima_revision_historial = 0.0
 
     try:
         while True:
@@ -3468,6 +3524,13 @@ def main():
                         f"intervalo configurado ({INTERVALO_SEGUNDOS}s). Considera subir "
                         f"INTERVALO_SEGUNDOS o reducir el numero de valores/temporalidades.")
                 proxima_revision_otros = inicio_otros + INTERVALO_SEGUNDOS
+
+            if ahora_mono >= proxima_revision_historial:
+                try:
+                    verificar_historial_completo(ib)
+                except Exception as e:
+                    log(f"ERROR inesperado en verificar_historial_completo: {type(e).__name__}: {e}")
+                proxima_revision_historial = ahora_mono + INTERVALO_REVISION_HISTORIAL_SEGUNDOS
 
             # Espera solo hasta que toque la PROXIMA revision (la que antes,
             # de las dos), y solo se tiene en cuenta la de un grupo si su

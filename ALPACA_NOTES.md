@@ -1185,9 +1185,9 @@ en vez de descubrirlo días después mirando la tabla a mano. El aviso no se rep
 mientras el hueco siga abierto para el mismo ticker (se resetea si la posición se cierra o el
 historial se pone al día).
 
-Pendiente de decidir con el usuario si conviene la misma comprobación en `bot_completo.py`
-(IBKR) — ese bot usa un mecanismo distinto (`registrar_apertura_de_posicion`) para el "abierta
-desde", y no hay evidencia todavía de que sufra el mismo problema.
+**Actualización**: a petición del usuario, se replicó la misma comprobación en
+`bot_completo.py`/IBKR (`verificar_historial_completo(ib)`) — ver la sección "Comprobación
+periódica de historial incompleto" en `NOTES.md` para el detalle de ambos bots.
 
 ## Pendiente / próximos pasos
 

@@ -1220,6 +1220,32 @@ Total: 11,59 USD
 Beneficio: +1,07% (abierta desde 08 SEP, 6d 23h)
 ```
 
+## Comprobación periódica de historial incompleto (sept. 2026, bug real: compra de T no registrada)
+
+**Caso real**: una compra REAL de T se ejecutó de verdad en Alpaca (confirmado con el extracto
+de "Activity" de la propia Alpaca) pero nunca quedó registrada en
+`historial_operaciones_alpaca.json` — probablemente porque la orden tardó en confirmarse como
+"filled" más de lo que espera el bot antes de rendirse. El beneficio mostrado en las ventas
+seguía siendo correcto (se calcula con el precio medio en tiempo real de la propia Alpaca, no
+con el historial), pero el hueco en el historial solo se descubrió días después, mirando la
+tabla a mano.
+
+En vez de perseguir esa condición de carrera exacta (difícil de reproducir), se añadió una
+comprobación periódica en **ambos bots**:
+
+- `bot_alpaca.py`: `verificar_historial_completo()`, cada `INTERVALO_REVISION_HISTORIAL_SEGUNDOS`
+  (30 min). Compara, para cada posición abierta en Alpaca, la cantidad real contra la cantidad
+  neta (compras menos ventas, mismo modo REAL/PAPER) que explica el historial local.
+- `bot_completo.py`/IBKR: `verificar_historial_completo(ib)`, mismo intervalo. Compara cada
+  posición abierta en IBKR (agrupando por `clave_historial(mercado, ticker)`, vía
+  `mercado_de_posicion()`) contra `historial_operaciones_ibkr.json`. Aquí no hace falta filtrar
+  por modo REAL/PAPER: esa distinción la da el puerto de `ib.connect()` (paper trading usa un
+  puerto distinto), no un campo del historial.
+
+Si la cantidad real es mayor que la que explica el historial, se avisa por Telegram
+(`⚠️ Historial incompleto: TICKER`), una sola vez por ticker (o ticker+mercado en IBKR) mientras
+el hueco siga abierto — se resetea solo si la posición se cierra o el historial se pone al día.
+
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 
 - **`Error 10349` ("Order TIF was set to DAY based on order preset")**: aviso rutinario y
