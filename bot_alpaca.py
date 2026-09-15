@@ -1051,10 +1051,9 @@ def _registrar_venta_a_posteriori(ticker, cantidad_antes, cantidad_ahora, precio
         beneficio_pct_real = beneficio_pct_bruto
     registrar_operacion_historial(ticker, "VENTA", cantidad_ejecutada, precio_actual,
                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
-    notificar_telegram(f"🔴 {etiqueta_accion} <b>{ticker}</b>: {formato_es(cantidad_ejecutada, 6)} a "
-                        f"{formato_es(precio_actual)} USD (total {formato_es(cantidad_ejecutada * precio_actual)} USD, "
-                        f"beneficio {formato_es(beneficio_pct_real, signo=True)}%) "
-                        f"[confirmado a posteriori: el estado de la orden no fue fiable]")
+    notificar_telegram(formatear_notificacion_venta(
+        etiqueta_accion, ticker, cantidad_ejecutada, precio_actual, beneficio_pct_real,
+        decimales_cantidad=6, sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
     if cantidad_ahora <= 1e-6:
         cerrar_seguimiento_venta(ticker)
 
@@ -1138,6 +1137,93 @@ def registrar_operacion_historial(ticker, lado, cantidad, precio, coste_medio=No
             json.dump(operaciones, f, indent=2, sort_keys=True)
     except OSError as e:
         log(f"No se pudo guardar el historial de operaciones ({ARCHIVO_HISTORIAL_OPERACIONES}): {type(e).__name__}: {e}")
+
+
+_MESES_ES = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
+
+
+def formatear_fecha_corta(fecha_hora_iso):
+    """'2026-09-03T15:09:12' -> '03 SEP'. Igual que _formatear_fecha_corta()
+    de cartera_alpaca.py (mismo formato de fecha en toda la app)."""
+    fecha = datetime.fromisoformat(fecha_hora_iso)
+    return f"{fecha.day:02d} {_MESES_ES[fecha.month - 1]}"
+
+
+def formatear_duracion(delta):
+    """Igual que _formatear_duracion() de cartera_alpaca.py."""
+    segundos = int(delta.total_seconds())
+    if segundos < 60:
+        return f"{segundos}s"
+    minutos = segundos // 60
+    if minutos < 60:
+        return f"{minutos}min"
+    horas, minutos_resto = divmod(minutos, 60)
+    if horas < 24:
+        return f"{horas}h {minutos_resto:02d}min" if minutos_resto else f"{horas}h"
+    dias, horas_resto = divmod(horas, 24)
+    return f"{dias}d {horas_resto}h" if horas_resto else f"{dias}d"
+
+
+def _texto_apertura_desde(ticker, hasta_fecha_hora):
+    """Busca en el historial (mismo ticker, mismo modo REAL/PAPER que
+    ahora mismo) la COMPRA que abrio la racha actual -recorriendo
+    cronologicamente, acumulando con cada COMPRA y descontando con cada
+    VENTA, olvidando la apertura cada vez que la cantidad cae a ~0- y
+    devuelve un fragmento " (abierta desde DD MES, Xh Ymin)" para las
+    notificaciones de venta (peticion del usuario, sept. 2026: saber
+    cuanto ha durado una posicion sin tener que consultarlo aparte).
+    Cadena vacia si no hay ninguna compra previa registrada (dato
+    incompleto)."""
+    modo_actual = "PAPER" if ALPACA_PAPER else "REAL"
+    cantidad_actual = 0.0
+    fecha_apertura = None
+    for o in cargar_historial_operaciones():
+        if o["ticker"] != ticker or o.get("modo", "PAPER") != modo_actual:
+            continue
+        if o["fecha_hora"] > hasta_fecha_hora:
+            continue
+        if o["lado"] == "COMPRA":
+            if cantidad_actual <= 1e-9:
+                fecha_apertura = o["fecha_hora"]
+            cantidad_actual += o["cantidad"]
+        else:
+            cantidad_actual = max(0.0, cantidad_actual - o["cantidad"])
+    if fecha_apertura is None:
+        return ""
+    duracion = formatear_duracion(datetime.fromisoformat(hasta_fecha_hora) - datetime.fromisoformat(fecha_apertura))
+    return f" (abierta desde {formatear_fecha_corta(fecha_apertura)}, {duracion})"
+
+
+def formatear_notificacion_compra(ticker, cantidad, precio, decimales_cantidad=4, unidad="acciones"):
+    """Mensaje de Telegram para una compra ejecutada, en varias lineas en
+    vez de un solo parrafo denso -peticion del usuario, sept. 2026, para
+    que sea mas facil de leer de un vistazo en el movil-."""
+    total = cantidad * precio
+    return (f"🟢 COMPRA <b>{ticker}</b>\n"
+            f"Cantidad: {formato_es(cantidad, decimales_cantidad)} {unidad}\n"
+            f"Precio: {formato_es(precio)} USD\n"
+            f"Total: {formato_es(total)} USD")
+
+
+def formatear_notificacion_venta(etiqueta_accion, ticker, cantidad, precio, beneficio_pct,
+                                  decimales_cantidad=4, unidad="acciones", sufijo=""):
+    """Mensaje de Telegram para una venta ejecutada, en varias lineas
+    (peticion del usuario, sept. 2026) e incluyendo desde cuando estaba
+    abierta la posicion (misma peticion: "cuando pongas el mensaje de que
+    se ha vendido, dime desde cuando lleva la posicion abierta"). Llamar
+    DESPUES de registrar_operacion_historial() de esta misma venta -no
+    afecta al calculo, la apertura que se busca es siempre una COMPRA
+    anterior-."""
+    total = cantidad * precio
+    apertura = _texto_apertura_desde(ticker, datetime.now().isoformat(timespec="seconds"))
+    lineas = [f"🔴 {etiqueta_accion} <b>{ticker}</b>",
+              f"Cantidad: {formato_es(cantidad, decimales_cantidad)} {unidad}",
+              f"Precio: {formato_es(precio)} USD",
+              f"Total: {formato_es(total)} USD",
+              f"Beneficio: {formato_es(beneficio_pct, signo=True)}%{apertura}"]
+    if sufijo:
+        lineas.append(sufijo)
+    return "\n".join(lineas)
 
 
 def obtener_ejecucion_real(order_id, cantidad_prevista, precio_previsto):
@@ -1306,9 +1392,8 @@ def revisar_ventas():
                     beneficio_pct_real = (precio_real - coste_medio) / coste_medio * 100
                     registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
-                    notificar_telegram(f"🔴 VENTA FORZADA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
-                                        f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
-                                        f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
+                    notificar_telegram(formatear_notificacion_venta(
+                        "VENTA FORZADA", ticker, cantidad_real, precio_real, beneficio_pct_real))
                     cerrar_seguimiento_venta(ticker)
                 else:
                     cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
@@ -1406,9 +1491,8 @@ def revisar_ventas():
                 beneficio_pct_real = (precio_real - coste_medio) / coste_medio * 100
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
-                notificar_telegram(f"🔴 {etiqueta_accion} <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
-                                    f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
-                                    f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
+                notificar_telegram(formatear_notificacion_venta(
+                    etiqueta_accion, ticker, cantidad_real, precio_real, beneficio_pct_real))
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(ticker)
             else:
@@ -1579,9 +1663,9 @@ def revisar_ventas_cripto():
                 beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
-                notificar_telegram(f"🔴 {etiqueta_accion} <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "
-                                    f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD, "
-                                    f"beneficio {formato_es(beneficio_pct_real, signo=True)}%)")
+                notificar_telegram(formatear_notificacion_venta(
+                    etiqueta_accion, ticker, cantidad_real, precio_real, beneficio_pct_real,
+                    decimales_cantidad=6, unidad="unidades"))
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(ticker)
             else:
@@ -1732,8 +1816,7 @@ def revisar_compras():
             if compra_confirmada:
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
-                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 4)} acciones a "
-                                    f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD)")
+                notificar_telegram(formatear_notificacion_compra(ticker, cantidad_real, precio_real))
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {type(e).__name__}: {e}. Se omite.")
             errores += 1
@@ -1848,8 +1931,8 @@ def revisar_compras_cripto():
             if compra_confirmada:
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
-                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b>: {formato_es(cantidad_real, 6)} a "
-                                    f"{formato_es(precio_real)} USD (total {formato_es(cantidad_real * precio_real)} USD)")
+                notificar_telegram(formatear_notificacion_compra(ticker, cantidad_real, precio_real,
+                                                                   decimales_cantidad=6, unidad="unidades"))
                 # Para que la SIGUIENTE cripto de este mismo ciclo vea el
                 # limite total ya actualizado (sin esto, dos señales en el
                 # mismo ciclo podrian sumar mas del limite entre las dos).

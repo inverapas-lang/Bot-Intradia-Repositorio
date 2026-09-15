@@ -1886,8 +1886,7 @@ check("beneficio recalculado con precio real (IBKR): coloca la orden basandose e
       f"ordenes={ib_slippage.ordenes_colocadas}")
 check("beneficio recalculado con precio real (IBKR): el mensaje de Telegram muestra un beneficio "
       "NEGATIVO (precio de ejecucion 99 vs coste 100), no el positivo de referencia",
-      len(telegram_capturados_slippage) == 1 and "-" in telegram_capturados_slippage[0]
-      and "%)" in telegram_capturados_slippage[0],
+      len(telegram_capturados_slippage) == 1 and "Beneficio: -" in telegram_capturados_slippage[0],
       f"mensajes={telegram_capturados_slippage}")
 operaciones_ibkr_slippage = bot.cargar_historial_operaciones()
 ventas_trail_ibkr = [o for o in operaciones_ibkr_slippage if o["ticker"] == "TRAIL" and o["lado"] == "VENTA"]
@@ -2819,6 +2818,44 @@ try:
 finally:
     bot._fraccion_transcurrida_del_dia = fraccion_dia_original
     bot._fraccion_transcurrida_de_la_semana = fraccion_semana_original
+
+
+# ---------------------------------------------------------------------------
+# formatear_notificacion_compra/venta (peticion del usuario, sept. 2026:
+# "ordena un poco mas la info", y en las ventas "dime desde cuando lleva la
+# posicion abierta"). Mismo cambio que en bot_alpaca.py, reutilizando aqui
+# el registro de apertura que ya usaba generar_resumen_cierre_mercado()
+# (obtener_apertura_registrada/registrar_apertura_de_posicion).
+# ---------------------------------------------------------------------------
+historial_compras_original = bot.ARCHIVO_HISTORIAL_COMPRAS
+dir_temp_notif_ibkr = tempfile.mkdtemp()
+bot.ARCHIVO_HISTORIAL_COMPRAS = os.path.join(dir_temp_notif_ibkr, "historial_compras_notif.json")
+
+mensaje_compra_ibkr = bot.formatear_notificacion_compra("AAPL", "US", 2, 150.25, "USD")
+check("formatear_notificacion_compra (IBKR): varias lineas (Cantidad/Precio/Total)",
+      "Cantidad:" in mensaje_compra_ibkr and "Precio:" in mensaje_compra_ibkr
+      and "Total:" in mensaje_compra_ibkr and "\n" in mensaje_compra_ibkr,
+      f"mensaje={mensaje_compra_ibkr!r}")
+
+mensaje_venta_sin_registro = bot.formatear_notificacion_venta(
+    "VENTA PARCIAL", "AAPL", "US", 1, 152.0, "USD", 1.15)
+check("formatear_notificacion_venta (IBKR): sin apertura registrada, no revienta y no dice "
+      "'abierta desde'", "abierta desde" not in mensaje_venta_sin_registro,
+      f"mensaje={mensaje_venta_sin_registro!r}")
+
+bot.registrar_apertura_de_posicion("US", "AAPL")
+mensaje_venta_con_registro = bot.formatear_notificacion_venta(
+    "VENTA PARCIAL", "AAPL", "US", 1, 152.0, "USD", 1.15)
+check("formatear_notificacion_venta (IBKR): con apertura registrada, SI dice desde cuando "
+      "esta abierta la posicion",
+      "abierta desde" in mensaje_venta_con_registro and "Beneficio: +1,15%" in mensaje_venta_con_registro,
+      f"mensaje={mensaje_venta_con_registro!r}")
+
+check("formatear_notificacion_venta (IBKR): el sufijo opcional se añade en su propia linea",
+      "[confirmado a posteriori" in bot.formatear_notificacion_venta(
+          "VENTA", "AAPL", "US", 1, 152.0, "USD", 1.15, sufijo="[confirmado a posteriori: aviso]"))
+
+bot.ARCHIVO_HISTORIAL_COMPRAS = historial_compras_original
 
 
 # ---------------------------------------------------------------------------

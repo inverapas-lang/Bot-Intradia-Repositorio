@@ -1765,6 +1765,72 @@ def obtener_apertura_registrada(mercado, ticker):
         return None
 
 
+_MESES_ES = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
+
+
+def formatear_fecha_corta(fecha):
+    """datetime -> '03 SEP'. Igual que formatear_fecha_corta() de
+    bot_alpaca.py/cartera_alpaca.py (mismo formato de fecha en toda la app)."""
+    return f"{fecha.day:02d} {_MESES_ES[fecha.month - 1]}"
+
+
+def formatear_duracion(delta):
+    """Igual que formatear_duracion() de bot_alpaca.py."""
+    segundos = int(delta.total_seconds())
+    if segundos < 60:
+        return f"{segundos}s"
+    minutos = segundos // 60
+    if minutos < 60:
+        return f"{minutos}min"
+    horas, minutos_resto = divmod(minutos, 60)
+    if horas < 24:
+        return f"{horas}h {minutos_resto:02d}min" if minutos_resto else f"{horas}h"
+    dias, horas_resto = divmod(horas, 24)
+    return f"{dias}d {horas_resto}h" if horas_resto else f"{dias}d"
+
+
+def _texto_apertura_desde(mercado, ticker):
+    """Fragmento ' (abierta desde DD MES, Xh Ymin)' para las notificaciones
+    de venta (peticion del usuario, sept. 2026: saber cuanto ha durado una
+    posicion sin consultarlo aparte), usando el mismo registro de apertura
+    que ya usa generar_resumen_cierre_mercado() (obtener_apertura_registrada).
+    Cadena vacia si no hay ninguna apertura registrada (dato incompleto,
+    p.ej. una posicion abierta antes de que existiera este historial)."""
+    apertura = obtener_apertura_registrada(mercado, ticker)
+    if apertura is None:
+        return ""
+    duracion = formatear_duracion(datetime.now() - apertura)
+    return f" (abierta desde {formatear_fecha_corta(apertura)}, {duracion})"
+
+
+def formatear_notificacion_compra(ticker, mercado, cantidad, precio, currency, decimales_cantidad=4):
+    """Mensaje de Telegram para una compra ejecutada, en varias lineas en
+    vez de un solo parrafo denso -peticion del usuario, sept. 2026, mismo
+    cambio que en bot_alpaca.py-."""
+    total = cantidad * precio
+    return (f"🟢 COMPRA <b>{ticker}</b> ({mercado})\n"
+            f"Cantidad: {formato_es(cantidad, decimales_cantidad)}\n"
+            f"Precio: {formato_es(precio, 4)} {currency}\n"
+            f"Total: {formato_es(total, 4)} {currency}")
+
+
+def formatear_notificacion_venta(etiqueta_accion, ticker, mercado, cantidad, precio, currency,
+                                  beneficio_pct, decimales_cantidad=4, sufijo=""):
+    """Mensaje de Telegram para una venta ejecutada, en varias lineas e
+    incluyendo desde cuando estaba abierta la posicion -misma peticion del
+    usuario que formatear_notificacion_venta() de bot_alpaca.py-."""
+    total = cantidad * precio
+    apertura = _texto_apertura_desde(mercado, ticker)
+    lineas = [f"🔴 {etiqueta_accion} <b>{ticker}</b> ({mercado})",
+              f"Cantidad: {formato_es(cantidad, decimales_cantidad)}",
+              f"Precio: {formato_es(precio, 4)} {currency}",
+              f"Total: {formato_es(total, 4)} {currency}",
+              f"Beneficio: {formato_es(beneficio_pct, signo=True)}%{apertura}"]
+    if sufijo:
+        lineas.append(sufijo)
+    return "\n".join(lineas)
+
+
 def obtener_cantidad_posicion_real(ib, ticker, currency):
     """Consulta a IBKR (en vivo, sin cache) la cantidad actual de la
     posicion de un valor concreto. 0.0 si no se tiene ninguna."""
@@ -1819,10 +1885,10 @@ def _registrar_venta_a_posteriori(mercado, contrato, cantidad_antes, cantidad_ah
     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                    precio_actual, comision_total, contrato.currency,
                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
-    notificar_telegram(f"🔴 {etiqueta_accion} <b>{contrato.symbol}</b> ({mercado}): "
-                       f"{formato_es(cantidad_ejecutada, 6)} a {formato_es(precio_actual, 4)} "
-                       f"{contrato.currency} ({formato_es(beneficio_pct, signo=True)}%) "
-                       f"[confirmado a posteriori: el estado de la orden no fue fiable]")
+    notificar_telegram(formatear_notificacion_venta(
+        etiqueta_accion, contrato.symbol, mercado, cantidad_ejecutada, precio_actual, contrato.currency,
+        beneficio_pct, decimales_cantidad=6,
+        sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
     if cantidad_ahora <= 1e-6:
         cerrar_seguimiento_venta(clave_posicion)
 
@@ -2039,9 +2105,9 @@ def revisar_ventas(ib, mercados=None):
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                    precio_ejecucion, comision_total_real, contrato.currency,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
-                    notificar_telegram(f"🔴 {etiqueta_cripto} <b>{contrato.symbol}</b> ({mercado}): "
-                                       f"{formato_es(cantidad_ejecutada, 6)} a {formato_es(precio_ejecucion, 4)} "
-                                       f"{contrato.currency} ({formato_es(beneficio_pct_real, signo=True)}%)")
+                    notificar_telegram(formatear_notificacion_venta(
+                        etiqueta_cripto, contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
+                        contrato.currency, beneficio_pct_real, decimales_cantidad=6))
                     if accion_cripto == "VENTA_TOTAL":
                         cerrar_seguimiento_venta(clave_posicion_cripto)
                 else:
@@ -2105,9 +2171,9 @@ def revisar_ventas(ib, mercados=None):
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                    precio_ejecucion, comision_total_real, contrato.currency,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
-                    notificar_telegram(f"🔴 VENTA FORZADA <b>{contrato.symbol}</b> ({mercado}): "
-                                       f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
-                                       f"{contrato.currency} ({formato_es(beneficio_pct_real, signo=True)}%)")
+                    notificar_telegram(formatear_notificacion_venta(
+                        "VENTA FORZADA", contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
+                        contrato.currency, beneficio_pct_real))
                     cerrar_seguimiento_venta(clave_historial(mercado, contrato.symbol))
                 else:
                     cantidad_ahora_forzada = verificar_posicion_tras_orden_no_confirmada(
@@ -2229,9 +2295,9 @@ def revisar_ventas(ib, mercados=None):
                 registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                precio_ejecucion, comision_total_real, contrato.currency,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
-                notificar_telegram(f"🔴 {etiqueta_accion} <b>{contrato.symbol}</b> ({mercado}): "
-                                   f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} "
-                                   f"{contrato.currency} ({formato_es(beneficio_pct_real, signo=True)}%)")
+                notificar_telegram(formatear_notificacion_venta(
+                    etiqueta_accion, contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
+                    contrato.currency, beneficio_pct_real))
                 if accion == "VENTA_TOTAL":
                     cerrar_seguimiento_venta(clave_posicion)
             else:
@@ -2673,8 +2739,9 @@ def revisar_compras(ib, mercados=None):
                                                    precio_ejecucion, comision_ejecucion, currency)
                     if cantidad_antes_compra_cripto <= 1e-6:
                         registrar_apertura_de_posicion(activo["mercado"], ticker)
-                    notificar_telegram(f"🟢 COMPRA <b>{ticker}</b> ({activo['mercado']}): "
-                                       f"{formato_es(cantidad_ejecutada, 6)} a {formato_es(precio_ejecucion, 4)} {currency}")
+                    notificar_telegram(formatear_notificacion_compra(
+                        ticker, activo["mercado"], cantidad_ejecutada, precio_ejecucion, currency,
+                        decimales_cantidad=6))
                 continue
 
             fraccionable = FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False)
@@ -2804,8 +2871,8 @@ def revisar_compras(ib, mercados=None):
                     # que el resumen de cierre de mercado la muestre aunque
                     # reqExecutions() ya no la tenga en dias posteriores.
                     registrar_apertura_de_posicion(activo["mercado"], ticker)
-                notificar_telegram(f"🟢 COMPRA <b>{ticker}</b> ({activo['mercado']}): "
-                                   f"{formato_es(cantidad_ejecutada, 4)} a {formato_es(precio_ejecucion, 4)} {currency}")
+                notificar_telegram(formatear_notificacion_compra(
+                    ticker, activo["mercado"], cantidad_ejecutada, precio_ejecucion, currency))
         except Exception as e:
             # Un fallo al procesar UNA señal de compra (precio raro, error de
             # red al colocar la orden, etc.) no debe abortar el escaneo del

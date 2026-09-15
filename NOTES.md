@@ -1189,6 +1189,37 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
       número/mercado fijo ("en lote", "Iniciando nuevo ciclo de revision" sin punto) y se añade
       "hasta la siguiente revision", que no estaba en absoluto en la lista de Alpaca.
 
+## Notificaciones de compra/venta en varias líneas, con tiempo abierta (sept. 2026)
+
+Petición del usuario, a partir de una captura de las notificaciones reales de Telegram
+("ordena un poco más la info del log. Y además, cuando pongas el mensaje de que se ha vendido,
+dime desde cuándo lleva la posición abierta"):
+
+- Las notificaciones de compra/venta (`notificar_telegram(...)`, en los 6 puntos donde se
+  llamaba con un párrafo denso en una sola línea, en cada bot) pasan a varias líneas
+  (`formatear_notificacion_compra()`/`formatear_notificacion_venta()`, nuevas en `bot_alpaca.py`
+  y `bot_completo.py`): Ticker, Cantidad, Precio, Total y (en las ventas) Beneficio, cada uno en
+  su propia línea.
+- Las ventas incluyen además cuánto llevaba abierta la posición, en el mismo formato "abierta
+  desde DD MES, Xh Ymin" que ya se usa en `/cartera`.
+- En `bot_alpaca.py` esto reutiliza el mismo mecanismo que `cartera_alpaca.py` (recorrer el
+  historial, acumulando con cada COMPRA y descontando con cada VENTA, filtrando por el mismo
+  modo REAL/PAPER que ahora mismo — mismo bug que ya se corrigió ahí, evitado aquí desde el
+  principio).
+- En `bot_completo.py`/IBKR **no** hace falta reimplementar ese recorrido: ya existía
+  `registrar_apertura_de_posicion()`/`obtener_apertura_registrada()` (un registro aparte,
+  `historial_compras.json`, usado hasta ahora solo por `generar_resumen_cierre_mercado()`), así
+  que las notificaciones de venta simplemente lo reutilizan.
+
+Ejemplo (Alpaca):
+```
+🔴 VENTA PARCIAL <b>T</b>
+Cantidad: 0,4340 acciones
+Precio: 26,71 USD
+Total: 11,59 USD
+Beneficio: +1,07% (abierta desde 08 SEP, 6d 23h)
+```
+
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 
 - **`Error 10349` ("Order TIF was set to DAY based on order preset")**: aviso rutinario y

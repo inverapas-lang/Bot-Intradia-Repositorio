@@ -4,6 +4,7 @@ bot_alpaca.py: no requieren conexion real a Alpaca, solo importan el modulo
 y prueban calculos matematicos, de horarios y de decision con datos
 simulados (clientes falsos que imitan TradingClient/StockHistoricalDataClient).
 """
+import json
 import os
 import sys
 import tempfile
@@ -1547,6 +1548,56 @@ try:
 finally:
     bot._fraccion_transcurrida_del_dia = fraccion_dia_original_alpaca
     bot._fraccion_transcurrida_de_la_semana = fraccion_semana_original_alpaca
+
+
+# ---------------------------------------------------------------------------
+# formatear_notificacion_compra/venta (peticion del usuario, sept. 2026:
+# "ordena un poco mas la info", y en las ventas "dime desde cuando lleva la
+# posicion abierta"). Mensajes en varias lineas en vez de un parrafo denso,
+# y las ventas incluyen cuanto lleva abierta la posicion (buscandolo en el
+# historial, solo del mismo modo REAL/PAPER que ahora mismo).
+# ---------------------------------------------------------------------------
+historial_original_alpaca = bot.ARCHIVO_HISTORIAL_OPERACIONES
+paper_original_notif = bot.ALPACA_PAPER
+dir_temp_notif = tempfile.mkdtemp()
+bot.ARCHIVO_HISTORIAL_OPERACIONES = os.path.join(dir_temp_notif, "historial_notif.json")
+bot.ALPACA_PAPER = False
+
+mensaje_compra = bot.formatear_notificacion_compra("XOM", 0.0687, 168.78)
+check("formatear_notificacion_compra: varias lineas (Cantidad/Precio/Total en lineas separadas)",
+      "Cantidad:" in mensaje_compra and "Precio:" in mensaje_compra and "Total:" in mensaje_compra
+      and "\n" in mensaje_compra, f"mensaje={mensaje_compra!r}")
+check("formatear_notificacion_compra: el total es cantidad x precio",
+      "11,60 USD" in mensaje_compra, f"mensaje={mensaje_compra!r}")
+
+hoy_dt_notif = datetime.now()
+compra_hace_6d23h = hoy_dt_notif - timedelta(days=6, hours=23)
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": compra_hace_6d23h.isoformat(timespec="seconds"), "ticker": "T",
+                "lado": "COMPRA", "cantidad": 0.434, "precio": 26.42, "modo": "REAL"}], f)
+
+mensaje_venta = bot.formatear_notificacion_venta("VENTA PARCIAL", "T", 0.434, 26.71, 1.07)
+check("formatear_notificacion_venta: varias lineas, incluido el Beneficio",
+      "Cantidad:" in mensaje_venta and "Beneficio: +1,07%" in mensaje_venta, f"mensaje={mensaje_venta!r}")
+check("formatear_notificacion_venta: dice desde cuando esta abierta la posicion (buscado en el historial)",
+      "abierta desde" in mensaje_venta and "6d 23h" in mensaje_venta, f"mensaje={mensaje_venta!r}")
+
+# Una compra PAPER antigua del mismo ticker no debe contar para una venta REAL (mismo bug que ya
+# se corrigio en cartera_alpaca.py con "abierta desde" mezclando PAPER y REAL).
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": compra_hace_6d23h.isoformat(timespec="seconds"), "ticker": "T",
+                "lado": "COMPRA", "cantidad": 0.434, "precio": 26.42, "modo": "PAPER"}], f)
+mensaje_venta_sin_apertura = bot.formatear_notificacion_venta("VENTA PARCIAL", "T", 0.434, 26.71, 1.07)
+check("formatear_notificacion_venta: una compra PAPER antigua NO cuenta para una venta REAL",
+      "abierta desde" not in mensaje_venta_sin_apertura, f"mensaje={mensaje_venta_sin_apertura!r}")
+
+check("formatear_notificacion_venta: el sufijo opcional (confirmado a posteriori) se añade en su propia linea",
+      "[confirmado a posteriori" in bot.formatear_notificacion_venta(
+          "VENTA", "T", 0.434, 26.71, 1.07, sufijo="[confirmado a posteriori: aviso]"),
+      )
+
+bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_alpaca
+bot.ALPACA_PAPER = paper_original_notif
 
 
 # ---------------------------------------------------------------------------
