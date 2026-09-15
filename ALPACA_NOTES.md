@@ -1154,6 +1154,41 @@ depender de la memoria, qué commit está REALMENTE en marcha en el servidor —
 antes este tipo de desincronización entre "lo que está arreglado en git" y "lo que está
 corriendo de verdad".
 
+## Bug real: compra ejecutada en Alpaca pero nunca registrada en el historial (T, 15 sept. 2026)
+
+**Caso real**: el usuario preguntó por qué la posición de T en `/hoy` no mostraba "abierta
+desde" mientras que otras sí. Investigando el historial local (`historial_operaciones_alpaca.json`)
+solo aparecían compras PAPER de T, ninguna REAL. Revisando los logs (`journalctl -u bot-alpaca`)
+tampoco aparecía ningún "estado de la orden: filled" REAL para esa compra — solo intentos
+rechazados por falta de efectivo o por la ventana sin comprar, y un intento explícitamente NO
+ejecutado (cantidad distinta). Finalmente, el extracto de "Activity" de la propia Alpaca (datos
+reales de la cuenta, no del bot) confirmó que la compra **sí se ejecutó de verdad**: `Buy
+0.867953083 T FILL ... -$22.94 15 sept. 2026, 15:31:45` — una cantidad que además cuadra
+exactamente con la suma de las dos ventas reales posteriores (0.434 + 0.433953083).
+
+Conclusión: la compra se ejecutó en Alpaca pero `registrar_operacion_historial()` nunca llegó a
+escribirla en el fichero local. El beneficio mostrado en las ventas (+1,07%) seguía siendo
+correcto porque se calcula con el `avg_entry_price` que da la propia Alpaca en tiempo real, no
+con el historial — así que es un problema de trazabilidad/registro, no de contabilidad. La causa
+más probable (no confirmada al 100%, difícil de reproducir): la orden tardó en pasar a un estado
+final ("filled") más de lo que espera `esperar_estado_final_orden()` (10s) +
+`verificar_orden_no_confirmada()` (una única repesca 2s después) — variante con más retraso del
+mismo tipo de bug que ya afectó a WMT.
+
+**Solución aplicada**: en vez de perseguir esa condición de carrera exacta, se añadió
+`verificar_historial_completo()` en `bot_alpaca.py` — una comprobación periódica (cada 30 min,
+`INTERVALO_REVISION_HISTORIAL_SEGUNDOS`) que compara, para cada posición abierta en Alpaca, la
+cantidad real contra la cantidad neta (compras menos ventas, mismo modo REAL/PAPER) que explica
+el historial local. Si Alpaca tiene más acciones de las que el historial explica, avisa por
+Telegram (`⚠️ Historial incompleto: TICKER`) para detectar el hueco enseguida la próxima vez,
+en vez de descubrirlo días después mirando la tabla a mano. El aviso no se repite en cada ciclo
+mientras el hueco siga abierto para el mismo ticker (se resetea si la posición se cierra o el
+historial se pone al día).
+
+Pendiente de decidir con el usuario si conviene la misma comprobación en `bot_completo.py`
+(IBKR) — ese bot usa un mecanismo distinto (`registrar_apertura_de_posicion`) para el "abierta
+desde", y no hay evidencia todavía de que sufra el mismo problema.
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

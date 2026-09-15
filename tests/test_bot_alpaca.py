@@ -1601,6 +1601,70 @@ bot.ALPACA_PAPER = paper_original_notif
 
 
 # ---------------------------------------------------------------------------
+# verificar_historial_completo (bug real T, sept. 2026: una compra REAL se
+# ejecuto en Alpaca pero nunca quedo registrada en el historial local).
+# Compara la cantidad que dice Alpaca contra la que explica el historial y
+# avisa por Telegram si Alpaca tiene mas acciones de las que el historial
+# explica.
+# ---------------------------------------------------------------------------
+historial_original_reconciliacion = bot.ARCHIVO_HISTORIAL_OPERACIONES
+paper_original_reconciliacion = bot.ALPACA_PAPER
+obtener_posiciones_original_reconciliacion = bot.obtener_posiciones
+dir_temp_reconciliacion = tempfile.mkdtemp()
+bot.ARCHIVO_HISTORIAL_OPERACIONES = os.path.join(dir_temp_reconciliacion, "historial_reconciliacion.json")
+bot.ALPACA_PAPER = False
+
+mensajes_reconciliacion = []
+bot.notificar_telegram = lambda msg: mensajes_reconciliacion.append(msg)
+
+# Caso 1: el historial explica exactamente la cantidad que tiene Alpaca -> sin aviso.
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": "2026-09-01T10:00:00", "ticker": "AAPL",
+                "lado": "COMPRA", "cantidad": 1.0, "precio": 200.0, "modo": "REAL"}], f)
+bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
+bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="AAPL", qty="1.0")]
+bot.verificar_historial_completo()
+check("verificar_historial_completo: historial completo -> no avisa",
+      mensajes_reconciliacion == [], f"mensajes={mensajes_reconciliacion!r}")
+
+# Caso 2: Alpaca tiene mas acciones de T de las que explica el historial (falta una compra) -> avisa.
+mensajes_reconciliacion.clear()
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": "2026-09-15T15:31:45", "ticker": "T",
+                "lado": "VENTA", "cantidad": 0.434, "precio": 26.90, "modo": "REAL"},
+               {"fecha_hora": "2026-09-15T15:35:00", "ticker": "T",
+                "lado": "VENTA", "cantidad": 0.433953083, "precio": 26.95, "modo": "REAL"}], f)
+bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
+bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="T", qty="0.867953083")]
+bot.verificar_historial_completo()
+check("verificar_historial_completo: falta una compra en el historial -> avisa por Telegram",
+      len(mensajes_reconciliacion) == 1 and "T" in mensajes_reconciliacion[0]
+      and "Historial incompleto" in mensajes_reconciliacion[0], f"mensajes={mensajes_reconciliacion!r}")
+check("verificar_historial_completo: no repite el aviso en el siguiente ciclo mientras el hueco siga",
+      len(mensajes_reconciliacion) == 1)
+bot.verificar_historial_completo()
+check("verificar_historial_completo: segunda llamada seguida, sin cambios -> sigue sin repetir el aviso",
+      len(mensajes_reconciliacion) == 1, f"mensajes={mensajes_reconciliacion!r}")
+
+# Caso 3: una compra PAPER no debe contar para explicar una posicion en modo REAL.
+mensajes_reconciliacion.clear()
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": "2026-09-01T10:00:00", "ticker": "WMT",
+                "lado": "COMPRA", "cantidad": 2.0, "precio": 90.0, "modo": "PAPER"}], f)
+bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
+bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="WMT", qty="2.0")]
+bot.verificar_historial_completo()
+check("verificar_historial_completo: una compra PAPER no cuenta para una posicion REAL -> avisa igualmente",
+      len(mensajes_reconciliacion) == 1, f"mensajes={mensajes_reconciliacion!r}")
+
+bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_reconciliacion
+bot.ALPACA_PAPER = paper_original_reconciliacion
+bot.obtener_posiciones = obtener_posiciones_original_reconciliacion
+bot.notificar_telegram = notificar_telegram_original_slippage
+bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()

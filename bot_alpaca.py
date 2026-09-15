@@ -384,6 +384,9 @@ def cerrar_seguimiento_venta(clave):
 INTERVALO_SEGUNDOS = 130  # 2 min 10 s (ajustado tras pruebas en paper, ago 2026) - solo acciones
 CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto, en su propia cadencia (peticion
                                  # del usuario, sept. 2026): mismo valor que en bot_completo.py/IBKR
+INTERVALO_REVISION_HISTORIAL_SEGUNDOS = 1800  # 30 min: comprobacion periodica de que el
+                                 # historial local explica todas las acciones que Alpaca dice
+                                 # tener (ver verificar_historial_completo(), bug real T sept. 2026)
 LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera por valor
 IMPORTE_EUROS = 45           # presupuesto maximo por operacion (convertido a USD) - ajustado
                               # para capital real de ~300 EUR (antes 1000, pensado para el
@@ -1226,6 +1229,60 @@ def formatear_notificacion_venta(etiqueta_accion, ticker, cantidad, precio, bene
     return "\n".join(lineas)
 
 
+_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
+
+
+def verificar_historial_completo():
+    """BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de T se
+    ejecuto de verdad en Alpaca -confirmado en el extracto de "Activity" de
+    la propia Alpaca- pero nunca quedo registrada en
+    ARCHIVO_HISTORIAL_OPERACIONES, probablemente porque la orden tardo mas
+    en confirmarse como "filled" que la ventana de espera de
+    esperar_estado_final_orden()/verificar_orden_no_confirmada(). El
+    resultado fue que /hoy no mostraba "abierta desde" para esa posicion y
+    el hueco solo se descubrio dias despues mirando el historial a mano.
+
+    En vez de perseguir esa condicion de carrera exacta -dificil de
+    reproducir-, esta comprobacion compara periodicamente, para cada
+    posicion REAL/PAPER abierta en Alpaca, la cantidad que dice Alpaca
+    contra la cantidad neta (compras menos ventas) que se deduce del
+    historial local, y avisa por Telegram si Alpaca tiene mas acciones de
+    las que el historial explica -asi el hueco se detecta enseguida en vez
+    de dias despues-. Solo avisa una vez por ticker mientras el hueco siga
+    abierto (_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO), para no repetir el
+    aviso en cada ciclo."""
+    modo_actual = "PAPER" if ALPACA_PAPER else "REAL"
+    cantidades_historial = {}
+    for o in cargar_historial_operaciones():
+        if o.get("modo", "PAPER") != modo_actual:
+            continue
+        cantidades_historial[o["ticker"]] = cantidades_historial.get(o["ticker"], 0.0) + (
+            o["cantidad"] if o["lado"] == "COMPRA" else -o["cantidad"]
+        )
+    tickers_con_posicion = set()
+    for p in obtener_posiciones():
+        ticker = p.symbol
+        tickers_con_posicion.add(ticker)
+        cantidad_real = float(p.qty)
+        cantidad_historial = cantidades_historial.get(ticker, 0.0)
+        if cantidad_real - cantidad_historial > 1e-6:
+            if ticker not in _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO:
+                _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.add(ticker)
+                log(f"AVISO: {ticker} tiene {cantidad_real} acciones en Alpaca pero el historial "
+                    f"solo explica {cantidad_historial} ({modo_actual}). Puede faltar registrar una compra.")
+                notificar_telegram(
+                    f"⚠️ <b>Historial incompleto: {ticker}</b>\n"
+                    f"Alpaca tiene {formato_es(cantidad_real, 4)} pero el historial local solo "
+                    f"explica {formato_es(cantidad_historial, 4)} ({modo_actual}).\n"
+                    f"Puede que falte registrar una compra (revisar el extracto de Alpaca)."
+                )
+        else:
+            _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.discard(ticker)
+    for ticker in list(_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO):
+        if ticker not in tickers_con_posicion:
+            _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.discard(ticker)
+
+
 def obtener_ejecucion_real(order_id, cantidad_prevista, precio_previsto):
     """Tras confirmar que una orden ha quedado 'filled', intenta leer la
     cantidad y precio REALES de ejecucion (filled_qty/filled_avg_price). Si
@@ -2063,6 +2120,7 @@ def main():
     resumenes_enviados_hoy = set()
     proxima_revision_cripto = 0.0
     proxima_revision_acciones = 0.0
+    proxima_revision_historial = 0.0
 
     while True:
         try:
@@ -2126,6 +2184,13 @@ def main():
                         f"intervalo configurado ({INTERVALO_SEGUNDOS}s).")
                 proxima_revision_acciones = inicio_acciones + INTERVALO_SEGUNDOS
                 actualizar_latido()
+
+            if ahora_mono >= proxima_revision_historial:
+                try:
+                    verificar_historial_completo()
+                except Exception as e:
+                    log(f"ERROR inesperado en verificar_historial_completo: {type(e).__name__}: {e}")
+                proxima_revision_historial = ahora_mono + INTERVALO_REVISION_HISTORIAL_SEGUNDOS
 
             proxima_revision = min(proxima_revision_cripto, proxima_revision_acciones)
             segundos_espera = max(proxima_revision - time.monotonic(), 1)
