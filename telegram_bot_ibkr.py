@@ -356,7 +356,12 @@ def _conectar_cartera():
 LIMITE_CARACTERES_LOG_TELEGRAM = 3500
 
 FRAGMENTOS_RUIDO_LOG = [
-    "Iniciando nuevo ciclo de revision.",
+    # Sin punto final (bug real, sept. 2026: bot_completo.py escribe
+    # "Iniciando nuevo ciclo de revision{etiqueta}." con una etiqueta de
+    # mercado variable -" CRIPTO", " US", etc.- antes del punto; con el
+    # punto pegado al fragmento, esas variantes con etiqueta no coincidian
+    # y se colaban sin filtrar).
+    "Iniciando nuevo ciclo de revision",
     "por debajo del umbral -> se mantiene",
     "MACD 5min ALCISTA -> se deja correr",
     "datos insuficientes para MACD",
@@ -374,8 +379,14 @@ FRAGMENTOS_RUIDO_LOG = [
 ]
 
 
+_PATRON_TIMESTAMP_PREFIJO = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s?")
+
+
 def _es_linea_separadora(linea):
-    linea = linea.strip()
+    """Ver el comentario equivalente en telegram_bot.py/Alpaca: log()
+    antepone SIEMPRE '[fecha hora] ' a cada mensaje, asi que hay que
+    quitarlo antes de comprobar si la linea es solo '=', '#' o '-'."""
+    linea = _PATRON_TIMESTAMP_PREFIJO.sub("", linea).strip()
     return not linea or set(linea) <= {"=", "#", "-"} or (linea.startswith("##") and linea.endswith("##"))
 
 

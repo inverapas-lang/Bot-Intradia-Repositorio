@@ -227,12 +227,23 @@ def actualizar_codigo():
 LIMITE_CARACTERES_LOG_TELEGRAM = 3500  # margen bajo el limite de 4096 de un mensaje de Telegram
 
 
+_PATRON_TIMESTAMP_PREFIJO = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s?")
+
+
 def _es_linea_separadora(linea):
     """Lineas puramente decorativas que el propio bot imprime: '====...', o
     cabeceras de seccion como '##### VENTAS #####' -esto ultimo es
     redundante en la lista filtrada, ya que cada linea de accion real
-    empieza igualmente por 'VENTAS: TICKER - ...' o 'COMPRAS: TICKER - ...'-."""
-    linea = linea.strip()
+    empieza igualmente por 'VENTAS: TICKER - ...' o 'COMPRAS: TICKER - ...'-.
+
+    BUG REAL DE PRODUCCION (sept. 2026, visto en /log de verdad): log()
+    antepone SIEMPRE '[fecha hora] ' a cada mensaje, incluidas estas lineas
+    puramente decorativas -asi que la linea real en el archivo nunca es
+    solo '===...', es '[2026-... ] ===...'-, y esos caracteres del
+    timestamp (numeros, corchetes, dos puntos) rompian la comprobacion de
+    "solo son '=' o '#' o '-'", dejando pasar la linea entera sin filtrar.
+    Se quita ese prefijo antes de comprobarlo."""
+    linea = _PATRON_TIMESTAMP_PREFIJO.sub("", linea).strip()
     return not linea or set(linea) <= {"=", "#", "-"} or (linea.startswith("##") and linea.endswith("##"))
 
 
@@ -243,8 +254,15 @@ def _es_linea_separadora(linea):
 # texto de estos mensajes cambia en bot_alpaca.py, puede hacer falta
 # actualizar esta lista tambien.
 FRAGMENTOS_RUIDO_LOG = [
-    "Iniciando nuevo ciclo de revision.",
-    "analizando 30 valores en lote",
+    # Sin punto final ni numero fijo de tickers (bug real, sept. 2026: la
+    # version anterior de estos dos fragmentos -"Iniciando nuevo ciclo de
+    # revision." con punto, "analizando 30 valores en lote" con el numero
+    # de ACCIONES fijo- no coincidia con las variantes de CRIPTO
+    # ("...revision CRIPTO.", "analizando 6 criptomonedas en lote..."),
+    # asi que esas lineas rutinarias de cripto se colaban sin filtrar).
+    "Iniciando nuevo ciclo de revision",
+    "en lote",
+    "hasta la siguiente revision",
     "por debajo del umbral -> se mantiene",
     "MACD 5min ALCISTA -> se deja correr",
     "datos insuficientes para MACD",

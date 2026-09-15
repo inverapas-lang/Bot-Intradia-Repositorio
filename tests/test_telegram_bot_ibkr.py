@@ -385,6 +385,25 @@ check("/log: una cabecera '==== texto ====' se muestra sin el relleno de '='",
       and "====" not in resultado_log,
       f"resultado={resultado_log!r}")
 
+# --- 5c. /log: separador '====' con el prefijo de timestamp delante, y
+# "Iniciando nuevo ciclo de revision CRIPTO." con etiqueta de mercado (bug
+# real, sept. 2026, visto en una captura real de /log de Alpaca -mismo
+# fallo en los dos bots-): log() antepone SIEMPRE '[fecha hora] ' a cada
+# linea, incluidas las decorativas, y eso rompia la comprobacion de
+# "solo son '='"; y el fragmento de ruido con el punto pegado no coincidia
+# con la etiqueta de mercado antes del punto. ---
+_borrar_si_existe(tib.bot.ARCHIVO_LOG)
+_escribir(tib.bot.ARCHIVO_LOG,
+          "[2026-09-15 07:26:50] ============================================================\n"
+          "[2026-09-15 07:26:50] Iniciando nuevo ciclo de revision CRIPTO. [PAPER]\n"
+          "[2026-09-15 07:26:51] VENTAS: BTC - beneficio -3.08% -> se mantiene.\n")
+resultado_log = tib.obtener_ultimas_lineas_log()
+check("/log (IBKR): quita el separador '====' aunque lleve el prefijo de timestamp delante",
+      "====" not in resultado_log, f"resultado={resultado_log!r}")
+check("/log (IBKR): quita 'Iniciando nuevo ciclo de revision CRIPTO.' (etiqueta de mercado "
+      "antes del punto)",
+      "Iniciando nuevo ciclo" not in resultado_log, f"resultado={resultado_log!r}")
+
 _borrar_si_existe(tib.bot.ARCHIVO_LOG)
 directorio_temporal.cleanup()
 

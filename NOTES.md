@@ -1172,6 +1172,23 @@ para ellos); si en el futuro se quiere lo mismo para HKD/KRW, el patrón es el m
     ciclo). El trailing stop TOTAL (la red de seguridad final) **no** usa este veto a propósito
     — sigue disparando solo por precio, sin esperar confirmación de un indicador lento.
 
+21. **`/log` no filtraba las líneas rutinarias/decorativas de CRIPTO en ninguno de los dos
+    bots (sept. 2026, visto en una captura real de `/log` de Alpaca)**: aparecían sin filtrar
+    paredes de `====...====`, "Iniciando nuevo ciclo de revision CRIPTO.", "COMPRAS: analizando
+    6 criptomonedas en lote..." y "Esperando Ns hasta la siguiente revision...".
+    Dos causas distintas:
+    - `log()` antepone SIEMPRE `[fecha hora] ` a cada mensaje, incluidas las líneas puramente
+      decorativas — así que la línea real en el archivo nunca es solo `===...`, sino
+      `[2026-... ] ===...`, y esos caracteres del timestamp rompían la comprobación de
+      `_es_linea_separadora()` ("¿son *todos* los caracteres `=`/`#`/`-`?"). Se quita ese
+      prefijo (`_PATRON_TIMESTAMP_PREFIJO`) antes de comprobarlo.
+    - `FRAGMENTOS_RUIDO_LOG` tenía fragmentos demasiado específicos de ACCIONES ("analizando 30
+      valores en lote", "Iniciando nuevo ciclo de revision." con el punto pegado) que no
+      coincidían con las variantes de CRIPTO ("...criptomonedas en lote...", "...revision
+      CRIPTO." con una palabra de mercado antes del punto). Se generalizan a fragmentos sin el
+      número/mercado fijo ("en lote", "Iniciando nuevo ciclo de revision" sin punto) y se añade
+      "hasta la siguiente revision", que no estaba en absoluto en la lista de Alpaca.
+
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 
 - **`Error 10349` ("Order TIF was set to DAY based on order preset")**: aviso rutinario y

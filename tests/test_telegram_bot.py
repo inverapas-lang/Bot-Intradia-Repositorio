@@ -85,8 +85,20 @@ check("/log -> usa 'journalctl -o cat' (sin prefijo de fecha/host/PID duplicado)
 def _run_falso_log_con_ruido(cmd, **kwargs):
     if cmd[0] == "journalctl":
         return types.SimpleNamespace(
-            stdout="============================================================\n"
+            # El separador y las lineas rutinarias de cripto llevan el
+            # prefijo "[fecha hora] " de verdad (log() lo antepone SIEMPRE,
+            # a toda linea sin excepcion) -bug real, sept. 2026: una version
+            # anterior de este fixture no llevaba ese prefijo en el
+            # separador, lo que ocultaba que _es_linea_separadora() no
+            # sabia quitarlo-.
+            stdout="[2026-08-31 12:47:21] ============================================================\n"
                    "[2026-08-31 12:47:22] Iniciando nuevo ciclo de revision.\n"
+                   "[2026-08-31 12:47:22] COMPRAS: analizando 30 valores en lote...\n"
+                   "[2026-08-31 12:47:22] Esperando 130s hasta la siguiente revision (cripto cada 60s, "
+                   "acciones cada 130s)...\n"
+                   "[2026-08-31 12:47:22] ============================================================\n"
+                   "[2026-08-31 12:47:22] Iniciando nuevo ciclo de revision CRIPTO.\n"
+                   "[2026-08-31 12:47:22] COMPRAS: analizando 6 criptomonedas en lote...\n"
                    "\n"
                    "########## VENTAS ##########\n"
                    "[2026-08-31 12:47:23] VENTAS: AMD - beneficio -2.42%, por debajo del umbral -> se mantiene.\n"
@@ -118,6 +130,17 @@ try:
     check("/log: SI conserva el resumen de analisis CON señales de compra (bug corregido sept. 2026: "
           "antes se filtraba por error cualquier resumen con 0 errores, aunque hubiera señales)",
           "1 señales de compra" in resultado_log, f"resultado={resultado_log!r}")
+    check("/log: quita el separador '====...' aunque lleve el prefijo '[fecha hora] ' delante "
+          "(bug real, sept. 2026: la comprobacion no lo quitaba antes de comprobar los caracteres)",
+          "====" not in resultado_log, f"resultado={resultado_log!r}")
+    check("/log: quita 'Iniciando nuevo ciclo de revision CRIPTO.' (bug real: el fragmento de ruido "
+          "con el punto pegado no coincidia con la variante de cripto)",
+          "Iniciando nuevo ciclo" not in resultado_log, f"resultado={resultado_log!r}")
+    check("/log: quita 'analizando 6 criptomonedas en lote...' (bug real: el fragmento de ruido "
+          "solo cubria la variante de acciones, '30 valores')",
+          "en lote" not in resultado_log, f"resultado={resultado_log!r}")
+    check("/log: quita 'Esperando Ns hasta la siguiente revision...' (no estaba en la lista de ruido)",
+          "siguiente revision" not in resultado_log, f"resultado={resultado_log!r}")
 finally:
     tb.subprocess.run = run_original_log
 check("/ayuda -> lista de comandos", "/estado" in tb.procesar_comando("/ayuda"))
