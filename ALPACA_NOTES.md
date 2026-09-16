@@ -1189,6 +1189,24 @@ historial se pone al día).
 `bot_completo.py`/IBKR (`verificar_historial_completo(ib)`) — ver la sección "Comprobación
 periódica de historial incompleto" en `NOTES.md` para el detalle de ambos bots.
 
+**Actualización (16 sept. 2026, bug real AAPL)**: un día después de desplegar la comprobación
+anterior, apareció el mismo problema pero en el sentido contrario y en la VENTA: dos ventas de
+AAPL fuera de sesión regular (madrugada, poca liquidez) tardaron más de los 2 segundos que
+esperaba `verificar_orden_no_confirmada()` antes de dar por hecho que la orden no se había
+ejecutado, y ambas ventas se quedaron sin registrar en el historial ni avisadas por Telegram —
+confirmado con los correos de ejecución de la propia Alpaca. El historial se quedó pensando que
+la posición seguía abierta cuando ya estaba vendida del todo.
+
+Dos correcciones:
+1. `verificar_orden_no_confirmada()` ya no hace un único chequeo a los 2s: ahora reintenta cada
+   `INTERVALO_CHEQUEO_CONFIRMACION_TARDIA_SEGUNDOS` (5s) hasta
+   `ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS` (60s) en total, parando en cuanto detecta el
+   cambio de cantidad.
+2. `verificar_historial_completo()` (Alpaca e IBKR) ahora compara en **los dos sentidos**: Alpaca
+   con más acciones de las que el historial explica (falta una COMPRA, caso T) o con **menos**
+   (falta una VENTA, caso AAPL) — incluyendo el caso de que la posición ya se haya cerrado del
+   todo y el ticker ya no aparezca entre las posiciones abiertas.
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

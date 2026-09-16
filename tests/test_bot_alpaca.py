@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import types
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -1657,11 +1658,59 @@ bot.verificar_historial_completo()
 check("verificar_historial_completo: una compra PAPER no cuenta para una posicion REAL -> avisa igualmente",
       len(mensajes_reconciliacion) == 1, f"mensajes={mensajes_reconciliacion!r}")
 
+# Caso 4 (bug real AAPL, sept. 2026): el historial dice que la posicion sigue abierta pero Alpaca
+# ya la vendio del todo (dos VENTAS fuera de sesion no quedaron registradas) -> avisa igualmente,
+# aunque el ticker ya NO aparezca entre las posiciones abiertas de Alpaca.
+mensajes_reconciliacion.clear()
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": "2026-09-15T19:49:53", "ticker": "AAPL",
+                "lado": "COMPRA", "cantidad": 0.092853293, "precio": 330.306, "modo": "REAL"}], f)
+bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
+bot.obtener_posiciones = lambda: []  # AAPL ya no tiene posicion abierta en Alpaca (se vendio del todo)
+bot.verificar_historial_completo()
+check("verificar_historial_completo: falta una venta en el historial (posicion ya cerrada en Alpaca) -> avisa",
+      len(mensajes_reconciliacion) == 1 and "AAPL" in mensajes_reconciliacion[0]
+      and "falte registrar una venta" in mensajes_reconciliacion[0], f"mensajes={mensajes_reconciliacion!r}")
+
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_reconciliacion
 bot.ALPACA_PAPER = paper_original_reconciliacion
 bot.obtener_posiciones = obtener_posiciones_original_reconciliacion
 bot.notificar_telegram = notificar_telegram_original_slippage
 bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
+
+
+# ---------------------------------------------------------------------------
+# verificar_orden_no_confirmada (bug real AAPL, sept. 2026: una venta fuera de
+# sesion regular tardo mas de 2s en confirmarse, y el unico chequeo que se
+# hacia entonces -a los 2s- no llego a detectarla). Ahora reintenta cada
+# INTERVALO_CHEQUEO_CONFIRMACION_TARDIA_SEGUNDOS hasta
+# ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS en total.
+# ---------------------------------------------------------------------------
+time_sleep_original = time.sleep
+time.sleep = lambda segundos: None  # no esperar de verdad en el test
+
+obtener_cantidad_original_reintento = bot.obtener_cantidad_posicion_real
+_llamadas_cantidad = {"n": 0}
+
+
+def _cantidad_cambia_a_la_tercera(ticker):
+    _llamadas_cantidad["n"] += 1
+    return 0.05 if _llamadas_cantidad["n"] >= 3 else 0.0928533
+
+
+bot.obtener_cantidad_posicion_real = _cantidad_cambia_a_la_tercera
+resultado_reintento = bot.verificar_orden_no_confirmada("AAPL", 0.0928533, "VENTAS: AAPL")
+check("verificar_orden_no_confirmada: detecta un cambio tardio (a la 3a comprobacion) sin esperar los 60s completos",
+      resultado_reintento == 0.05 and _llamadas_cantidad["n"] == 3, f"n={_llamadas_cantidad['n']}, resultado={resultado_reintento}")
+
+_llamadas_cantidad["n"] = 0
+bot.obtener_cantidad_posicion_real = lambda ticker: 0.0928533  # nunca cambia -> orden de verdad no ejecutada
+resultado_sin_cambio = bot.verificar_orden_no_confirmada("AAPL", 0.0928533, "VENTAS: AAPL")
+check("verificar_orden_no_confirmada: si la cantidad nunca cambia, concluye que no se ejecuto",
+      resultado_sin_cambio == 0.0928533)
+
+time.sleep = time_sleep_original
+bot.obtener_cantidad_posicion_real = obtener_cantidad_original_reintento
 
 
 # ---------------------------------------------------------------------------

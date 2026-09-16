@@ -1004,26 +1004,41 @@ def obtener_cantidad_posicion_real(ticker):
     return 0.0
 
 
+ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS = 60
+INTERVALO_CHEQUEO_CONFIRMACION_TARDIA_SEGUNDOS = 5
+
+
 def verificar_orden_no_confirmada(ticker, cantidad_antes, prefijo_log):
-    """BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de WMT se
-    ejecuto de verdad pero no quedo registrada en el historial ni avisada
-    por Telegram): esperar_estado_final_orden() solo espera
+    """BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de WMT y,
+    despues, una venta de AAPL fuera de sesion regular, se ejecutaron de
+    verdad pero no quedaron registradas en el historial ni avisadas por
+    Telegram): esperar_estado_final_orden() solo espera
     ESPERA_MAXIMA_ESTADO_ORDEN_SEGUNDOS (10s) antes de rendirse. Una orden
     LIMITADA fuera de sesion regular (poca liquidez en pre/postmercado)
     puede tardar mas que eso en rellenarse, y aun asi acabar ejecutandose
-    poco despues -a diferencia de IBKR, bot_alpaca.py nunca comprobaba este
-    caso: si el estado no confirmaba 'filled', la operacion se descartaba
-    sin mas, aunque la posicion hubiera cambiado de verdad-. Se vuelve a
-    consultar la posicion real unos segundos despues y se compara con la
-    cantidad de antes, igual que verificar_posicion_tras_orden_no_confirmada()
-    en bot_completo.py."""
-    time.sleep(2)
-    cantidad_ahora = obtener_cantidad_posicion_real(ticker)
-    if abs(cantidad_ahora - cantidad_antes) > 1e-6:
-        log(f"{prefijo_log} - la posicion SI cambio de verdad ({cantidad_antes:g} -> {cantidad_ahora:g}) "
-            f"pese al estado no confirmado como 'filled' (probable ejecucion tardia de una orden limitada).")
-    else:
-        log(f"{prefijo_log} - la posicion NO ha cambiado ({cantidad_ahora:g}): confirmado que la orden no se ejecuto.")
+    poco despues.
+
+    Caso AAPL real (15/16 sept. 2026): la orden se coloco a las 01:56:27 y
+    la posicion no habia cambiado todavia a los 2s (01:56:29) -la unica
+    comprobacion que se hacia entonces-, pero el correo de confirmacion de
+    Alpaca confirma que se ejecuto de verdad sobre los 30-40s despues. Un
+    solo chequeo a los 2s es demasiado poco para una orden fuera de sesion:
+    ahora se reintenta cada INTERVALO_CHEQUEO_CONFIRMACION_TARDIA_SEGUNDOS
+    (5s) hasta ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS (60s) en total,
+    parando en cuanto se detecta el cambio."""
+    transcurrido = 0.0
+    cantidad_ahora = cantidad_antes
+    while transcurrido < ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS:
+        time.sleep(INTERVALO_CHEQUEO_CONFIRMACION_TARDIA_SEGUNDOS)
+        transcurrido += INTERVALO_CHEQUEO_CONFIRMACION_TARDIA_SEGUNDOS
+        cantidad_ahora = obtener_cantidad_posicion_real(ticker)
+        if abs(cantidad_ahora - cantidad_antes) > 1e-6:
+            log(f"{prefijo_log} - la posicion SI cambio de verdad ({cantidad_antes:g} -> {cantidad_ahora:g}) "
+                f"pese al estado no confirmado como 'filled' (ejecucion tardia de una orden limitada, "
+                f"detectada tras {transcurrido:.0f}s).")
+            return cantidad_ahora
+    log(f"{prefijo_log} - la posicion NO ha cambiado ({cantidad_ahora:g}) tras "
+        f"{ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS}s: confirmado que la orden no se ejecuto.")
     return cantidad_ahora
 
 
@@ -1233,24 +1248,28 @@ _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
 
 
 def verificar_historial_completo():
-    """BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de T se
-    ejecuto de verdad en Alpaca -confirmado en el extracto de "Activity" de
-    la propia Alpaca- pero nunca quedo registrada en
-    ARCHIVO_HISTORIAL_OPERACIONES, probablemente porque la orden tardo mas
-    en confirmarse como "filled" que la ventana de espera de
-    esperar_estado_final_orden()/verificar_orden_no_confirmada(). El
-    resultado fue que /hoy no mostraba "abierta desde" para esa posicion y
-    el hueco solo se descubrio dias despues mirando el historial a mano.
+    """BUG REAL DE PRODUCCION (sept. 2026): una compra de T se ejecuto de
+    verdad en Alpaca -confirmado en el extracto de "Activity" de la propia
+    Alpaca- pero nunca quedo registrada en ARCHIVO_HISTORIAL_OPERACIONES
+    (faltaba una COMPRA), y despues, con AAPL, dos VENTAS fuera de sesion
+    regular tampoco quedaron registradas (verificar_orden_no_confirmada()
+    solo esperaba 2s tras la orden, y la ejecucion tardia llego despues) -
+    esta vez el historial se quedo pensando que la posicion seguia abierta
+    cuando Alpaca ya la habia vendido del todo (falta una VENTA). En ambos
+    casos el hueco solo se descubrio dias despues mirando el historial a
+    mano, o gracias a los correos de confirmacion de Alpaca.
 
-    En vez de perseguir esa condicion de carrera exacta -dificil de
-    reproducir-, esta comprobacion compara periodicamente, para cada
-    posicion REAL/PAPER abierta en Alpaca, la cantidad que dice Alpaca
-    contra la cantidad neta (compras menos ventas) que se deduce del
-    historial local, y avisa por Telegram si Alpaca tiene mas acciones de
-    las que el historial explica -asi el hueco se detecta enseguida en vez
-    de dias despues-. Solo avisa una vez por ticker mientras el hueco siga
-    abierto (_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO), para no repetir el
-    aviso en cada ciclo."""
+    En vez de perseguir cada condicion de carrera por separado, esta
+    comprobacion compara periodicamente, para cada ticker con posicion
+    REAL/PAPER en Alpaca O CON OPERACIONES EN EL HISTORIAL, la cantidad que
+    dice Alpaca contra la cantidad neta (compras menos ventas) que se
+    deduce del historial local, y avisa por Telegram en los dos sentidos:
+    Alpaca con MAS acciones de las que el historial explica (falta una
+    COMPRA) o con MENOS (falta una VENTA, incluido el caso de que la
+    posicion ya se haya cerrado del todo y el historial no lo sepa). Solo
+    avisa una vez por ticker mientras el hueco siga abierto
+    (_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO), para no repetir el aviso en
+    cada ciclo."""
     modo_actual = "PAPER" if ALPACA_PAPER else "REAL"
     cantidades_historial = {}
     for o in cargar_historial_operaciones():
@@ -1259,13 +1278,13 @@ def verificar_historial_completo():
         cantidades_historial[o["ticker"]] = cantidades_historial.get(o["ticker"], 0.0) + (
             o["cantidad"] if o["lado"] == "COMPRA" else -o["cantidad"]
         )
-    tickers_con_posicion = set()
-    for p in obtener_posiciones():
-        ticker = p.symbol
-        tickers_con_posicion.add(ticker)
-        cantidad_real = float(p.qty)
+    cantidades_reales = {p.symbol: float(p.qty) for p in obtener_posiciones()}
+    tickers_a_revisar = set(cantidades_historial) | set(cantidades_reales)
+    for ticker in tickers_a_revisar:
+        cantidad_real = cantidades_reales.get(ticker, 0.0)
         cantidad_historial = cantidades_historial.get(ticker, 0.0)
-        if cantidad_real - cantidad_historial > 1e-6:
+        diferencia = cantidad_real - cantidad_historial
+        if diferencia > 1e-6:
             if ticker not in _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO:
                 _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.add(ticker)
                 log(f"AVISO: {ticker} tiene {cantidad_real} acciones en Alpaca pero el historial "
@@ -1276,10 +1295,18 @@ def verificar_historial_completo():
                     f"explica {formato_es(cantidad_historial, 4)} ({modo_actual}).\n"
                     f"Puede que falte registrar una compra (revisar el extracto de Alpaca)."
                 )
+        elif diferencia < -1e-6:
+            if ticker not in _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO:
+                _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.add(ticker)
+                log(f"AVISO: el historial dice que hay {cantidad_historial} acciones de {ticker} "
+                    f"({modo_actual}) pero Alpaca solo tiene {cantidad_real}. Puede faltar registrar una venta.")
+                notificar_telegram(
+                    f"⚠️ <b>Historial incompleto: {ticker}</b>\n"
+                    f"El historial local dice {formato_es(cantidad_historial, 4)} ({modo_actual}) pero "
+                    f"Alpaca solo tiene {formato_es(cantidad_real, 4)}.\n"
+                    f"Puede que falte registrar una venta (revisar el extracto de Alpaca)."
+                )
         else:
-            _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.discard(ticker)
-    for ticker in list(_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO):
-        if ticker not in tickers_con_posicion:
             _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.discard(ticker)
 
 

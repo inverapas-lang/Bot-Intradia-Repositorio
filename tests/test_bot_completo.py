@@ -2922,8 +2922,25 @@ with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
 bot._CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
 posicion_us_bch = _Posicion("BCH", 5, 300.0)
 bot.verificar_historial_completo(_IBFalsoHistorial([posicion_us_bch]))
-check("verificar_historial_completo (IBKR): una compra CRYPTO no explica una posicion US del mismo ticker",
-      len(mensajes_reconciliacion_ibkr) == 1, f"mensajes={mensajes_reconciliacion_ibkr!r}")
+check("verificar_historial_completo (IBKR): una compra CRYPTO no explica una posicion US del mismo ticker "
+      "(avisa de la compra US sin explicar Y de la CRYPTO que ya no tiene posicion, por separado)",
+      len(mensajes_reconciliacion_ibkr) == 2
+      and any("BCH (US)" in m and "falte registrar una compra" in m for m in mensajes_reconciliacion_ibkr)
+      and any("BCH (CRYPTO)" in m and "falte registrar una venta" in m for m in mensajes_reconciliacion_ibkr),
+      f"mensajes={mensajes_reconciliacion_ibkr!r}")
+
+# Caso 4 (bug real AAPL en Alpaca, sept. 2026, mismo tipo de hueco posible aqui): el historial
+# dice que la posicion sigue abierta pero IBKR ya no la tiene (dos ventas no quedaron
+# registradas) -> avisa igualmente, aunque el ticker ya no aparezca entre ib.positions().
+mensajes_reconciliacion_ibkr.clear()
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": "2026-09-15T19:49:53", "mercado": "US", "ticker": "AAPL",
+                "lado": "COMPRA", "cantidad": 2, "precio": 150.0, "comision": 1.0, "currency": "USD"}], f)
+bot._CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
+bot.verificar_historial_completo(_IBFalsoHistorial([]))  # AAPL ya no tiene posicion abierta en IBKR
+check("verificar_historial_completo (IBKR): falta una venta en el historial (posicion ya cerrada) -> avisa",
+      len(mensajes_reconciliacion_ibkr) == 1 and "AAPL (US)" in mensajes_reconciliacion_ibkr[0]
+      and "falte registrar una venta" in mensajes_reconciliacion_ibkr[0], f"mensajes={mensajes_reconciliacion_ibkr!r}")
 
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_reconciliacion_ibkr
 bot.notificar_telegram = notificar_telegram_original_reconciliacion_ibkr
