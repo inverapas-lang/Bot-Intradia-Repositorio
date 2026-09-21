@@ -314,6 +314,32 @@ check("formatear_operaciones_cerradas (html): una compra/venta PAPER antigua del
       "5h 29min" in cerradas_html_cvx and "9d" not in cerradas_html_cvx,
       f"resultado={cerradas_html_cvx!r}")
 
+# --- BUG REAL DE PRODUCCION (sept. 2026, caso real: BTC/USD seguia mostrando
+# "abierta desde" una fecha antigua pese a haberse cerrado y reabierto varias
+# veces): un resto de redondeo tras vender (p.ej. 0.000001, tipico en cripto)
+# no bajaba del umbral de "posicion cerrada" (antes 1e-9), asi que la
+# siguiente recompra no reseteaba la fecha de apertura. ---
+compra_btc_1 = hoy_dt - timedelta(hours=2)
+venta_btc_1 = hoy_dt - timedelta(hours=1)
+compra_btc_2 = hoy_dt - timedelta(minutes=30)
+operaciones_dust_btc = [
+    {"fecha_hora": compra_btc_1.isoformat(timespec="seconds"), "ticker": "BTC/USD", "lado": "COMPRA",
+     "cantidad": 0.000481, "precio": 81909.94, "modo": "REAL"},
+    {"fecha_hora": venta_btc_1.isoformat(timespec="seconds"), "ticker": "BTC/USD", "lado": "VENTA",
+     "cantidad": 0.000480, "precio": 83458.0, "coste_medio": 81909.94, "beneficio_pct": 1.39, "modo": "REAL"},
+    {"fecha_hora": compra_btc_2.isoformat(timespec="seconds"), "ticker": "BTC/USD", "lado": "COMPRA",
+     "cantidad": 0.000473, "precio": 83395.21, "modo": "REAL"},
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "BTC/USD", "lado": "VENTA",
+     "cantidad": 0.000472, "precio": 84783.60, "coste_medio": 83395.21, "beneficio_pct": 1.16, "modo": "REAL"},
+]
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump(operaciones_dust_btc, f)
+cerradas_html_btc_dust = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html): un resto de redondeo tras vender (0.000001) SI "
+      "resetea 'abierta desde' en la recompra (la ultima venta muestra 30min, no 2h)",
+      "30min" in cerradas_html_btc_dust and "2h" not in cerradas_html_btc_dust,
+      f"resultado={cerradas_html_btc_dust!r}")
+
 
 if fallos:
     print(f"\n{len(fallos)} test(s) FALLARON: {fallos}")

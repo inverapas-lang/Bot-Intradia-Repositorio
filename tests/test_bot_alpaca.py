@@ -1602,6 +1602,43 @@ bot.ALPACA_PAPER = paper_original_notif
 
 
 # ---------------------------------------------------------------------------
+# UMBRAL_POSICION_CERRADA_DUST (bug real BTC/USD, sept. 2026: una venta de
+# cripto dejaba un resto de redondeo (p.ej. comprar 0.000481, vender
+# 0.000480 -> resto 0.000001) que el umbral anterior (1e-9) no consideraba
+# "cerrado", asi que la siguiente recompra no reseteaba "abierta desde" y
+# seguia arrastrando la fecha de apertura original.
+# ---------------------------------------------------------------------------
+historial_dust_original = bot.ARCHIVO_HISTORIAL_OPERACIONES
+paper_dust_original = bot.ALPACA_PAPER
+dir_temp_dust = tempfile.mkdtemp()
+bot.ARCHIVO_HISTORIAL_OPERACIONES = os.path.join(dir_temp_dust, "historial_dust.json")
+bot.ALPACA_PAPER = False
+
+ahora_dust = datetime.now()
+compra_1_dust = ahora_dust - timedelta(hours=2)
+venta_1_dust = ahora_dust - timedelta(hours=1)
+compra_2_dust = ahora_dust - timedelta(minutes=30)
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([
+        {"fecha_hora": compra_1_dust.isoformat(timespec="seconds"), "ticker": "BTC/USD",
+         "lado": "COMPRA", "cantidad": 0.000481, "precio": 81909.94, "modo": "REAL"},
+        {"fecha_hora": venta_1_dust.isoformat(timespec="seconds"), "ticker": "BTC/USD",
+         "lado": "VENTA", "cantidad": 0.000480, "precio": 83458.0, "modo": "REAL"},
+        {"fecha_hora": compra_2_dust.isoformat(timespec="seconds"), "ticker": "BTC/USD",
+         "lado": "COMPRA", "cantidad": 0.000473, "precio": 83395.21, "modo": "REAL"},
+    ], f)
+mensaje_venta_dust = bot.formatear_notificacion_venta("VENTA", "BTC/USD", 0.000472, 84783.60, 1.16,
+                                                        decimales_cantidad=6, unidad="unidades")
+check("formatear_notificacion_venta: un resto de redondeo tras vender (0.000001) SI resetea "
+      "'abierta desde' en la siguiente recompra (no se arrastra la fecha de la compra original)",
+      "abierta desde" in mensaje_venta_dust and "30min" in mensaje_venta_dust
+      and "2h" not in mensaje_venta_dust, f"mensaje={mensaje_venta_dust!r}")
+
+bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_dust_original
+bot.ALPACA_PAPER = paper_dust_original
+
+
+# ---------------------------------------------------------------------------
 # verificar_historial_completo (bug real T, sept. 2026: una compra REAL se
 # ejecuto en Alpaca pero nunca quedo registrada en el historial local).
 # Compara la cantidad que dice Alpaca contra la que explica el historial y

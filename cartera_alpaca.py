@@ -177,7 +177,17 @@ def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora, mod
     este filtro, un historial que mezcla una epoca PAPER antigua con la
     REAL actual para el mismo ticker arrastraba la apertura de una posicion
     PAPER de hace dias que no tenia nada que ver con la posicion REAL de
-    hoy."""
+    hoy.
+
+    BUG REAL DE PRODUCCION (sept. 2026, caso real: BTC/USD seguia mostrando
+    "abierta desde" una fecha antigua pese a haberse cerrado y reabierto
+    varias veces esa semana): el umbral para considerar la posicion
+    "cerrada del todo" estaba en 1e-9, pero las ventas de cripto casi nunca
+    dejan el saldo EXACTAMENTE a 0 (redondeo de la ejecucion real en
+    Alpaca, tipicamente del orden de 1e-6) -mismo bug y misma correccion
+    que UMBRAL_POSICION_CERRADA_DUST en bot_alpaca.py, ver ese comentario
+    para el detalle-."""
+    UMBRAL_POSICION_CERRADA_DUST = 1e-5
     cantidad_actual = 0.0
     fecha_apertura = None
     for o in operaciones_ticker_ordenadas:
@@ -186,7 +196,7 @@ def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora, mod
         if _modo_operacion(o) != modo:
             continue
         if o["lado"] == "COMPRA":
-            if cantidad_actual <= 1e-9:
+            if cantidad_actual <= UMBRAL_POSICION_CERRADA_DUST:
                 fecha_apertura = o["fecha_hora"]
             cantidad_actual += o["cantidad"]
         else:

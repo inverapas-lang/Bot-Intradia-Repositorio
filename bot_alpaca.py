@@ -1182,16 +1182,30 @@ def formatear_duracion(delta):
     return f"{dias}d {horas_resto}h" if horas_resto else f"{dias}d"
 
 
+# BUG REAL DE PRODUCCION (sept. 2026, caso real: BTC/USD mostraba "abierta
+# desde 14 SEP" en ventas de posiciones que en realidad se habian cerrado y
+# reabierto varias veces esa misma semana): el umbral para considerar una
+# posicion "cerrada del todo" estaba en 1e-9, pero una venta de cripto rara
+# vez deja el saldo EXACTAMENTE a 0 -Alpaca ejecuta un poquito menos de lo
+# vendido (p.ej. comprar 0.000481, vender 0.000480 deja un resto de
+# 0.000001, mil veces mayor que el umbral de entonces)-, asi que ese resto
+# de redondeo nunca se consideraba "cerrado" y la fecha de apertura original
+# se seguia arrastrando indefinidamente en vez de resetearse con cada
+# recompra. Subido a un valor que absorbe ese resto de redondeo sin
+# confundirlo con una posicion pequeña pero real.
+UMBRAL_POSICION_CERRADA_DUST = 1e-5
+
+
 def _texto_apertura_desde(ticker, hasta_fecha_hora):
     """Busca en el historial (mismo ticker, mismo modo REAL/PAPER que
     ahora mismo) la COMPRA que abrio la racha actual -recorriendo
     cronologicamente, acumulando con cada COMPRA y descontando con cada
-    VENTA, olvidando la apertura cada vez que la cantidad cae a ~0- y
-    devuelve un fragmento " (abierta desde DD MES, Xh Ymin)" para las
-    notificaciones de venta (peticion del usuario, sept. 2026: saber
-    cuanto ha durado una posicion sin tener que consultarlo aparte).
-    Cadena vacia si no hay ninguna compra previa registrada (dato
-    incompleto)."""
+    VENTA, olvidando la apertura cada vez que la cantidad cae a ~0
+    (UMBRAL_POSICION_CERRADA_DUST)- y devuelve un fragmento " (abierta
+    desde DD MES, Xh Ymin)" para las notificaciones de venta (peticion del
+    usuario, sept. 2026: saber cuanto ha durado una posicion sin tener que
+    consultarlo aparte). Cadena vacia si no hay ninguna compra previa
+    registrada (dato incompleto)."""
     modo_actual = "PAPER" if ALPACA_PAPER else "REAL"
     cantidad_actual = 0.0
     fecha_apertura = None
@@ -1201,7 +1215,7 @@ def _texto_apertura_desde(ticker, hasta_fecha_hora):
         if o["fecha_hora"] > hasta_fecha_hora:
             continue
         if o["lado"] == "COMPRA":
-            if cantidad_actual <= 1e-9:
+            if cantidad_actual <= UMBRAL_POSICION_CERRADA_DUST:
                 fecha_apertura = o["fecha_hora"]
             cantidad_actual += o["cantidad"]
         else:

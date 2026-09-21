@@ -1207,6 +1207,39 @@ Dos correcciones:
    (falta una VENTA, caso AAPL) — incluyendo el caso de que la posición ya se haya cerrado del
    todo y el ticker ya no aparezca entre las posiciones abiertas.
 
+## BUG CRÍTICO corregido: "abierta desde" atascada por redondeo de cripto (BTC/USD, 16-21 sept. 2026)
+
+**Caso real**: el usuario detectó en el historial de Telegram que varias ventas de BTC/USD
+seguían mostrando "abierta desde 14 SEP" aunque de por medio hubiera habido ventas totales
+seguidas de recompras inmediatas — la fecha de apertura debería haberse reseteado con cada
+recompra tras un cierre completo, pero no lo hacía.
+
+**Causa**: `_fecha_apertura_posicion()`/`_texto_apertura_desde()` consideran una posición
+"cerrada del todo" cuando la cantidad acumulada (compras menos ventas) baja a `<= 1e-9`. Pero
+una venta de cripto casi nunca deja el saldo en 0 exacto — Alpaca ejecuta un poquito menos de lo
+pedido por redondeo (ej. comprar 0.000481, vender 0.000480 deja un resto de 0.000001), un valor
+mil veces mayor que ese umbral. El resto nunca se consideraba "cerrado", así que la posición
+seguía arrastrando indefinidamente la fecha de apertura original en vez de resetearla en cada
+recompra.
+
+**Corrección**: el umbral se sube a `UMBRAL_POSICION_CERRADA_DUST = 1e-5` en los tres sitios que
+tenían la misma lógica (`bot_alpaca.py`, `cartera_alpaca.py`, `cartera_ibkr.py` — aunque en
+IBKR el riesgo es menor porque usa un mecanismo de apertura distinto, `registrar_apertura_de_
+posicion`, no afectado por este bug de redondeo FIFO). Suficiente para absorber el resto de
+redondeo típico sin confundirlo con una posición real pequeña.
+
+## Comportamiento SIN cooldown tras una venta total (revisado 21 sept. 2026, pregunta del usuario)
+
+El usuario preguntó si el bot recompra "tal cual se ha vendido" y si eso estaba limitado. Aclarado:
+solo existe el **veto por MACD** (`macd_alcista_fn`, ver "Veto del scale-out por MACD alcista"
+más arriba), y ese veto SOLO aplica al scale-out (venta parcial) — pospone la venta parcial si el
+MACD de 5 min sigue alcista, para no vender y recomprar en minutos. Una **venta total** (trailing
+stop total o 2 velas de 5min bajistas) no tiene ningún veto ni cooldown: si en el mismo ciclo (o
+uno posterior) vuelve a haber señal de compra para el mismo ticker, el bot compra de nuevo sin
+esperar. Esto es intencional por diseño (cada ciclo evalúa la señal de compra de forma
+independiente), pero no hay ningún cooldown explícito implementado — si el usuario lo quiere, es
+un cambio pendiente de decidir, no un bug.
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

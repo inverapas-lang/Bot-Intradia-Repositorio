@@ -97,14 +97,19 @@ def _fecha_apertura_posicion(operaciones_clave_ordenadas, hasta_fecha_hora):
     """Igual que cartera_alpaca.py, pero sin distinguir REAL/PAPER: IBKR no
     guarda ese campo en el historial (la cuenta paper/real se distingue por
     el puerto de conexion, no por un campo en el registro), asi que no hace
-    falta filtrar por eso aqui."""
+    falta filtrar por eso aqui.
+
+    Mismo umbral UMBRAL_POSICION_CERRADA_DUST que cartera_alpaca.py/
+    bot_alpaca.py (bug real, sept. 2026: 1e-9 era demasiado ajustado frente
+    al redondeo tipico de una ejecucion real, sobre todo en cripto)."""
+    UMBRAL_POSICION_CERRADA_DUST = 1e-5
     cantidad_actual = 0.0
     fecha_apertura = None
     for o in operaciones_clave_ordenadas:
         if o["fecha_hora"] > hasta_fecha_hora:
             break
         if o["lado"] == "COMPRA":
-            if cantidad_actual <= 1e-9:
+            if cantidad_actual <= UMBRAL_POSICION_CERRADA_DUST:
                 fecha_apertura = o["fecha_hora"]
             cantidad_actual += o["cantidad"]
         else:
