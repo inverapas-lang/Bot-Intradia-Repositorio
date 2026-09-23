@@ -1228,17 +1228,40 @@ IBKR el riesgo es menor porque usa un mecanismo de apertura distinto, `registrar
 posicion`, no afectado por este bug de redondeo FIFO). Suficiente para absorber el resto de
 redondeo típico sin confundirlo con una posición real pequeña.
 
-## Comportamiento SIN cooldown tras una venta total (revisado 21 sept. 2026, pregunta del usuario)
+## Cooldown de recompra tras una venta total (21-23 sept. 2026, casos reales META y TSLA)
 
-El usuario preguntó si el bot recompra "tal cual se ha vendido" y si eso estaba limitado. Aclarado:
-solo existe el **veto por MACD** (`macd_alcista_fn`, ver "Veto del scale-out por MACD alcista"
-más arriba), y ese veto SOLO aplica al scale-out (venta parcial) — pospone la venta parcial si el
-MACD de 5 min sigue alcista, para no vender y recomprar en minutos. Una **venta total** (trailing
-stop total o 2 velas de 5min bajistas) no tiene ningún veto ni cooldown: si en el mismo ciclo (o
-uno posterior) vuelve a haber señal de compra para el mismo ticker, el bot compra de nuevo sin
-esperar. Esto es intencional por diseño (cada ciclo evalúa la señal de compra de forma
-independiente), pero no hay ningún cooldown explícito implementado — si el usuario lo quiere, es
-un cambio pendiente de decidir, no un bug.
+El usuario preguntó si el bot recompra "tal cual se ha vendido" y si eso estaba limitado.
+Investigado y confirmado con dos casos reales (META y TSLA, 23 sept.): el bot vendía la posición
+completa y, en el mismo ciclo o el siguiente, la recompraba casi al mismo precio (o ligeramente
+peor) — y después el precio bajaba, dejando la recompra en pérdidas.
+
+**Causa exacta encontrada**: la venta (trailing stop, o "2 velas de 5min bajistas") y la compra
+(alineación de 7 temporalidades: 1min/5min/15min/30min/1h/1día/1semana) son sistemas
+independientes, pero la regla de compra tolera que **solo 1 de las 7** esté en contra si es una
+temporalidad corta — incluida la de 5 minutos, la misma que puede haber disparado la venta por
+MACD. No es un bug de cálculo: las dos reglas nunca se pensaron juntas y podían solaparse,
+vendiendo y comprando de vuelta por el mismo motivo de fondo.
+
+**Solución implementada** (`bot_alpaca.py`): cooldown de `COOLDOWN_RECOMPRA_MINUTOS` (**15 min**,
+decisión del usuario) tras una venta TOTAL, salvo que el precio ya esté claramente por encima del
+precio de venta — así no se pierde una subida real, solo se bloquea la recompra "boba" al mismo
+precio o peor:
+- `UMBRAL_RECOMPRA_TRAS_VENTA_ACCIONES_PCT = 0.5` (coincide con `MARGEN_MINIMO_VENTA_PCT`).
+- `UMBRAL_RECOMPRA_TRAS_VENTA_CRIPTO_PCT = 1.0` (decisión del usuario: cripto más volátil, umbral
+  mayor para no bloquear en falso por ruido normal de precio).
+
+Mecanismo: `registrar_venta_total(ticker, precio)` (llamado justo tras confirmar una VENTA_TOTAL
+con precio real conocido, en vez de `cerrar_seguimiento_venta()` directamente) anota
+`_ultima_venta_total[ticker] = {fecha_hora, precio}`, persistido en `ARCHIVO_ESTADO_VENTA` (igual
+que el trailing stop, sobrevive a reinicios). `puede_comprar_tras_venta(ticker, precio_actual)` se
+consulta al principio del bucle de señales de compra (acciones y cripto) y bloquea con un log
+claro si el cooldown sigue activo y el precio no ha subido lo suficiente. La poda genérica de
+tickers ya cerrados (`ticker_viejo`, sin precio/hora fiable de venta) sigue usando
+`cerrar_seguimiento_venta()` sin anotar cooldown, ya que ahí no se sabe si la venta fue del bot o
+manual.
+
+Pendiente: no replicado todavía en `bot_completo.py`/IBKR (el problema se detectó y confirmó solo
+en Alpaca; replicar si el usuario lo pide).
 
 ## Pendiente / próximos pasos
 

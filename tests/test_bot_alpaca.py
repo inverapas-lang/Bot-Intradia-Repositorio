@@ -1751,6 +1751,49 @@ bot.obtener_cantidad_posicion_real = obtener_cantidad_original_reintento
 
 
 # ---------------------------------------------------------------------------
+# puede_comprar_tras_venta / registrar_venta_total (peticion del usuario,
+# sept. 2026: casos reales META y TSLA recomprados justo tras venderse, casi
+# al mismo precio, y despues bajaban). Cooldown de COOLDOWN_RECOMPRA_MINUTOS
+# tras una venta TOTAL, saltado si el precio sube lo suficiente (umbral
+# distinto para acciones/cripto).
+# ---------------------------------------------------------------------------
+ultima_venta_original = dict(bot._ultima_venta_total)
+bot._ultima_venta_total = {}
+
+sin_venta_previa, motivo_sin_venta = bot.puede_comprar_tras_venta("META", 750.0)
+check("puede_comprar_tras_venta: sin ninguna venta previa registrada -> permite comprar",
+      sin_venta_previa is True and motivo_sin_venta is None)
+
+bot.registrar_venta_total("META", 750.28)
+bloqueado_mismo_precio, motivo_bloqueo = bot.puede_comprar_tras_venta("META", 750.40)
+check("puede_comprar_tras_venta: justo tras vender, recomprar casi al mismo precio -> BLOQUEADO",
+      bloqueado_mismo_precio is False and "cooldown" in motivo_bloqueo, f"motivo={motivo_bloqueo!r}")
+
+permitido_subida_accion, _ = bot.puede_comprar_tras_venta("META", 750.28 * 1.006)  # +0.6% > umbral 0.5%
+check("puede_comprar_tras_venta (accion): si el precio sube >= 0.5% desde la venta, SI permite comprar "
+      "(no perderse una subida real)", permitido_subida_accion is True)
+
+bot.registrar_venta_total("BTC/USD", 84783.60)
+bloqueado_cripto_08pct, _ = bot.puede_comprar_tras_venta("BTC/USD", 84783.60 * 1.008)  # +0.8% < umbral cripto 1%
+check("puede_comprar_tras_venta (cripto): +0.8% NO llega al umbral de cripto (1%) -> sigue bloqueado",
+      bloqueado_cripto_08pct is False)
+permitido_cripto_15pct, _ = bot.puede_comprar_tras_venta("BTC/USD", 84783.60 * 1.015)  # +1.5% >= umbral 1%
+check("puede_comprar_tras_venta (cripto): +1.5% SI supera el umbral de cripto (1%) -> permite comprar",
+      permitido_cripto_15pct is True)
+
+# Pasado el cooldown completo, se permite comprar aunque el precio no haya subido nada.
+bot._ultima_venta_total["META"] = {
+    "fecha_hora": (datetime.now() - timedelta(minutes=bot.COOLDOWN_RECOMPRA_MINUTOS + 1)).isoformat(timespec="seconds"),
+    "precio": 750.28,
+}
+permitido_tras_cooldown, _ = bot.puede_comprar_tras_venta("META", 750.28)
+check(f"puede_comprar_tras_venta: pasados los {bot.COOLDOWN_RECOMPRA_MINUTOS} min de cooldown, permite "
+      "comprar aunque el precio no haya subido", permitido_tras_cooldown is True)
+
+bot._ultima_venta_total = ultima_venta_original
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()
