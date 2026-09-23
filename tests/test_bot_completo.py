@@ -2907,63 +2907,70 @@ mensajes_reconciliacion_ibkr = []
 notificar_telegram_original_reconciliacion_ibkr = bot.notificar_telegram
 bot.notificar_telegram = lambda msg: mensajes_reconciliacion_ibkr.append(msg)
 
-# Caso 1: el historial explica exactamente la cantidad que tiene IBKR -> sin aviso.
+# Caso 1: el historial explica exactamente la cantidad que tiene IBKR -> sin corregir nada.
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-01T10:00:00", "mercado": "US", "ticker": "AAPL",
                 "lado": "COMPRA", "cantidad": 2, "precio": 150.0, "comision": 1.0, "currency": "USD"}], f)
-bot._CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
 bot.verificar_historial_completo(_IBFalsoHistorial([_Posicion("AAPL", 2, 150.0)]))
-check("verificar_historial_completo (IBKR): historial completo -> no avisa",
+check("verificar_historial_completo (IBKR): historial completo -> no corrige nada",
       mensajes_reconciliacion_ibkr == [], f"mensajes={mensajes_reconciliacion_ibkr!r}")
 
-# Caso 2: IBKR tiene mas acciones de las que explica el historial -> avisa, sin repetir.
+# Caso 2 (bug real T): IBKR tiene mas acciones de las que explica el historial -> se autocorrige
+# con una COMPRA sintetica (usa el ultimo precio conocido del historial, 26.90, ya que IBKR no
+# expone un precio en vivo barato en el objeto de posicion). El siguiente ciclo ya no repite nada.
 mensajes_reconciliacion_ibkr.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-15T15:31:45", "mercado": "US", "ticker": "T",
                 "lado": "VENTA", "cantidad": 1, "precio": 26.90, "comision": 1.0, "currency": "USD"}], f)
-bot._CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
 bot.verificar_historial_completo(_IBFalsoHistorial([_Posicion("T", 3, 26.5)]))
-check("verificar_historial_completo (IBKR): falta una compra en el historial -> avisa por Telegram",
-      len(mensajes_reconciliacion_ibkr) == 1 and "T" in mensajes_reconciliacion_ibkr[0]
-      and "Historial incompleto" in mensajes_reconciliacion_ibkr[0],
+check("verificar_historial_completo (IBKR): falta una compra -> avisa de la correccion automatica",
+      len(mensajes_reconciliacion_ibkr) == 1 and "T (US)" in mensajes_reconciliacion_ibkr[0]
+      and "corregido automáticamente" in mensajes_reconciliacion_ibkr[0],
       f"mensajes={mensajes_reconciliacion_ibkr!r}")
+operaciones_t_ibkr = [o for o in bot.cargar_historial_operaciones() if o["ticker"] == "T"]
+check("verificar_historial_completo (IBKR): la COMPRA sintetica cierra la diferencia (4, ya que el "
+      "historial tenia -1 y IBKR tiene 3) usando el ultimo precio conocido (26.90) y con nota",
+      any(o["lado"] == "COMPRA" and abs(o["cantidad"] - 4) < 1e-6 and o["precio"] == 26.90
+          and "nota" in o for o in operaciones_t_ibkr), f"operaciones={operaciones_t_ibkr!r}")
+mensajes_reconciliacion_ibkr.clear()
 bot.verificar_historial_completo(_IBFalsoHistorial([_Posicion("T", 3, 26.5)]))
-check("verificar_historial_completo (IBKR): no repite el aviso en el siguiente ciclo mientras el hueco siga",
-      len(mensajes_reconciliacion_ibkr) == 1, f"mensajes={mensajes_reconciliacion_ibkr!r}")
+check("verificar_historial_completo (IBKR): tras la correccion, el siguiente ciclo ya no detecta ningun hueco",
+      mensajes_reconciliacion_ibkr == [], f"mensajes={mensajes_reconciliacion_ibkr!r}")
 
 # Caso 3: distintos mercados (misma divisa USD que CRYPTO) no deben mezclarse: una posicion de
 # CRYPTO no debe explicar un hueco de una accion US del mismo ticker (mercado_de_posicion las
-# distingue por secType).
+# distingue por secType). La clave US:BCH no tiene ningun precio en el historial (nunca se
+# registro nada ahi) -> no se puede autocorregir, se omite con un log (sin mensaje de Telegram);
+# la clave CRYPTO:BCH si tiene historial propio -> se autocorrige con una VENTA sintetica.
 mensajes_reconciliacion_ibkr.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-01T10:00:00", "mercado": "CRYPTO", "ticker": "BCH",
                 "lado": "COMPRA", "cantidad": 5, "precio": 300.0, "comision": 1.0, "currency": "USD"}], f)
-bot._CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
 posicion_us_bch = _Posicion("BCH", 5, 300.0)
 bot.verificar_historial_completo(_IBFalsoHistorial([posicion_us_bch]))
-check("verificar_historial_completo (IBKR): una compra CRYPTO no explica una posicion US del mismo ticker "
-      "(avisa de la compra US sin explicar Y de la CRYPTO que ya no tiene posicion, por separado)",
-      len(mensajes_reconciliacion_ibkr) == 2
-      and any("BCH (US)" in m and "falte registrar una compra" in m for m in mensajes_reconciliacion_ibkr)
-      and any("BCH (CRYPTO)" in m and "falte registrar una venta" in m for m in mensajes_reconciliacion_ibkr),
+check("verificar_historial_completo (IBKR): una compra CRYPTO no explica una posicion US del mismo "
+      "ticker -> solo se corrige la clave CRYPTO:BCH (tiene historial propio), no US:BCH (sin "
+      "ningun precio conocido, se omite con un log en vez de reventar)",
+      len(mensajes_reconciliacion_ibkr) == 1
+      and "BCH (CRYPTO)" in mensajes_reconciliacion_ibkr[0]
+      and "corregido automáticamente" in mensajes_reconciliacion_ibkr[0],
       f"mensajes={mensajes_reconciliacion_ibkr!r}")
 
 # Caso 4 (bug real AAPL en Alpaca, sept. 2026, mismo tipo de hueco posible aqui): el historial
 # dice que la posicion sigue abierta pero IBKR ya no la tiene (dos ventas no quedaron
-# registradas) -> avisa igualmente, aunque el ticker ya no aparezca entre ib.positions().
+# registradas) -> se autocorrige con una VENTA sintetica, aunque el ticker ya no aparezca entre
+# ib.positions().
 mensajes_reconciliacion_ibkr.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-15T19:49:53", "mercado": "US", "ticker": "AAPL",
                 "lado": "COMPRA", "cantidad": 2, "precio": 150.0, "comision": 1.0, "currency": "USD"}], f)
-bot._CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
 bot.verificar_historial_completo(_IBFalsoHistorial([]))  # AAPL ya no tiene posicion abierta en IBKR
-check("verificar_historial_completo (IBKR): falta una venta en el historial (posicion ya cerrada) -> avisa",
+check("verificar_historial_completo (IBKR): falta una venta (posicion ya cerrada) -> avisa de la correccion",
       len(mensajes_reconciliacion_ibkr) == 1 and "AAPL (US)" in mensajes_reconciliacion_ibkr[0]
-      and "falte registrar una venta" in mensajes_reconciliacion_ibkr[0], f"mensajes={mensajes_reconciliacion_ibkr!r}")
+      and "corregido automáticamente" in mensajes_reconciliacion_ibkr[0], f"mensajes={mensajes_reconciliacion_ibkr!r}")
 
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_reconciliacion_ibkr
 bot.notificar_telegram = notificar_telegram_original_reconciliacion_ibkr
-bot._CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
 
 
 # ---------------------------------------------------------------------------

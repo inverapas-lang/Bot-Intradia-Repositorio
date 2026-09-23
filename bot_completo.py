@@ -1787,7 +1787,7 @@ def cargar_historial_operaciones():
 
 
 def registrar_operacion_historial(mercado, ticker, lado, cantidad, precio, comision, currency,
-                                   coste_medio=None, beneficio_pct=None):
+                                   coste_medio=None, beneficio_pct=None, nota=None):
     registro = {
         "fecha_hora": datetime.now().isoformat(timespec="seconds"),
         "mercado": mercado,
@@ -1802,6 +1802,13 @@ def registrar_operacion_historial(mercado, ticker, lado, cantidad, precio, comis
         registro["coste_medio"] = coste_medio
     if beneficio_pct is not None:
         registro["beneficio_pct"] = beneficio_pct
+    # Nota opcional (sept. 2026): usada por verificar_historial_completo()
+    # para marcar los ajustes automaticos que ella misma inserta -no son
+    # operaciones reales ejecutadas por el bot, sino una correccion de
+    # cantidad para que el historial vuelva a explicar lo que IBKR dice
+    # tener de verdad-. No afecta a ningun calculo, solo queda como rastro.
+    if nota is not None:
+        registro["nota"] = nota
     try:
         operaciones = cargar_historial_operaciones()
         operaciones.append(registro)
@@ -1911,34 +1918,44 @@ def obtener_cantidad_posicion_real(ib, ticker, currency):
     return 0.0
 
 
-_CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
-
-
 def verificar_historial_completo(ib):
     """Version IBKR de la comprobacion equivalente de bot_alpaca.py (bug
     real, sept. 2026: una compra REAL de T y, despues, dos ventas de AAPL
     fuera de sesion regular se ejecutaron de verdad en Alpaca pero nunca
     quedaron registradas en el historial local -en un caso faltaba una
     COMPRA, en el otro una VENTA-, probablemente porque la confirmacion de
-    la orden tardo mas que la ventana de espera). Compara periodicamente,
-    para cada mercado+ticker con posicion en IBKR O CON OPERACIONES EN EL
-    HISTORIAL, la cantidad real contra la cantidad neta (compras menos
-    ventas) que explica ARCHIVO_HISTORIAL_OPERACIONES, y avisa por Telegram
-    en los dos sentidos: IBKR con MAS acciones de las que el historial
-    explica (falta una COMPRA) o con MENOS -incluido el caso de que la
-    posicion ya se haya cerrado del todo y el historial no lo sepa (falta
-    una VENTA)- -a diferencia de bot_alpaca.py, aqui no hace falta
-    distinguir REAL/PAPER: esa distincion la da el puerto de conexion
-    (ib.connect()), no un campo del historial-. Solo avisa una vez por
-    mercado+ticker mientras el hueco siga abierto."""
+    la orden tardo mas que la ventana de espera. Al activar esta
+    comprobacion en Alpaca se descubrio que el hueco afectaba a muchos mas
+    tickers de los pensados, asi que -peticion del usuario- en vez de solo
+    avisar, se AUTOCORRIGE).
+
+    Compara periodicamente, para cada mercado+ticker con posicion en IBKR O
+    CON OPERACIONES EN EL HISTORIAL, la cantidad real contra la cantidad
+    neta (compras menos ventas) que explica ARCHIVO_HISTORIAL_OPERACIONES.
+    Si no coinciden, inserta una operacion sintetica (marcada con `nota`,
+    no es una operacion real ejecutada por el bot) que cierra la
+    diferencia -IBKR con MAS de lo que el historial explica se corrige con
+    una COMPRA sintetica, con MENOS con una VENTA sintetica-, usando el
+    ULTIMO precio/divisa conocidos de ese mercado+ticker en el propio
+    historial (a diferencia de Alpaca, IBKR no expone un precio en vivo
+    barato en el objeto de posicion, asi que no se intenta pedir uno
+    nuevo). Avisa por Telegram de la correccion aplicada. A diferencia de
+    bot_alpaca.py, aqui no hace falta distinguir REAL/PAPER: esa distincion
+    la da el puerto de conexion (ib.connect()), no un campo del historial.
+    Al corregir la cantidad en el momento, el hueco no vuelve a aparecer en
+    el siguiente ciclo -no hace falta ninguna deduplicacion de avisos-."""
     cantidades_historial = {}
     tickers_por_clave = {}
+    ultimo_precio_historial = {}
+    ultima_currency_historial = {}
     for o in cargar_historial_operaciones():
         clave = clave_historial(o["mercado"], o["ticker"])
         cantidades_historial[clave] = cantidades_historial.get(clave, 0.0) + (
             o["cantidad"] if o["lado"] == "COMPRA" else -o["cantidad"]
         )
         tickers_por_clave[clave] = (o["ticker"], o["mercado"])
+        ultimo_precio_historial[clave] = o["precio"]
+        ultima_currency_historial[clave] = o["currency"]
     ib.reqPositions()
     ib.sleep(1)
     cantidades_reales = {}
@@ -1955,30 +1972,31 @@ def verificar_historial_completo(ib):
         cantidad_real = cantidades_reales.get(clave, 0.0)
         cantidad_historial = cantidades_historial.get(clave, 0.0)
         diferencia = cantidad_real - cantidad_historial
-        if diferencia > 1e-6:
-            if clave not in _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO:
-                _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO.add(clave)
-                log(f"AVISO: {ticker} ({mercado}) tiene {cantidad_real} en IBKR pero el historial "
-                    f"solo explica {cantidad_historial}. Puede faltar registrar una compra.")
-                notificar_telegram(
-                    f"⚠️ <b>Historial incompleto: {ticker} ({mercado})</b>\n"
-                    f"IBKR tiene {formato_es(cantidad_real, 4)} pero el historial local solo "
-                    f"explica {formato_es(cantidad_historial, 4)}.\n"
-                    f"Puede que falte registrar una compra (revisar las ejecuciones de IBKR)."
-                )
-        elif diferencia < -1e-6:
-            if clave not in _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO:
-                _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO.add(clave)
-                log(f"AVISO: el historial dice que hay {cantidad_historial} de {ticker} ({mercado}) "
-                    f"pero IBKR solo tiene {cantidad_real}. Puede faltar registrar una venta.")
-                notificar_telegram(
-                    f"⚠️ <b>Historial incompleto: {ticker} ({mercado})</b>\n"
-                    f"El historial local dice {formato_es(cantidad_historial, 4)} pero IBKR solo "
-                    f"tiene {formato_es(cantidad_real, 4)}.\n"
-                    f"Puede que falte registrar una venta (revisar las ejecuciones de IBKR)."
-                )
-        else:
-            _CLAVES_AVISADAS_HISTORIAL_INCOMPLETO.discard(clave)
+        if abs(diferencia) <= 1e-6:
+            continue
+        lado_ajuste = "COMPRA" if diferencia > 0 else "VENTA"
+        cantidad_ajuste = abs(diferencia)
+        precio_ajuste = ultimo_precio_historial.get(clave)
+        currency_ajuste = ultima_currency_historial.get(clave, "USD")
+        if precio_ajuste is None:
+            log(f"AVISO: {ticker} ({mercado}) tiene un hueco de historial (IBKR {cantidad_real:g}, "
+                f"historial {cantidad_historial:g}) pero no hay ningun precio disponible para "
+                f"corregirlo automaticamente, se omite este ciclo.")
+            continue
+        registrar_operacion_historial(mercado, ticker, lado_ajuste, cantidad_ajuste, precio_ajuste,
+                                       0.0, currency_ajuste,
+                                       nota="ajuste automatico: verificar_historial_completo")
+        log(f"AJUSTE AUTOMATICO: {ticker} ({mercado}) - IBKR tiene {cantidad_real:g} pero el historial "
+            f"solo explicaba {cantidad_historial:g}; se registra una {lado_ajuste} de {cantidad_ajuste:g} "
+            f"a {precio_ajuste:g} para igualarlos.")
+        notificar_telegram(
+            f"🔧 <b>Historial corregido automáticamente: {ticker} ({mercado})</b>\n"
+            f"IBKR tiene {formato_es(cantidad_real, 4)} pero el historial local explicaba "
+            f"{formato_es(cantidad_historial, 4)}.\n"
+            f"Se ha añadido una {lado_ajuste} de {formato_es(cantidad_ajuste, 4)} a "
+            f"{formato_es(precio_ajuste)} {currency_ajuste} para igualar el historial con los datos "
+            f"reales de IBKR."
+        )
 
 
 def verificar_posicion_tras_orden_no_confirmada(ib, contrato, cantidad_antes, prefijo_log):

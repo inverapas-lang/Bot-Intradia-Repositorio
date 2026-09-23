@@ -1246,6 +1246,33 @@ Si la cantidad real es mayor que la que explica el historial, se avisa por Teleg
 (`⚠️ Historial incompleto: TICKER`), una sola vez por ticker (o ticker+mercado en IBKR) mientras
 el hueco siga abierto — se resetea solo si la posición se cierra o el historial se pone al día.
 
+**Actualización (23 sept. 2026)**: al activar esta comprobación en Alpaca, tras un reinicio del
+bot se descubrió que el hueco afectaba a **muchos más tickers** de los que se pensaba (T, WMT,
+SMCI, CVX, META, AAPL, GOOGL, XOM, QCOM, INTC, C, DIS, WFC, y varios de cripto con diferencias
+minúsculas de redondeo). Además, como la lista de "ya avisado" vivía solo en memoria, cada
+reinicio del bot volvía a soltar TODOS los avisos pendientes de golpe.
+
+Petición del usuario ("que el bot coja los datos de Alpaca/IBKR"): en vez de solo avisar, la
+función **autocorrige** el historial insertando una operación sintética (marcada con un campo
+`nota`, para distinguirla de una operación real) que cierra exactamente la diferencia:
+- Si la cuenta tiene MÁS de lo que el historial explica → COMPRA sintética.
+- Si tiene MENOS (incluida una posición ya cerrada del todo) → VENTA sintética.
+
+El precio de la operación sintética usa el precio **en vivo** de la posición si sigue abierta
+(`Position.current_price` en Alpaca; IBKR no expone un precio en vivo barato en el objeto de
+posición, así que ahí siempre se usa el último precio conocido) o, si ya no hay posición
+abierta, el **último precio conocido de ese ticker en el propio historial** (mejor aproximación
+disponible — nunca hay forma de saber el precio real de una operación que nunca se registró). Al
+corregir la cantidad en el momento, el hueco no reaparece en el siguiente ciclo — ya no hace
+falta ninguna lista de "ya avisado" (se ha eliminado `_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO`/
+`_CLAVES_AVISADAS_HISTORIAL_INCOMPLETO`).
+
+Nota importante: esto **no inventa un beneficio/pérdida real** — las operaciones sintéticas no
+llevan `beneficio_pct`, y el P/L en vivo de `/cartera` sigue viniendo siempre del precio medio
+real de Alpaca/IBKR, nunca del historial. Solo se corrige la *cantidad* para que el historial
+vuelva a ser internamente consistente (afecta a "abierta desde" y a los totales de `/hoy`/
+`/semana`, no al dinero).
+
 ## Cooldown de recompra tras una venta total (sept. 2026, bug real: META/TSLA recomprados al mismo precio)
 
 **Caso real** (Alpaca, 23 sept. 2026): el bot vendía una posición completa y, en el mismo ciclo o

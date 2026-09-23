@@ -1655,65 +1655,77 @@ bot.ALPACA_PAPER = False
 mensajes_reconciliacion = []
 bot.notificar_telegram = lambda msg: mensajes_reconciliacion.append(msg)
 
-# Caso 1: el historial explica exactamente la cantidad que tiene Alpaca -> sin aviso.
+# Caso 1: el historial explica exactamente la cantidad que tiene Alpaca -> sin corregir nada.
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-01T10:00:00", "ticker": "AAPL",
                 "lado": "COMPRA", "cantidad": 1.0, "precio": 200.0, "modo": "REAL"}], f)
-bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
-bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="AAPL", qty="1.0")]
+bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="AAPL", qty="1.0", current_price="205.0")]
 bot.verificar_historial_completo()
-check("verificar_historial_completo: historial completo -> no avisa",
+check("verificar_historial_completo: historial completo -> no corrige nada",
       mensajes_reconciliacion == [], f"mensajes={mensajes_reconciliacion!r}")
 
-# Caso 2: Alpaca tiene mas acciones de T de las que explica el historial (falta una compra) -> avisa.
+# Caso 2 (bug real T, sept. 2026): la COMPRA original nunca se registro, pero las dos VENTAS que
+# la cerraron del todo si -Alpaca ya no tiene ninguna posicion (real=0), y el historial explica
+# -0.867953083 (demasiadas ventas sin ninguna compra) -> se autocorrige con una COMPRA sintetica
+# que cierra exactamente esa diferencia, usando el ULTIMO precio conocido del historial (no hay
+# posicion abierta de la que leer un precio en vivo). El siguiente ciclo ya no detecta ningun hueco.
 mensajes_reconciliacion.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-15T15:31:45", "ticker": "T",
                 "lado": "VENTA", "cantidad": 0.434, "precio": 26.90, "modo": "REAL"},
                {"fecha_hora": "2026-09-15T15:35:00", "ticker": "T",
                 "lado": "VENTA", "cantidad": 0.433953083, "precio": 26.95, "modo": "REAL"}], f)
-bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
-bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="T", qty="0.867953083")]
+bot.obtener_posiciones = lambda: []  # T ya no tiene posicion abierta en Alpaca (se cerro del todo)
 bot.verificar_historial_completo()
-check("verificar_historial_completo: falta una compra en el historial -> avisa por Telegram",
+check("verificar_historial_completo: falta una compra -> avisa de la correccion automatica por Telegram",
       len(mensajes_reconciliacion) == 1 and "T" in mensajes_reconciliacion[0]
-      and "Historial incompleto" in mensajes_reconciliacion[0], f"mensajes={mensajes_reconciliacion!r}")
-check("verificar_historial_completo: no repite el aviso en el siguiente ciclo mientras el hueco siga",
-      len(mensajes_reconciliacion) == 1)
+      and "corregido automáticamente" in mensajes_reconciliacion[0], f"mensajes={mensajes_reconciliacion!r}")
+operaciones_t_corregidas = [o for o in bot.cargar_historial_operaciones() if o["ticker"] == "T"]
+check("verificar_historial_completo: la COMPRA sintetica cierra exactamente la diferencia (0.867953083), "
+      "usa el ultimo precio conocido del historial (26.95) y queda marcada con una nota",
+      any(o["lado"] == "COMPRA" and abs(o["cantidad"] - 0.867953083) < 1e-6 and o["precio"] == 26.95
+          and "nota" in o for o in operaciones_t_corregidas),
+      f"operaciones={operaciones_t_corregidas!r}")
+mensajes_reconciliacion.clear()
 bot.verificar_historial_completo()
-check("verificar_historial_completo: segunda llamada seguida, sin cambios -> sigue sin repetir el aviso",
-      len(mensajes_reconciliacion) == 1, f"mensajes={mensajes_reconciliacion!r}")
+check("verificar_historial_completo: tras la correccion, el siguiente ciclo ya no detecta ningun hueco",
+      mensajes_reconciliacion == [], f"mensajes={mensajes_reconciliacion!r}")
 
-# Caso 3: una compra PAPER no debe contar para explicar una posicion en modo REAL.
+# Caso 3: una compra PAPER no debe contar para explicar una posicion en modo REAL -> se autocorrige
+# igualmente (el hueco es real desde el punto de vista de la cuenta REAL actual).
 mensajes_reconciliacion.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-01T10:00:00", "ticker": "WMT",
                 "lado": "COMPRA", "cantidad": 2.0, "precio": 90.0, "modo": "PAPER"}], f)
-bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
-bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="WMT", qty="2.0")]
+bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="WMT", qty="2.0", current_price="95.0")]
 bot.verificar_historial_completo()
-check("verificar_historial_completo: una compra PAPER no cuenta para una posicion REAL -> avisa igualmente",
+check("verificar_historial_completo: una compra PAPER no cuenta para una posicion REAL -> se autocorrige igualmente",
       len(mensajes_reconciliacion) == 1, f"mensajes={mensajes_reconciliacion!r}")
 
 # Caso 4 (bug real AAPL, sept. 2026): el historial dice que la posicion sigue abierta pero Alpaca
-# ya la vendio del todo (dos VENTAS fuera de sesion no quedaron registradas) -> avisa igualmente,
-# aunque el ticker ya NO aparezca entre las posiciones abiertas de Alpaca.
+# ya la vendio del todo (dos VENTAS fuera de sesion no quedaron registradas). Como ya no hay
+# posicion abierta (no hay Position.current_price disponible), la VENTA sintetica usa el ULTIMO
+# precio conocido en el propio historial (330.306, el de la compra original) como aproximacion.
 mensajes_reconciliacion.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-15T19:49:53", "ticker": "AAPL",
                 "lado": "COMPRA", "cantidad": 0.092853293, "precio": 330.306, "modo": "REAL"}], f)
-bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
 bot.obtener_posiciones = lambda: []  # AAPL ya no tiene posicion abierta en Alpaca (se vendio del todo)
 bot.verificar_historial_completo()
-check("verificar_historial_completo: falta una venta en el historial (posicion ya cerrada en Alpaca) -> avisa",
+check("verificar_historial_completo: falta una venta (posicion ya cerrada) -> avisa de la correccion",
       len(mensajes_reconciliacion) == 1 and "AAPL" in mensajes_reconciliacion[0]
-      and "falte registrar una venta" in mensajes_reconciliacion[0], f"mensajes={mensajes_reconciliacion!r}")
+      and "corregido automáticamente" in mensajes_reconciliacion[0], f"mensajes={mensajes_reconciliacion!r}")
+operaciones_aapl_corregidas = [o for o in bot.cargar_historial_operaciones() if o["ticker"] == "AAPL"]
+check("verificar_historial_completo: la VENTA sintetica usa el ultimo precio conocido del historial "
+      "(no hay posicion abierta de la que leer un precio en vivo)",
+      any(o["lado"] == "VENTA" and abs(o["cantidad"] - 0.092853293) < 1e-6 and o["precio"] == 330.306
+          for o in operaciones_aapl_corregidas),
+      f"operaciones={operaciones_aapl_corregidas!r}")
 
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_reconciliacion
 bot.ALPACA_PAPER = paper_original_reconciliacion
 bot.obtener_posiciones = obtener_posiciones_original_reconciliacion
 bot.notificar_telegram = notificar_telegram_original_slippage
-bot._TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
 
 
 # ---------------------------------------------------------------------------

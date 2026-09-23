@@ -1195,7 +1195,8 @@ def cargar_historial_operaciones():
         return []
 
 
-def registrar_operacion_historial(ticker, lado, cantidad, precio, coste_medio=None, beneficio_pct=None):
+def registrar_operacion_historial(ticker, lado, cantidad, precio, coste_medio=None, beneficio_pct=None,
+                                   nota=None):
     registro = {
         "fecha_hora": datetime.now().isoformat(timespec="seconds"),
         "ticker": ticker,
@@ -1213,6 +1214,13 @@ def registrar_operacion_historial(ticker, lado, cantidad, precio, coste_medio=No
         registro["coste_medio"] = coste_medio
     if beneficio_pct is not None:
         registro["beneficio_pct"] = beneficio_pct
+    # Nota opcional (sept. 2026): usada por verificar_historial_completo()
+    # para marcar los ajustes automaticos que ella misma inserta -no son
+    # operaciones reales ejecutadas por el bot, sino una correccion de
+    # cantidad para que el historial vuelva a explicar lo que Alpaca dice
+    # tener de verdad-. No afecta a ningun calculo, solo queda como rastro.
+    if nota is not None:
+        registro["nota"] = nota
     try:
         operaciones = cargar_historial_operaciones()
         operaciones.append(registro)
@@ -1323,9 +1331,6 @@ def formatear_notificacion_venta(etiqueta_accion, ticker, cantidad, precio, bene
     return "\n".join(lineas)
 
 
-_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO = set()
-
-
 def verificar_historial_completo():
     """BUG REAL DE PRODUCCION (sept. 2026): una compra de T se ejecuto de
     verdad en Alpaca -confirmado en el extracto de "Activity" de la propia
@@ -1336,57 +1341,68 @@ def verificar_historial_completo():
     esta vez el historial se quedo pensando que la posicion seguia abierta
     cuando Alpaca ya la habia vendido del todo (falta una VENTA). En ambos
     casos el hueco solo se descubrio dias despues mirando el historial a
-    mano, o gracias a los correos de confirmacion de Alpaca.
+    mano, o gracias a los correos de confirmacion de Alpaca. Al activar
+    esta comprobacion se descubrio que el hueco afectaba a MUCHOS mas
+    tickers de los que se pensaba (peticion del usuario: "que el bot coja
+    los datos de Alpaca" en vez de solo avisar).
 
     En vez de perseguir cada condicion de carrera por separado, esta
     comprobacion compara periodicamente, para cada ticker con posicion
     REAL/PAPER en Alpaca O CON OPERACIONES EN EL HISTORIAL, la cantidad que
     dice Alpaca contra la cantidad neta (compras menos ventas) que se
-    deduce del historial local, y avisa por Telegram en los dos sentidos:
-    Alpaca con MAS acciones de las que el historial explica (falta una
-    COMPRA) o con MENOS (falta una VENTA, incluido el caso de que la
-    posicion ya se haya cerrado del todo y el historial no lo sepa). Solo
-    avisa una vez por ticker mientras el hueco siga abierto
-    (_TICKERS_AVISADOS_HISTORIAL_INCOMPLETO), para no repetir el aviso en
-    cada ciclo."""
+    deduce del historial local. Si no coinciden, en vez de solo avisar,
+    AUTOCORRIGE el historial insertando una operacion sintetica (marcada
+    con `nota`, no es una operacion real ejecutada por el bot) que cierra
+    la diferencia -Alpaca con MAS de lo que el historial explica se
+    corrige con una COMPRA sintetica, con MENOS con una VENTA sintetica-,
+    usando el precio actual de la posicion si esta abierta (Position.
+    current_price) o, si ya no hay posicion, el ultimo precio conocido de
+    ese ticker en el propio historial (mejor aproximacion disponible, no
+    hay forma de saber el precio real de una operacion que nunca se
+    registro). Avisa por Telegram de la correccion aplicada. Al corregir
+    la cantidad en el momento, el hueco no vuelve a aparecer en el
+    siguiente ciclo -no hace falta ninguna deduplicacion de avisos-."""
     modo_actual = "PAPER" if ALPACA_PAPER else "REAL"
     cantidades_historial = {}
+    ultimo_precio_historial = {}
     for o in cargar_historial_operaciones():
         if o.get("modo", "PAPER") != modo_actual:
             continue
         cantidades_historial[o["ticker"]] = cantidades_historial.get(o["ticker"], 0.0) + (
             o["cantidad"] if o["lado"] == "COMPRA" else -o["cantidad"]
         )
-    cantidades_reales = {p.symbol: float(p.qty) for p in obtener_posiciones()}
+        ultimo_precio_historial[o["ticker"]] = o["precio"]
+    posiciones_reales = {p.symbol: p for p in obtener_posiciones()}
+    cantidades_reales = {ticker: float(p.qty) for ticker, p in posiciones_reales.items()}
     tickers_a_revisar = set(cantidades_historial) | set(cantidades_reales)
     for ticker in tickers_a_revisar:
         cantidad_real = cantidades_reales.get(ticker, 0.0)
         cantidad_historial = cantidades_historial.get(ticker, 0.0)
         diferencia = cantidad_real - cantidad_historial
-        if diferencia > 1e-6:
-            if ticker not in _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO:
-                _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.add(ticker)
-                log(f"AVISO: {ticker} tiene {cantidad_real} acciones en Alpaca pero el historial "
-                    f"solo explica {cantidad_historial} ({modo_actual}). Puede faltar registrar una compra.")
-                notificar_telegram(
-                    f"⚠️ <b>Historial incompleto: {ticker}</b>\n"
-                    f"Alpaca tiene {formato_es(cantidad_real, 4)} pero el historial local solo "
-                    f"explica {formato_es(cantidad_historial, 4)} ({modo_actual}).\n"
-                    f"Puede que falte registrar una compra (revisar el extracto de Alpaca)."
-                )
-        elif diferencia < -1e-6:
-            if ticker not in _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO:
-                _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.add(ticker)
-                log(f"AVISO: el historial dice que hay {cantidad_historial} acciones de {ticker} "
-                    f"({modo_actual}) pero Alpaca solo tiene {cantidad_real}. Puede faltar registrar una venta.")
-                notificar_telegram(
-                    f"⚠️ <b>Historial incompleto: {ticker}</b>\n"
-                    f"El historial local dice {formato_es(cantidad_historial, 4)} ({modo_actual}) pero "
-                    f"Alpaca solo tiene {formato_es(cantidad_real, 4)}.\n"
-                    f"Puede que falte registrar una venta (revisar el extracto de Alpaca)."
-                )
-        else:
-            _TICKERS_AVISADOS_HISTORIAL_INCOMPLETO.discard(ticker)
+        if abs(diferencia) <= 1e-6:
+            continue
+        lado_ajuste = "COMPRA" if diferencia > 0 else "VENTA"
+        cantidad_ajuste = abs(diferencia)
+        pos = posiciones_reales.get(ticker)
+        precio_ajuste = float(pos.current_price) if pos is not None and pos.current_price else \
+            ultimo_precio_historial.get(ticker)
+        if precio_ajuste is None:
+            log(f"AVISO: {ticker} tiene un hueco de historial (Alpaca {cantidad_real:g}, historial "
+                f"{cantidad_historial:g}, {modo_actual}) pero no hay ningun precio disponible para "
+                f"corregirlo automaticamente, se omite este ciclo.")
+            continue
+        registrar_operacion_historial(ticker, lado_ajuste, cantidad_ajuste, precio_ajuste,
+                                       nota="ajuste automatico: verificar_historial_completo")
+        log(f"AJUSTE AUTOMATICO: {ticker} - Alpaca tiene {cantidad_real:g} pero el historial solo "
+            f"explicaba {cantidad_historial:g} ({modo_actual}); se registra una {lado_ajuste} de "
+            f"{cantidad_ajuste:g} a {precio_ajuste:g} para igualarlos.")
+        notificar_telegram(
+            f"🔧 <b>Historial corregido automáticamente: {ticker}</b>\n"
+            f"Alpaca tiene {formato_es(cantidad_real, 4)} pero el historial local explicaba "
+            f"{formato_es(cantidad_historial, 4)} ({modo_actual}).\n"
+            f"Se ha añadido una {lado_ajuste} de {formato_es(cantidad_ajuste, 4)} a "
+            f"{formato_es(precio_ajuste)} USD para igualar el historial con los datos reales de Alpaca."
+        )
 
 
 def obtener_ejecucion_real(order_id, cantidad_prevista, precio_previsto):
