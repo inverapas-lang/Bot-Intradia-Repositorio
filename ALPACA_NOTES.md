@@ -1260,8 +1260,11 @@ tickers ya cerrados (`ticker_viejo`, sin precio/hora fiable de venta) sigue usan
 `cerrar_seguimiento_venta()` sin anotar cooldown, ya que ahí no se sabe si la venta fue del bot o
 manual.
 
-Pendiente: no replicado todavía en `bot_completo.py`/IBKR (el problema se detectó y confirmó solo
-en Alpaca; replicar si el usuario lo pide).
+**Actualización**: a petición del usuario, replicado también en `bot_completo.py`/IBKR
+(`registrar_venta_total(clave, precio)`/`puede_comprar_tras_venta(clave, precio_actual)`, misma
+lógica y mismos valores de cooldown/umbral) — ver `NOTES.md` para el detalle. La clave usada es
+`clave_historial(mercado, ticker)` (`"MERCADO:TICKER"`), y el umbral de cripto se decide mirando
+si la clave empieza por `"CRYPTO:"`.
 
 ## Pendiente / próximos pasos
 

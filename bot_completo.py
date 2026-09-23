@@ -1404,17 +1404,26 @@ _maximo_beneficio_neto_por_posicion = {}  # clave_historial(mercado, ticker) -> 
 PORCENTAJE_SCALE_OUT = 0.5
 _scale_out_realizado = set()  # claves ya con su venta parcial hecha (mismo formato que el dict de arriba)
 
+# Cooldown de recompra tras una venta TOTAL (mismo bug real que en
+# bot_alpaca.py, casos META/TSLA: se recompraba justo tras vender, casi al
+# mismo precio, y despues bajaba - ver COOLDOWN_RECOMPRA_MINUTOS mas abajo).
+# clave (clave_historial) -> {"fecha_hora": iso, "precio": float con el
+# precio REAL de la venta}.
+_ultima_venta_total = {}
+
 
 def cargar_estado_venta():
-    """Recupera _maximo_beneficio_neto_por_posicion/_scale_out_realizado
-    guardados en disco (ver ARCHIVO_ESTADO_VENTA) - se llama una vez al
-    arrancar el bot, para no perder el trailing stop en cada reinicio."""
-    global _maximo_beneficio_neto_por_posicion, _scale_out_realizado
+    """Recupera _maximo_beneficio_neto_por_posicion/_scale_out_realizado/
+    _ultima_venta_total guardados en disco (ver ARCHIVO_ESTADO_VENTA) - se
+    llama una vez al arrancar el bot, para no perder el trailing stop ni el
+    cooldown de recompra en cada reinicio."""
+    global _maximo_beneficio_neto_por_posicion, _scale_out_realizado, _ultima_venta_total
     try:
         with open(ARCHIVO_ESTADO_VENTA, "r", encoding="utf-8") as f:
             datos = json.load(f)
         _maximo_beneficio_neto_por_posicion = dict(datos.get("maximo_beneficio_neto_por_posicion", {}))
         _scale_out_realizado = set(datos.get("scale_out_realizado", []))
+        _ultima_venta_total = dict(datos.get("ultima_venta_total", {}))
         if _maximo_beneficio_neto_por_posicion or _scale_out_realizado:
             log(f"Estado de venta (trailing stop) recuperado de {ARCHIVO_ESTADO_VENTA}: "
                 f"{len(_maximo_beneficio_neto_por_posicion)} posicion(es) trackeada(s).")
@@ -1428,6 +1437,7 @@ def _guardar_estado_venta():
             json.dump({
                 "maximo_beneficio_neto_por_posicion": _maximo_beneficio_neto_por_posicion,
                 "scale_out_realizado": sorted(_scale_out_realizado),
+                "ultima_venta_total": _ultima_venta_total,
             }, f, indent=2, sort_keys=True)
     except OSError as e:
         log(f"No se pudo guardar el estado de venta ({ARCHIVO_ESTADO_VENTA}): {type(e).__name__}: {e}")
@@ -1551,6 +1561,61 @@ def cerrar_seguimiento_venta(clave):
     _maximo_beneficio_neto_por_posicion.pop(clave, None)
     _scale_out_realizado.discard(clave)
     _guardar_estado_venta()
+
+
+# BUG REAL DE PRODUCCION (sept. 2026, mismo caso que en bot_alpaca.py:
+# META/TSLA se recompraban justo tras venderse, casi al mismo precio, y
+# despues bajaban). Causa: la venta (trailing stop o MACD 5min bajista) y la
+# compra (alineacion de varias temporalidades, que tolera que una sola corta
+# este en contra) son sistemas independientes que pueden coincidir en el
+# mismo ciclo sin ser realmente contradictorios entre si, pero el resultado
+# practico era comprar de vuelta al mismo precio que se acababa de vender.
+# Peticion del usuario: bloquear la recompra un tiempo tras vender, PERO sin
+# perderse una subida real si el precio sigue subiendo de verdad.
+COOLDOWN_RECOMPRA_MINUTOS = 15
+UMBRAL_RECOMPRA_TRAS_VENTA_ACCIONES_PCT = 0.5
+UMBRAL_RECOMPRA_TRAS_VENTA_CRIPTO_PCT = 1.0
+
+
+def registrar_venta_total(clave, precio):
+    """Igual que cerrar_seguimiento_venta(), pero ademas anota el precio y
+    la hora de la venta para el cooldown de recompra (ver
+    puede_comprar_tras_venta()). Llamar SOLO justo tras confirmar una
+    VENTA_TOTAL ejecutada por el propio bot con un precio real conocido -NO
+    en la poda generica de posiciones que ya no estan en cartera (ahi no se
+    sabe ni cuando ni a que precio se vendio, podria ser una venta manual
+    fuera del bot; sigue usando cerrar_seguimiento_venta() directamente)."""
+    cerrar_seguimiento_venta(clave)
+    _ultima_venta_total[clave] = {"fecha_hora": datetime.now().isoformat(timespec="seconds"), "precio": precio}
+    _guardar_estado_venta()
+
+
+def puede_comprar_tras_venta(clave, precio_actual):
+    """Devuelve (True, None) si no hay ningun cooldown activo para esta
+    clave (mercado:ticker), o (False, motivo) si hay que bloquear la
+    compra. El cooldown dura COOLDOWN_RECOMPRA_MINUTOS desde la ultima
+    venta TOTAL, pero se salta si el precio actual ya esta claramente por
+    encima (>= el umbral de la clase de activo) del precio al que se
+    vendio -para no perderse una subida real, solo bloquear la recompra
+    "boba" al mismo precio o peor."""
+    info = _ultima_venta_total.get(clave)
+    if info is None:
+        return True, None
+    fecha_venta = datetime.fromisoformat(info["fecha_hora"])
+    minutos_transcurridos = (datetime.now() - fecha_venta).total_seconds() / 60
+    if minutos_transcurridos >= COOLDOWN_RECOMPRA_MINUTOS:
+        return True, None
+    precio_venta = info["precio"]
+    umbral_pct = (UMBRAL_RECOMPRA_TRAS_VENTA_CRIPTO_PCT if clave.startswith("CRYPTO:")
+                  else UMBRAL_RECOMPRA_TRAS_VENTA_ACCIONES_PCT)
+    subida_pct = (precio_actual - precio_venta) / precio_venta * 100 if precio_venta else 0.0
+    if subida_pct >= umbral_pct:
+        return True, None
+    minutos_restantes = COOLDOWN_RECOMPRA_MINUTOS - minutos_transcurridos
+    motivo = (f"cooldown de recompra activo (vendido hace {minutos_transcurridos:.1f}min a {precio_venta:g}, "
+              f"ahora {precio_actual:g} = {subida_pct:+.2f}%, hace falta +{umbral_pct}% o esperar "
+              f"{minutos_restantes:.1f}min mas)")
+    return False, motivo
 
 
 CONTRATO_EUR_USD = Forex('EURUSD')  # contrato de forex para el tipo de cambio real (ver mas abajo)
@@ -1964,7 +2029,7 @@ def _registrar_venta_a_posteriori(mercado, contrato, cantidad_antes, cantidad_ah
         beneficio_pct, decimales_cantidad=6,
         sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
     if cantidad_ahora <= 1e-6:
-        cerrar_seguimiento_venta(clave_posicion)
+        registrar_venta_total(clave_posicion, precio_actual)
 
 
 def mercado_de_posicion(pos):
@@ -2183,7 +2248,7 @@ def revisar_ventas(ib, mercados=None):
                         etiqueta_cripto, contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
                         contrato.currency, beneficio_pct_real, decimales_cantidad=6))
                     if accion_cripto == "VENTA_TOTAL":
-                        cerrar_seguimiento_venta(clave_posicion_cripto)
+                        registrar_venta_total(clave_posicion_cripto, precio_ejecucion)
                 else:
                     cantidad_ahora_cripto = verificar_posicion_tras_orden_no_confirmada(
                         ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
@@ -2248,7 +2313,7 @@ def revisar_ventas(ib, mercados=None):
                     notificar_telegram(formatear_notificacion_venta(
                         "VENTA FORZADA", contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
                         contrato.currency, beneficio_pct_real))
-                    cerrar_seguimiento_venta(clave_historial(mercado, contrato.symbol))
+                    registrar_venta_total(clave_historial(mercado, contrato.symbol), precio_ejecucion)
                 else:
                     cantidad_ahora_forzada = verificar_posicion_tras_orden_no_confirmada(
                         ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
@@ -2373,7 +2438,7 @@ def revisar_ventas(ib, mercados=None):
                     etiqueta_accion, contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
                     contrato.currency, beneficio_pct_real))
                 if accion == "VENTA_TOTAL":
-                    cerrar_seguimiento_venta(clave_posicion)
+                    registrar_venta_total(clave_posicion, precio_ejecucion)
             else:
                 cantidad_ahora = verificar_posicion_tras_orden_no_confirmada(
                     ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
@@ -2650,6 +2715,12 @@ def revisar_compras(ib, mercados=None):
 
             precio_actual = velas_precio[-1].close
             currency = activo["currency"]
+
+            puede_comprar, motivo_cooldown = puede_comprar_tras_venta(
+                clave_historial(activo["mercado"], ticker), precio_actual)
+            if not puede_comprar:
+                log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA pero {motivo_cooldown}, se omite.")
+                continue
 
             # Pre/postmercado de US: liquidez mucho menor que en sesion
             # regular, asi que la compra se manda como orden LIMITADA al

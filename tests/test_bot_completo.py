@@ -1060,6 +1060,7 @@ try:
         telegram_capturados.clear()
         bot._maximo_beneficio_neto_por_posicion = {"US:YYY": 2.0}
         bot._scale_out_realizado = set()
+        bot._ultima_venta_total = {}
         contrato_yyy = _ContratoFalso("YYY")
         contrato_yyy.currency = "USD"
         bot._registrar_venta_a_posteriori("US", contrato_yyy, cantidad_antes=10.0, cantidad_ahora=5.0,
@@ -1089,6 +1090,7 @@ try:
         bot.notificar_telegram = notificar_telegram_original
         bot._maximo_beneficio_neto_por_posicion = {}
         bot._scale_out_realizado = set()
+        bot._ultima_venta_total = {}
 
     # --- Extremo a extremo: revisar_compras registra la apertura cuando la
     #     compra se confirma Filled y era una posicion nueva desde cero ---
@@ -1621,6 +1623,7 @@ bot.fuera_de_sesion_regular_us = lambda: False
 bot.macd_5min_bajista_2_velas = lambda ib, contrato: True  # refuerzo siempre "activo"
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 # Precios elegidos para que el beneficio NETO (ya descontada la comision de
 # compra+venta que aplica revisar_ventas) de exactamente el % querido, no
 # el bruto -ver el calculo real en el comentario de cada caso-.
@@ -1639,6 +1642,7 @@ check("criterio de venta: por debajo de UMBRAL_BENEFICIO_PCT, NO vende aunque el
 bot.macd_5min_bajista_2_velas = lambda ib, contrato: False  # refuerzo inactivo: la parcial no depende de el
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 ib_parcial = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto justo por encima del umbral (+0.52%), retroceso=0
 try:
     bot.revisar_ventas(ib_parcial)
@@ -1673,6 +1677,7 @@ check("criterio de venta: tras la venta total del resto, se olvida el maximo tra
 bot.macd_5min_bajista_2_velas = lambda ib, contrato: False  # refuerzo siempre "inactivo": solo puede vender el trailing
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 ib_trailing = _IBFalsoTrailingStop(avgCost=100, precio_inicial=100.59)  # neto +0.52%: arma el trailing -> SALIDA PARCIAL
 try:
     bot.revisar_ventas(ib_trailing)
@@ -1712,6 +1717,7 @@ finally:
     bot.fuera_de_sesion_regular_us = fuera_de_sesion_regular_us_original
     bot._maximo_beneficio_neto_por_posicion = {}
     bot._scale_out_realizado = set()
+    bot._ultima_venta_total = {}
 
 # Si la orden IOC no se ejecuta (el mercado nunca toco el precio limite
 # protegido -simulado devolviendo estado 'Cancelled' y la posicion SIN
@@ -1730,6 +1736,7 @@ bot.macd_5min_bajista_2_velas = lambda ib, contrato: False
 bot.fuera_de_sesion_regular_us = lambda: False
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 telegram_capturados_ioc = []
 notificar_telegram_original_ioc_ibkr = bot.notificar_telegram
 bot.notificar_telegram = lambda msg: telegram_capturados_ioc.append(msg)
@@ -1748,6 +1755,7 @@ finally:
     bot.notificar_telegram = notificar_telegram_original_ioc_ibkr
     bot._maximo_beneficio_neto_por_posicion = {}
     bot._scale_out_realizado = set()
+    bot._ultima_venta_total = {}
 
 check("venta principal (trailing): si la orden IOC no se ejecuta (posicion sin cambios), "
       "NO se registra ninguna venta ni se avisa por Telegram",
@@ -1775,6 +1783,7 @@ check("_margen_trailing_stop: maximo >= 5% -> margen de 1.5 pts",
 # esta realmente en efecto-, pero uno de 0.8 pts SI debe vender.
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 accion, motivo = bot.decidir_accion_venta("US:ESCALON", 3.5, bot.UMBRAL_BENEFICIO_PCT)
 check("escalones trailing stop: primera vez en el umbral (3.5%) -> SALIDA PARCIAL",
       accion == "VENTA_PARCIAL", f"accion={accion}, motivo={motivo}")
@@ -1786,6 +1795,7 @@ check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroces
       accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 
 # --- Suelo explicito: nunca vender por debajo de MARGEN_MINIMO_VENTA_PCT
 # (0.5%, peticion del usuario, sept. 2026, mismo cambio en bot_alpaca.py).
@@ -1809,6 +1819,7 @@ check("suelo anti-perdidas: beneficio exactamente 0.5% (el suelo) -> SI vende",
       accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 
 # --- Veto del scale-out por MACD alcista (peticion del usuario, sept.
 # 2026, mismo cambio en bot_alpaca.py, a raiz de revisar el historial real
@@ -1827,6 +1838,7 @@ check("veto de scale-out por MACD alcista: si el MACD deja de estar alcista, el 
       accion == "VENTA_PARCIAL", f"accion={accion}, motivo={motivo}")
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 bot.decidir_accion_venta("US:VETO2", 3.5, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: False)  # scale-out ya hecho, maximo 3.5% (margen 0.7 pts)
 accion, motivo = bot.decidir_accion_venta("US:VETO2", 2.7, bot.UMBRAL_BENEFICIO_PCT, macd_alcista_fn=lambda: True)  # retroceso 0.8 pts (> margen 0.7)
 check("veto de scale-out por MACD alcista: el trailing TOTAL SI dispara aunque el MACD siga "
@@ -1834,6 +1846,7 @@ check("veto de scale-out por MACD alcista: el trailing TOTAL SI dispara aunque e
       accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 
 # --- BUG REAL DE PRODUCCION (sept. 2026, mismo cambio en bot_alpaca.py):
 # el % de beneficio mostrado/registrado se calculaba con precio_actual (el
@@ -1866,6 +1879,7 @@ bot.es_horario_operativo = lambda mercado: True
 bot.en_ventana_venta_forzada = lambda mercado: False
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 # Precio de referencia (decision): coste 100, precio_inicial 102 -> +2%
 # neto (tras comision ~0.7%, sigue armando el trailing) -> primera vez en
 # el umbral -> VENTA PARCIAL de 5 (mitad de 10). Precio REAL de ejecucion:
@@ -1881,6 +1895,7 @@ finally:
     bot.en_ventana_venta_forzada = en_venta_forzada_original
     bot._maximo_beneficio_neto_por_posicion = {}
     bot._scale_out_realizado = set()
+    bot._ultima_venta_total = {}
 
 check("beneficio recalculado con precio real (IBKR): coloca la orden basandose en el precio de "
       "referencia (arma el trailing)", ib_slippage.ordenes_colocadas == ["TRAIL"],
@@ -2379,6 +2394,7 @@ bot.macd_5min_bajista = lambda ib, contrato: True  # forzar señal de venta
 # vende solo la mitad (PORCENTAJE_SCALE_OUT), no el 100%.
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 ib_falso_ventas_cripto = _IBFalsoVentasCripto([pos_venta_btc])
 try:
     bot.revisar_ventas(ib_falso_ventas_cripto)
@@ -2459,6 +2475,7 @@ pos_venta_btc_umbral = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01
 bot.macd_5min_bajista = lambda ib, contrato: True
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 ib_falso_umbral = _IBFalsoVentasCriptoUmbral([pos_venta_btc_umbral])
 try:
     bot.revisar_ventas(ib_falso_umbral)
@@ -2471,6 +2488,7 @@ check("revisar_ventas CRYPTO: con beneficio neto ~0.4% (entre el umbral de armad
       f"ordenes={ib_falso_umbral.ordenes_colocadas}, cache={bot._maximo_beneficio_neto_por_posicion}")
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 
 
 # ---------------------------------------------------------------------------
@@ -2506,6 +2524,7 @@ pos_venta_btc_filtro = _PosicionConSecType("BTC", "USD", "CRYPTO", position=0.01
 bot.macd_5min_bajista = lambda ib, contrato: True
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
 ib_falso_ventas_filtro = _IBFalsoVentasCripto([pos_venta_aapl_filtro, pos_venta_btc_filtro])
 try:
     bot.revisar_ventas(ib_falso_ventas_filtro, mercados={"CRYPTO"})
@@ -2945,6 +2964,48 @@ check("verificar_historial_completo (IBKR): falta una venta en el historial (pos
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_reconciliacion_ibkr
 bot.notificar_telegram = notificar_telegram_original_reconciliacion_ibkr
 bot._CLAVES_AVISADAS_HISTORIAL_INCOMPLETO = set()
+
+
+# ---------------------------------------------------------------------------
+# puede_comprar_tras_venta / registrar_venta_total (mismo bug real que en
+# bot_alpaca.py: META/TSLA recomprados justo tras venderse, casi al mismo
+# precio, y despues bajaban). Cooldown de COOLDOWN_RECOMPRA_MINUTOS tras una
+# venta TOTAL, saltado si el precio sube lo suficiente (umbral distinto
+# para acciones/cripto, decidido por la clave "CRYPTO:...").
+# ---------------------------------------------------------------------------
+ultima_venta_original_ibkr = dict(bot._ultima_venta_total)
+bot._ultima_venta_total = {}
+
+sin_venta_previa_ibkr, motivo_sin_venta_ibkr = bot.puede_comprar_tras_venta("US:META", 750.0)
+check("puede_comprar_tras_venta (IBKR): sin ninguna venta previa registrada -> permite comprar",
+      sin_venta_previa_ibkr is True and motivo_sin_venta_ibkr is None)
+
+bot.registrar_venta_total("US:META", 750.28)
+bloqueado_mismo_precio_ibkr, motivo_bloqueo_ibkr = bot.puede_comprar_tras_venta("US:META", 750.40)
+check("puede_comprar_tras_venta (IBKR): justo tras vender, recomprar casi al mismo precio -> BLOQUEADO",
+      bloqueado_mismo_precio_ibkr is False and "cooldown" in motivo_bloqueo_ibkr, f"motivo={motivo_bloqueo_ibkr!r}")
+
+permitido_subida_accion_ibkr, _ = bot.puede_comprar_tras_venta("US:META", 750.28 * 1.006)  # +0.6% > umbral 0.5%
+check("puede_comprar_tras_venta (IBKR, accion): si el precio sube >= 0.5% desde la venta, SI permite "
+      "comprar (no perderse una subida real)", permitido_subida_accion_ibkr is True)
+
+bot.registrar_venta_total("CRYPTO:BTC", 84783.60)
+bloqueado_cripto_08pct_ibkr, _ = bot.puede_comprar_tras_venta("CRYPTO:BTC", 84783.60 * 1.008)  # +0.8% < 1%
+check("puede_comprar_tras_venta (IBKR, cripto): +0.8% NO llega al umbral de cripto (1%) -> sigue bloqueado",
+      bloqueado_cripto_08pct_ibkr is False)
+permitido_cripto_15pct_ibkr, _ = bot.puede_comprar_tras_venta("CRYPTO:BTC", 84783.60 * 1.015)  # +1.5% >= 1%
+check("puede_comprar_tras_venta (IBKR, cripto): +1.5% SI supera el umbral de cripto (1%) -> permite comprar",
+      permitido_cripto_15pct_ibkr is True)
+
+bot._ultima_venta_total["US:META"] = {
+    "fecha_hora": (datetime.now() - timedelta(minutes=bot.COOLDOWN_RECOMPRA_MINUTOS + 1)).isoformat(timespec="seconds"),
+    "precio": 750.28,
+}
+permitido_tras_cooldown_ibkr, _ = bot.puede_comprar_tras_venta("US:META", 750.28)
+check(f"puede_comprar_tras_venta (IBKR): pasados los {bot.COOLDOWN_RECOMPRA_MINUTOS} min de cooldown, "
+      "permite comprar aunque el precio no haya subido", permitido_tras_cooldown_ibkr is True)
+
+bot._ultima_venta_total = ultima_venta_original_ibkr
 
 
 # ---------------------------------------------------------------------------

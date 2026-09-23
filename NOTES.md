@@ -1246,6 +1246,34 @@ Si la cantidad real es mayor que la que explica el historial, se avisa por Teleg
 (`⚠️ Historial incompleto: TICKER`), una sola vez por ticker (o ticker+mercado en IBKR) mientras
 el hueco siga abierto — se resetea solo si la posición se cierra o el historial se pone al día.
 
+## Cooldown de recompra tras una venta total (sept. 2026, bug real: META/TSLA recomprados al mismo precio)
+
+**Caso real** (Alpaca, 23 sept. 2026): el bot vendía una posición completa y, en el mismo ciclo o
+el siguiente, la recompraba casi al mismo precio (o ligeramente peor) — y después el precio
+bajaba, dejando la recompra en pérdidas. Causa: la venta (trailing stop, o "2 velas de 5min
+bajistas") y la compra (alineación de varias temporalidades, que tolera que solo una temporalidad
+corta esté en contra) son sistemas independientes que pueden solaparse por el mismo motivo de
+fondo — no es un bug de cálculo, las dos reglas nunca se pensaron juntas.
+
+**Solución, en ambos bots**: cooldown de `COOLDOWN_RECOMPRA_MINUTOS` (**15 min**, decisión del
+usuario) tras una venta TOTAL, saltado solo si el precio ya subió lo suficiente desde la venta
+(`UMBRAL_RECOMPRA_TRAS_VENTA_ACCIONES_PCT = 0.5`, `UMBRAL_RECOMPRA_TRAS_VENTA_CRIPTO_PCT = 1.0`)
+— así no se pierde una subida real, solo se bloquea la recompra "boba" al mismo precio o peor.
+
+- `bot_alpaca.py`: `registrar_venta_total(ticker, precio)` (llamado justo tras confirmar una
+  VENTA_TOTAL con precio real conocido, en vez de `cerrar_seguimiento_venta()` directamente)
+  anota `_ultima_venta_total[ticker] = {fecha_hora, precio}`. `puede_comprar_tras_venta(ticker,
+  precio_actual)` se consulta al principio del bucle de señales de compra (acciones y cripto,
+  distinguidas por `es_cripto(ticker)`).
+- `bot_completo.py`/IBKR: misma lógica, pero la clave es `clave_historial(mercado, ticker)`
+  (`"MERCADO:TICKER"`) en vez de solo el ticker, y el umbral de cripto se decide mirando si la
+  clave empieza por `"CRYPTO:"`.
+
+En ambos casos, el estado se persiste en `ARCHIVO_ESTADO_VENTA` (igual que el trailing stop,
+sobrevive a reinicios), y la poda genérica de posiciones ya cerradas (sin precio/hora fiable de
+venta, podría ser una venta manual fuera del bot) sigue usando `cerrar_seguimiento_venta()`
+directamente, sin anotar cooldown.
+
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 
 - **`Error 10349` ("Order TIF was set to DAY based on order preset")**: aviso rutinario y
