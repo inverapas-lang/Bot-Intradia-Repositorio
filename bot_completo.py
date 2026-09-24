@@ -1891,17 +1891,20 @@ def formatear_notificacion_compra(ticker, mercado, cantidad, precio, currency, d
 
 
 def formatear_notificacion_venta(etiqueta_accion, ticker, mercado, cantidad, precio, currency,
-                                  beneficio_pct, decimales_cantidad=4, sufijo=""):
+                                  beneficio_pct, beneficio_moneda, decimales_cantidad=4, sufijo=""):
     """Mensaje de Telegram para una venta ejecutada, en varias lineas e
-    incluyendo desde cuando estaba abierta la posicion -misma peticion del
-    usuario que formatear_notificacion_venta() de bot_alpaca.py-."""
+    incluyendo desde cuando estaba abierta la posicion, y cuanto dinero se
+    ha ganado/perdido en la divisa de la posicion, no solo el % -misma
+    peticion del usuario que formatear_notificacion_venta() de
+    bot_alpaca.py-."""
     total = cantidad * precio
     apertura = _texto_apertura_desde(mercado, ticker)
     lineas = [f"🔴 {etiqueta_accion} <b>{ticker}</b> ({mercado})",
               f"Cantidad: {formato_es(cantidad, decimales_cantidad)}",
               f"Precio: {formato_es(precio, 4)} {currency}",
               f"Total: {formato_es(total, 4)} {currency}",
-              f"Beneficio: {formato_es(beneficio_pct, signo=True)}%{apertura}"]
+              f"Beneficio: {formato_es(beneficio_pct, signo=True)}% "
+              f"({formato_es(beneficio_moneda, signo=True)} {currency}){apertura}"]
     if sufijo:
         lineas.append(sufijo)
     return "\n".join(lineas)
@@ -2039,12 +2042,13 @@ def _registrar_venta_a_posteriori(mercado, contrato, cantidad_antes, cantidad_ah
     cantidad_ejecutada = cantidad_antes - cantidad_ahora
     if cantidad_ejecutada <= 1e-6:
         return
+    beneficio_moneda = cantidad_ejecutada * (precio_actual - coste_medio) - comision_total
     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                    precio_actual, comision_total, contrato.currency,
                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct)
     notificar_telegram(formatear_notificacion_venta(
         etiqueta_accion, contrato.symbol, mercado, cantidad_ejecutada, precio_actual, contrato.currency,
-        beneficio_pct, decimales_cantidad=6,
+        beneficio_pct, beneficio_moneda, decimales_cantidad=6,
         sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
     if cantidad_ahora <= 1e-6:
         registrar_venta_total(clave_posicion, precio_actual)
@@ -2259,12 +2263,13 @@ def revisar_ventas(ib, mercados=None):
                     comision_total_pct_real = (comision_total_real / valor_compra_ejecutada * 100
                                                 ) if valor_compra_ejecutada else 0.0
                     beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
+                    beneficio_moneda_real = cantidad_ejecutada * (precio_ejecucion - coste_medio) - comision_total_real
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                    precio_ejecucion, comision_total_real, contrato.currency,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                     notificar_telegram(formatear_notificacion_venta(
                         etiqueta_cripto, contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
-                        contrato.currency, beneficio_pct_real, decimales_cantidad=6))
+                        contrato.currency, beneficio_pct_real, beneficio_moneda_real, decimales_cantidad=6))
                     if accion_cripto == "VENTA_TOTAL":
                         registrar_venta_total(clave_posicion_cripto, precio_ejecucion)
                 else:
@@ -2325,12 +2330,13 @@ def revisar_ventas(ib, mercados=None):
                     comision_total_pct_real = (comision_total_real / valor_compra_ejecutada * 100
                                                 ) if valor_compra_ejecutada else 0.0
                     beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
+                    beneficio_moneda_real = cantidad_ejecutada * (precio_ejecucion - coste_medio) - comision_total_real
                     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                    precio_ejecucion, comision_total_real, contrato.currency,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                     notificar_telegram(formatear_notificacion_venta(
                         "VENTA FORZADA", contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
-                        contrato.currency, beneficio_pct_real))
+                        contrato.currency, beneficio_pct_real, beneficio_moneda_real))
                     registrar_venta_total(clave_historial(mercado, contrato.symbol), precio_ejecucion)
                 else:
                     cantidad_ahora_forzada = verificar_posicion_tras_orden_no_confirmada(
@@ -2449,12 +2455,13 @@ def revisar_ventas(ib, mercados=None):
                 comision_total_pct_real = (comision_total_real / valor_compra_ejecutada * 100
                                             ) if valor_compra_ejecutada else 0.0
                 beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
+                beneficio_moneda_real = cantidad_ejecutada * (precio_ejecucion - coste_medio) - comision_total_real
                 registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                                precio_ejecucion, comision_total_real, contrato.currency,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                 notificar_telegram(formatear_notificacion_venta(
                     etiqueta_accion, contrato.symbol, mercado, cantidad_ejecutada, precio_ejecucion,
-                    contrato.currency, beneficio_pct_real))
+                    contrato.currency, beneficio_pct_real, beneficio_moneda_real))
                 if accion == "VENTA_TOTAL":
                     registrar_venta_total(clave_posicion, precio_ejecucion)
             else:

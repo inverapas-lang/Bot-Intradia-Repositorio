@@ -1577,9 +1577,10 @@ with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": compra_hace_6d23h.isoformat(timespec="seconds"), "ticker": "T",
                 "lado": "COMPRA", "cantidad": 0.434, "precio": 26.42, "modo": "REAL"}], f)
 
-mensaje_venta = bot.formatear_notificacion_venta("VENTA PARCIAL", "T", 0.434, 26.71, 1.07)
-check("formatear_notificacion_venta: varias lineas, incluido el Beneficio",
-      "Cantidad:" in mensaje_venta and "Beneficio: +1,07%" in mensaje_venta, f"mensaje={mensaje_venta!r}")
+mensaje_venta = bot.formatear_notificacion_venta("VENTA PARCIAL", "T", 0.434, 26.71, 1.07, 0.13)
+check("formatear_notificacion_venta: varias lineas, incluido el Beneficio en % y en USD",
+      "Cantidad:" in mensaje_venta and "Beneficio: +1,07% (+0,13 USD)" in mensaje_venta,
+      f"mensaje={mensaje_venta!r}")
 check("formatear_notificacion_venta: dice desde cuando esta abierta la posicion (buscado en el historial)",
       "abierta desde" in mensaje_venta and "6d 23h" in mensaje_venta, f"mensaje={mensaje_venta!r}")
 
@@ -1588,13 +1589,13 @@ check("formatear_notificacion_venta: dice desde cuando esta abierta la posicion 
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": compra_hace_6d23h.isoformat(timespec="seconds"), "ticker": "T",
                 "lado": "COMPRA", "cantidad": 0.434, "precio": 26.42, "modo": "PAPER"}], f)
-mensaje_venta_sin_apertura = bot.formatear_notificacion_venta("VENTA PARCIAL", "T", 0.434, 26.71, 1.07)
+mensaje_venta_sin_apertura = bot.formatear_notificacion_venta("VENTA PARCIAL", "T", 0.434, 26.71, 1.07, 0.13)
 check("formatear_notificacion_venta: una compra PAPER antigua NO cuenta para una venta REAL",
       "abierta desde" not in mensaje_venta_sin_apertura, f"mensaje={mensaje_venta_sin_apertura!r}")
 
 check("formatear_notificacion_venta: el sufijo opcional (confirmado a posteriori) se añade en su propia linea",
       "[confirmado a posteriori" in bot.formatear_notificacion_venta(
-          "VENTA", "T", 0.434, 26.71, 1.07, sufijo="[confirmado a posteriori: aviso]"),
+          "VENTA", "T", 0.434, 26.71, 1.07, 0.13, sufijo="[confirmado a posteriori: aviso]"),
       )
 
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_alpaca
@@ -1627,7 +1628,7 @@ with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
         {"fecha_hora": compra_2_dust.isoformat(timespec="seconds"), "ticker": "BTC/USD",
          "lado": "COMPRA", "cantidad": 0.000473, "precio": 83395.21, "modo": "REAL"},
     ], f)
-mensaje_venta_dust = bot.formatear_notificacion_venta("VENTA", "BTC/USD", 0.000472, 84783.60, 1.16,
+mensaje_venta_dust = bot.formatear_notificacion_venta("VENTA", "BTC/USD", 0.000472, 84783.60, 1.16, 0.65,
                                                         decimales_cantidad=6, unidad="unidades")
 check("formatear_notificacion_venta: un resto de redondeo tras vender (0.000001) SI resetea "
       "'abierta desde' en la siguiente recompra (no se arrastra la fecha de la compra original)",

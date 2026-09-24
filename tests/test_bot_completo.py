@@ -2858,22 +2858,23 @@ check("formatear_notificacion_compra (IBKR): varias lineas (Cantidad/Precio/Tota
       f"mensaje={mensaje_compra_ibkr!r}")
 
 mensaje_venta_sin_registro = bot.formatear_notificacion_venta(
-    "VENTA PARCIAL", "AAPL", "US", 1, 152.0, "USD", 1.15)
+    "VENTA PARCIAL", "AAPL", "US", 1, 152.0, "USD", 1.15, 1.73)
 check("formatear_notificacion_venta (IBKR): sin apertura registrada, no revienta y no dice "
       "'abierta desde'", "abierta desde" not in mensaje_venta_sin_registro,
       f"mensaje={mensaje_venta_sin_registro!r}")
 
 bot.registrar_apertura_de_posicion("US", "AAPL")
 mensaje_venta_con_registro = bot.formatear_notificacion_venta(
-    "VENTA PARCIAL", "AAPL", "US", 1, 152.0, "USD", 1.15)
+    "VENTA PARCIAL", "AAPL", "US", 1, 152.0, "USD", 1.15, 1.73)
 check("formatear_notificacion_venta (IBKR): con apertura registrada, SI dice desde cuando "
-      "esta abierta la posicion",
-      "abierta desde" in mensaje_venta_con_registro and "Beneficio: +1,15%" in mensaje_venta_con_registro,
+      "esta abierta la posicion, y muestra el beneficio en % y en la divisa",
+      "abierta desde" in mensaje_venta_con_registro
+      and "Beneficio: +1,15% (+1,73 USD)" in mensaje_venta_con_registro,
       f"mensaje={mensaje_venta_con_registro!r}")
 
 check("formatear_notificacion_venta (IBKR): el sufijo opcional se añade en su propia linea",
       "[confirmado a posteriori" in bot.formatear_notificacion_venta(
-          "VENTA", "AAPL", "US", 1, 152.0, "USD", 1.15, sufijo="[confirmado a posteriori: aviso]"))
+          "VENTA", "AAPL", "US", 1, 152.0, "USD", 1.15, 1.73, sufijo="[confirmado a posteriori: aviso]"))
 
 bot.ARCHIVO_HISTORIAL_COMPRAS = historial_compras_original
 

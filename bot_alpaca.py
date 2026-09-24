@@ -1125,17 +1125,20 @@ def _registrar_venta_a_posteriori(ticker, cantidad_antes, cantidad_ahora, precio
     if cantidad_ejecutada <= 1e-6:
         return
     beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
+    beneficio_usd_bruto = cantidad_ejecutada * (precio_actual - coste_medio)
     if calcular_comision:
         comision_total = calcular_comision(cantidad_ejecutada, precio_actual)
         valor_compra = cantidad_ejecutada * coste_medio
         comision_pct = (comision_total / valor_compra * 100) if valor_compra else 0.0
         beneficio_pct_real = beneficio_pct_bruto - comision_pct
+        beneficio_usd_real = beneficio_usd_bruto - comision_total
     else:
         beneficio_pct_real = beneficio_pct_bruto
+        beneficio_usd_real = beneficio_usd_bruto
     registrar_operacion_historial(ticker, "VENTA", cantidad_ejecutada, precio_actual,
                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
     notificar_telegram(formatear_notificacion_venta(
-        etiqueta_accion, ticker, cantidad_ejecutada, precio_actual, beneficio_pct_real,
+        etiqueta_accion, ticker, cantidad_ejecutada, precio_actual, beneficio_pct_real, beneficio_usd_real,
         decimales_cantidad=6, sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
     if cantidad_ahora <= 1e-6:
         registrar_venta_total(ticker, precio_actual)
@@ -1310,22 +1313,25 @@ def formatear_notificacion_compra(ticker, cantidad, precio, decimales_cantidad=4
             f"Total: {formato_es(total)} USD")
 
 
-def formatear_notificacion_venta(etiqueta_accion, ticker, cantidad, precio, beneficio_pct,
+def formatear_notificacion_venta(etiqueta_accion, ticker, cantidad, precio, beneficio_pct, beneficio_usd,
                                   decimales_cantidad=4, unidad="acciones", sufijo=""):
     """Mensaje de Telegram para una venta ejecutada, en varias lineas
     (peticion del usuario, sept. 2026) e incluyendo desde cuando estaba
     abierta la posicion (misma peticion: "cuando pongas el mensaje de que
-    se ha vendido, dime desde cuando lleva la posicion abierta"). Llamar
-    DESPUES de registrar_operacion_historial() de esta misma venta -no
-    afecta al calculo, la apertura que se busca es siempre una COMPRA
-    anterior-."""
+    se ha vendido, dime desde cuando lleva la posicion abierta") y cuanto
+    dinero se ha ganado/perdido en USD, no solo el % (peticion del usuario,
+    sept. 2026: "los mensajes de venta tienen que incluir cuanto dinero se
+    gana en dolares"). Llamar DESPUES de registrar_operacion_historial() de
+    esta misma venta -no afecta al calculo, la apertura que se busca es
+    siempre una COMPRA anterior-."""
     total = cantidad * precio
     apertura = _texto_apertura_desde(ticker, datetime.now().isoformat(timespec="seconds"))
     lineas = [f"🔴 {etiqueta_accion} <b>{ticker}</b>",
               f"Cantidad: {formato_es(cantidad, decimales_cantidad)} {unidad}",
               f"Precio: {formato_es(precio)} USD",
               f"Total: {formato_es(total)} USD",
-              f"Beneficio: {formato_es(beneficio_pct, signo=True)}%{apertura}"]
+              f"Beneficio: {formato_es(beneficio_pct, signo=True)}% "
+              f"({formato_es(beneficio_usd, signo=True)} USD){apertura}"]
     if sufijo:
         lineas.append(sufijo)
     return "\n".join(lineas)
@@ -1569,10 +1575,11 @@ def revisar_ventas():
                     # venta de META parecia con beneficio positivo en Telegram
                     # pero en realidad se vendio mas barato de lo comprado-.
                     beneficio_pct_real = (precio_real - coste_medio) / coste_medio * 100
+                    beneficio_usd_real = cantidad_real * (precio_real - coste_medio)
                     registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                    coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                     notificar_telegram(formatear_notificacion_venta(
-                        "VENTA FORZADA", ticker, cantidad_real, precio_real, beneficio_pct_real))
+                        "VENTA FORZADA", ticker, cantidad_real, precio_real, beneficio_pct_real, beneficio_usd_real))
                     registrar_venta_total(ticker, precio_real)
                 else:
                     cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
@@ -1668,10 +1675,11 @@ def revisar_ventas():
                 # Beneficio RECALCULADO con el precio REAL de ejecucion (ver
                 # comentario equivalente en la venta forzada, mas arriba).
                 beneficio_pct_real = (precio_real - coste_medio) / coste_medio * 100
+                beneficio_usd_real = cantidad_real * (precio_real - coste_medio)
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                 notificar_telegram(formatear_notificacion_venta(
-                    etiqueta_accion, ticker, cantidad_real, precio_real, beneficio_pct_real))
+                    etiqueta_accion, ticker, cantidad_real, precio_real, beneficio_pct_real, beneficio_usd_real))
                 if accion == "VENTA_TOTAL":
                     registrar_venta_total(ticker, precio_real)
             else:
@@ -1840,10 +1848,11 @@ def revisar_ventas_cripto():
                 comision_total_pct_real = (comision_total_real / (cantidad_real * coste_medio) * 100
                                             ) if cantidad_real * coste_medio else 0.0
                 beneficio_pct_real = beneficio_pct_bruto_real - comision_total_pct_real
+                beneficio_usd_real = cantidad_real * (precio_real - coste_medio) - comision_total_real
                 registrar_operacion_historial(ticker, "VENTA", cantidad_real, precio_real,
                                                coste_medio=coste_medio, beneficio_pct=beneficio_pct_real)
                 notificar_telegram(formatear_notificacion_venta(
-                    etiqueta_accion, ticker, cantidad_real, precio_real, beneficio_pct_real,
+                    etiqueta_accion, ticker, cantidad_real, precio_real, beneficio_pct_real, beneficio_usd_real,
                     decimales_cantidad=6, unidad="unidades"))
                 if accion == "VENTA_TOTAL":
                     registrar_venta_total(ticker, precio_real)

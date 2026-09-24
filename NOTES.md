@@ -1217,8 +1217,15 @@ Ejemplo (Alpaca):
 Cantidad: 0,4340 acciones
 Precio: 26,71 USD
 Total: 11,59 USD
-Beneficio: +1,07% (abierta desde 08 SEP, 6d 23h)
+Beneficio: +1,07% (+0,12 USD) (abierta desde 08 SEP, 6d 23h)
 ```
+
+**Actualización (24 sept. 2026, petición del usuario)**: el "Beneficio" de las ventas ahora
+incluye también el importe en dinero, no solo el %, en ambos bots — `formatear_notificacion_
+venta()` recibe un nuevo parámetro `beneficio_usd`/`beneficio_moneda` (calculado por cada llamador
+a partir de `cantidad_ejecutada * (precio_real - coste_medio)`, restando la comisión total en los
+casos donde aplica — cripto en Alpaca, todo en IBKR). En IBKR el importe se muestra en la divisa
+de la propia posición (USD/HKD/KRW/EUR...), igual que ya hacía la línea "Total".
 
 ## Comprobación periódica de historial incompleto (sept. 2026, bug real: compra de T no registrada)
 
