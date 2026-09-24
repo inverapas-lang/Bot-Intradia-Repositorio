@@ -1266,6 +1266,35 @@ lógica y mismos valores de cooldown/umbral) — ver `NOTES.md` para el detalle.
 `clave_historial(mercado, ticker)` (`"MERCADO:TICKER"`), y el umbral de cripto se decide mirando
 si la clave empieza por `"CRYPTO:"`.
 
+## ETFs añadidos a la lista de valores (24 sept. 2026, petición del usuario)
+
+Petición del usuario: revisar qué otros productos de Alpaca podrían encajar con la misma
+estrategia. Repasado el catálogo de Alpaca (acciones, ETFs, ADRs, OTC, opciones, algo de renta
+fija, cripto): los **ETFs** son la extensión natural y de menor riesgo porque Alpaca los opera
+exactamente igual que las acciones (mismo endpoint, sin ningún caso especial) — así que se
+añaden directamente a `ACTIVOS`, sin tocar nada de la lógica de la estrategia.
+
+Las **opciones** se descartan por ahora (ya se habían explorado antes en otra conversación y se
+dejaron en pausa): decaimiento temporal (theta) y sensibilidad a la volatilidad implícita hacen
+que un MACD de tendencia aplicado tal cual probablemente pierda dinero por el desgaste del
+tiempo, no por acertar o no la dirección — necesitarían una estrategia distinta. El **OTC** se
+descarta por poca liquidez y spreads anchos, mal encaje con las órdenes limitadas ajustadas que
+usa el bot.
+
+ETFs añadidos (10, elegidos por el usuario de 4 bloques):
+- **Índices amplios** (los más líquidos del mercado): `SPY`, `QQQ`, `IWM`.
+- **Sectoriales** (complementan la exposición ya existente en acciones individuales):
+  `XLF` (financiero, junto a JPM/BAC/WFC/C), `XLE` (energía, junto a XOM/CVX), `XLK` (tecnología).
+- **Apalancados 3x** (mucha más volatilidad intradía, más señales, pero también más riesgo real
+  y decaimiento si una posición queda abierta días en lateral — el trailing stop del bot mitiga
+  bastante esto al no dejar posiciones abiertas mucho tiempo sin reaccionar, pero queda avisado):
+  `TQQQ`, `SOXL`.
+- **Oro/bonos** (baja correlación con acciones/cripto, amortiguan una caída generalizada):
+  `GLD`, `TLT`.
+
+Solo en `bot_alpaca.py` por ahora — `bot_completo.py`/IBKR sigue con la lista de 30 tickers
+original, sin estos ETFs (replicar si el usuario lo pide más adelante).
+
 ## Pendiente / próximos pasos
 
 - Probar A FONDO en modo paper antes de pasar a real (en curso).

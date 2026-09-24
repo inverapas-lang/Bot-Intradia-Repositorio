@@ -476,12 +476,29 @@ VALOR_MINIMO_OPERACION_FRACCIONARIA_USD = 1.0
 # limite independiente, sobre el NUMERO de posiciones y la CAJA real.
 MAX_POSICIONES_ABIERTAS = 12
 
-# --- Lista de valores: misma seleccion de 30 tickers que en bot_completo.py ---
+# --- Lista de valores: misma seleccion de 30 tickers que en bot_completo.py,
+# MAS los ETFs de mas abajo (peticion del usuario, sept. 2026: explorar si
+# vale la pena aplicar la misma estrategia a otro producto de Alpaca -
+# solo en Alpaca por ahora, bot_completo.py/IBKR no los tiene todavia). Los
+# ETFs usan exactamente el mismo motor de señales/compra/venta que las
+# acciones (Alpaca los opera igual, sin ningun caso especial en el codigo) ---
 ACTIVOS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD", "NFLX",
            "INTC", "QCOM", "CSCO", "SMCI",
            "JPM", "BAC", "WFC", "C", "V", "MA",
            "XOM", "CVX",
-           "WMT", "DIS", "KO", "JNJ", "PFE", "F", "T", "GE"]
+           "WMT", "DIS", "KO", "JNJ", "PFE", "F", "T", "GE",
+           # ETFs (sept. 2026): indices amplios (los 3 mas liquidos del
+           # mercado), sectoriales (complementan la exposicion ya existente
+           # en JPM/BAC/WFC/C -financiero-, XOM/CVX -energia- y las
+           # tecnologicas -tecnologia-), apalancados 3x (mucha mas
+           # volatilidad intradia, pero tambien mas riesgo real y
+           # decaimiento si una posicion queda abierta dias en lateral) y
+           # oro/bonos (baja correlacion con acciones/cripto, amortiguan
+           # una caida generalizada del mercado).
+           "SPY", "QQQ", "IWM",
+           "XLF", "XLE", "XLK",
+           "TQQQ", "SOXL",
+           "GLD", "TLT"]
 
 # --- Cripto en Alpaca (añadido sept. 2026, petición del usuario) ---
 # A diferencia de IBKR, Alpaca opera cripto con las MISMAS claves API que
