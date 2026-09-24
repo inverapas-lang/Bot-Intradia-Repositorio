@@ -1583,6 +1583,9 @@ check("formatear_notificacion_venta: varias lineas, incluido el Beneficio en % y
       f"mensaje={mensaje_venta!r}")
 check("formatear_notificacion_venta: dice desde cuando esta abierta la posicion (buscado en el historial)",
       "abierta desde" in mensaje_venta and "6d 23h" in mensaje_venta, f"mensaje={mensaje_venta!r}")
+check("formatear_notificacion_venta: 'abierta desde' va en su propia linea, no pegado al Beneficio "
+      "(peticion del usuario, sept. 2026)",
+      "USD)\n(abierta desde" in mensaje_venta, f"mensaje={mensaje_venta!r}")
 
 # Una compra PAPER antigua del mismo ticker no debe contar para una venta REAL (mismo bug que ya
 # se corrigio en cartera_alpaca.py con "abierta desde" mezclando PAPER y REAL).

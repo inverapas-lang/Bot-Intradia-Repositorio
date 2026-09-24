@@ -1331,7 +1331,13 @@ def formatear_notificacion_venta(etiqueta_accion, ticker, cantidad, precio, bene
               f"Precio: {formato_es(precio)} USD",
               f"Total: {formato_es(total)} USD",
               f"Beneficio: {formato_es(beneficio_pct, signo=True)}% "
-              f"({formato_es(beneficio_usd, signo=True)} USD){apertura}"]
+              f"({formato_es(beneficio_usd, signo=True)} USD)"]
+    # Peticion del usuario (sept. 2026): "abierta desde" en su propia linea,
+    # no pegado al final de la linea de Beneficio -apertura ya viene con un
+    # espacio inicial " (abierta desde ...)" (formato compartido con
+    # cartera_alpaca.py), asi que aqui solo se quita ese espacio sobrante.
+    if apertura:
+        lineas.append(apertura.strip())
     if sufijo:
         lineas.append(sufijo)
     return "\n".join(lineas)

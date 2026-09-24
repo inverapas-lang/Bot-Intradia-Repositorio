@@ -2871,6 +2871,8 @@ check("formatear_notificacion_venta (IBKR): con apertura registrada, SI dice des
       "abierta desde" in mensaje_venta_con_registro
       and "Beneficio: +1,15% (+1,73 USD)" in mensaje_venta_con_registro,
       f"mensaje={mensaje_venta_con_registro!r}")
+check("formatear_notificacion_venta (IBKR): 'abierta desde' va en su propia linea, no pegado al Beneficio",
+      "USD)\n(abierta desde" in mensaje_venta_con_registro, f"mensaje={mensaje_venta_con_registro!r}")
 
 check("formatear_notificacion_venta (IBKR): el sufijo opcional se añade en su propia linea",
       "[confirmado a posteriori" in bot.formatear_notificacion_venta(

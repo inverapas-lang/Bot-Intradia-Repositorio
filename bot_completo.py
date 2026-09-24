@@ -1904,7 +1904,12 @@ def formatear_notificacion_venta(etiqueta_accion, ticker, mercado, cantidad, pre
               f"Precio: {formato_es(precio, 4)} {currency}",
               f"Total: {formato_es(total, 4)} {currency}",
               f"Beneficio: {formato_es(beneficio_pct, signo=True)}% "
-              f"({formato_es(beneficio_moneda, signo=True)} {currency}){apertura}"]
+              f"({formato_es(beneficio_moneda, signo=True)} {currency})"]
+    # Peticion del usuario (sept. 2026): "abierta desde" en su propia linea,
+    # no pegado al final de la linea de Beneficio -mismo cambio que en
+    # bot_alpaca.py-.
+    if apertura:
+        lineas.append(apertura.strip())
     if sufijo:
         lineas.append(sufijo)
     return "\n".join(lineas)
