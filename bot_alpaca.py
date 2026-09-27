@@ -287,19 +287,27 @@ _scale_out_realizado = set()  # tickers ya con su venta parcial hecha
 # iso, "precio": float con el precio REAL de la venta}.
 _ultima_venta_total = {}
 
+# Avisos de caida por umbral (peticion del usuario, sept. 2026: "que me
+# avise cuando una posicion haya bajado mas de un 3.5%, un 5%, un 6.5% y un
+# 8%"). ticker -> lista de umbrales de UMBRALES_AVISO_CAIDA_PCT ya avisados
+# mientras la posicion sigue abierta -ver verificar_umbral_caida()-.
+_umbrales_caida_avisados = {}
+
 
 def cargar_estado_venta():
     """Recupera _maximo_beneficio_neto_por_posicion/_scale_out_realizado/
-    _ultima_venta_total guardados en disco (ver ARCHIVO_ESTADO_VENTA) - se
-    llama una vez al arrancar el bot, para no perder el trailing stop ni el
-    cooldown de recompra en cada reinicio."""
-    global _maximo_beneficio_neto_por_posicion, _scale_out_realizado, _ultima_venta_total
+    _ultima_venta_total/_umbrales_caida_avisados guardados en disco (ver
+    ARCHIVO_ESTADO_VENTA) - se llama una vez al arrancar el bot, para no
+    perder el trailing stop ni el cooldown de recompra ni los avisos de
+    caida ya emitidos en cada reinicio."""
+    global _maximo_beneficio_neto_por_posicion, _scale_out_realizado, _ultima_venta_total, _umbrales_caida_avisados
     try:
         with open(ARCHIVO_ESTADO_VENTA, "r", encoding="utf-8") as f:
             datos = json.load(f)
         _maximo_beneficio_neto_por_posicion = dict(datos.get("maximo_beneficio_neto_por_posicion", {}))
         _scale_out_realizado = set(datos.get("scale_out_realizado", []))
         _ultima_venta_total = dict(datos.get("ultima_venta_total", {}))
+        _umbrales_caida_avisados = dict(datos.get("umbrales_caida_avisados", {}))
         if _maximo_beneficio_neto_por_posicion or _scale_out_realizado:
             log(f"Estado de venta (trailing stop) recuperado de {ARCHIVO_ESTADO_VENTA}: "
                 f"{len(_maximo_beneficio_neto_por_posicion)} posicion(es) trackeada(s).")
@@ -314,6 +322,7 @@ def _guardar_estado_venta():
                 "maximo_beneficio_neto_por_posicion": _maximo_beneficio_neto_por_posicion,
                 "scale_out_realizado": sorted(_scale_out_realizado),
                 "ultima_venta_total": _ultima_venta_total,
+                "umbrales_caida_avisados": _umbrales_caida_avisados,
             }, f, indent=2, sort_keys=True)
     except OSError as e:
         log(f"No se pudo guardar el estado de venta ({ARCHIVO_ESTADO_VENTA}): {type(e).__name__}: {e}")
@@ -385,10 +394,13 @@ def decidir_accion_venta(clave, beneficio_pct, umbral, macd_alcista_fn=None):
 
 
 def cerrar_seguimiento_venta(clave):
-    """Olvida el maximo trackeado y la marca de salida parcial de una
-    posicion (llamar tras confirmar una venta TOTAL)."""
+    """Olvida el maximo trackeado, la marca de salida parcial y los avisos
+    de caida ya emitidos de una posicion (llamar tras confirmar una venta
+    TOTAL) -si se vuelve a comprar el mismo valor mas adelante, todo
+    empieza de cero, incluidos los avisos de caida."""
     _maximo_beneficio_neto_por_posicion.pop(clave, None)
     _scale_out_realizado.discard(clave)
+    _umbrales_caida_avisados.pop(clave, None)
     _guardar_estado_venta()
 
 
@@ -445,6 +457,38 @@ def puede_comprar_tras_venta(ticker, precio_actual):
               f"ahora {precio_actual:g} = {subida_pct:+.2f}%, hace falta +{umbral_pct}% o esperar "
               f"{minutos_restantes:.1f}min mas)")
     return False, motivo
+
+
+# Avisos de caida por umbral (peticion del usuario, sept. 2026: "que me
+# avise cuando una posicion haya bajado mas de un 3.5%, un 5%, un 6.5% y un
+# 8%"). Puramente informativo -no afecta a ninguna decision de compra/venta-,
+# pensados como una señal de alarma adicional a lo que ya hace el trailing
+# stop. Ordenados de menor a mayor caida para que el aviso mas severo
+# alcanzado en un mismo ciclo tambien dispare los mas suaves que aun no se
+# hubieran avisado.
+UMBRALES_AVISO_CAIDA_PCT = [-3.5, -5.0, -6.5, -8.0]
+
+
+def verificar_umbral_caida(ticker, beneficio_pct):
+    """Avisa por Telegram la PRIMERA vez que una posicion cruza cada umbral
+    de UMBRALES_AVISO_CAIDA_PCT. No repite el mismo umbral mientras la
+    posicion siga abierta (se olvida al cerrar_seguimiento_venta(), igual
+    que el trailing stop) - si el precio recupera y vuelve a caer por
+    debajo del mismo umbral, NO se vuelve a avisar hasta que la posicion se
+    cierre y se compre de nuevo desde cero."""
+    avisados = set(_umbrales_caida_avisados.get(ticker, []))
+    cambio = False
+    for umbral in UMBRALES_AVISO_CAIDA_PCT:
+        if beneficio_pct <= umbral and umbral not in avisados:
+            avisados.add(umbral)
+            cambio = True
+            log(f"AVISO: {ticker} ha caido mas de un {abs(umbral):.1f}% (ahora {beneficio_pct:+.2f}%).")
+            notificar_telegram(f"⚠️ <b>{ticker}</b> ha caído más de un {formato_es(abs(umbral), 1)}% "
+                                f"(ahora {formato_es(beneficio_pct, signo=True)}%).")
+    if cambio:
+        _umbrales_caida_avisados[ticker] = sorted(avisados)
+        _guardar_estado_venta()
+
 
 INTERVALO_SEGUNDOS = 130  # 2 min 10 s (ajustado tras pruebas en paper, ago 2026) - solo acciones
 CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto, en su propia cadencia (peticion
@@ -1506,13 +1550,19 @@ def obtener_valor_total_cartera_usd():
         return None
 
 
-def obtener_efectivo_disponible_usd():
+def obtener_efectivo_disponible_usd(client=None):
     """Devuelve el efectivo REALMENTE disponible para nuevas compras (no el
     valor total de la cartera), en USD. Se usa para no intentar comprar mas
     de lo que la cuenta puede permitirse de verdad, ademas de los limites
-    por % ya existentes (peticion del usuario, sept. 2026)."""
+    por % ya existentes (peticion del usuario, sept. 2026). Acepta un
+    `client` distinto del que usa el bot para operar -mismo patron que
+    obtener_posiciones()-, usado por cartera_alpaca.py para mostrarlo en
+    /cartera y en el resumen diario (peticion del usuario, sept. 2026:
+    "quiero que el bot me avise tambien del cash que hay disponible para
+    invertir")."""
+    cliente = client or _trading_client
     try:
-        cuenta = _trading_client.get_account()
+        cuenta = cliente.get_account()
         return float(cuenta.cash)
     except Exception as e:
         log(f"ERROR al obtener el efectivo disponible: {type(e).__name__}: {e}")
@@ -1569,6 +1619,7 @@ def revisar_ventas():
 
             # Sin comision (ni de Alpaca ni de terceros, a peticion del usuario).
             beneficio_pct = (precio_actual - coste_medio) / coste_medio * 100
+            verificar_umbral_caida(ticker, beneficio_pct)
 
             info_posicion = f"{cantidad:g} acciones, precio medio {coste_medio:.4f} USD"
 
@@ -1813,6 +1864,7 @@ def revisar_ventas_cripto():
             beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
             comision_total_pct = (comision_total / valor_compra * 100) if valor_compra else 0.0
             beneficio_pct = beneficio_pct_bruto - comision_total_pct
+            verificar_umbral_caida(ticker, beneficio_pct)
 
             info_posicion = (f"{cantidad:g} unidades, precio medio {coste_medio:.4f} USD, "
                               f"comision estimada {comision_total:.2f} USD")
@@ -2239,6 +2291,13 @@ def generar_resumen():
             tabla.append(f"{emoji} {ticker:<6}{formato_es(cantidad, 2):>8}{ganancia_str}")
         bloques_html.append("<pre>" + "\n".join(tabla) + "</pre>")
         bloques_html.append(f"<b>TOTAL</b> ganancia/perdida realizada hoy: {formato_es(ganancia_total, signo=True)} USD")
+
+    # Efectivo disponible para nuevas compras (peticion del usuario, sept.
+    # 2026: "quiero que el bot me avise tambien del cash que hay disponible
+    # para invertir").
+    efectivo_disponible = obtener_efectivo_disponible_usd()
+    if efectivo_disponible is not None:
+        bloques_html.append(f"Efectivo disponible: {formato_es(efectivo_disponible)} USD")
 
     notificar_telegram("\n".join(bloques_html))
 

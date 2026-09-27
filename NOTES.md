@@ -1308,6 +1308,30 @@ sobrevive a reinicios), y la poda genérica de posiciones ya cerradas (sin preci
 venta, podría ser una venta manual fuera del bot) sigue usando `cerrar_seguimiento_venta()`
 directamente, sin anotar cooldown.
 
+## Efectivo disponible en /cartera y avisos de caída por umbral (sept. 2026)
+
+Dos peticiones del usuario, implementadas en **ambos bots**:
+
+1. **Efectivo disponible**: "quiero que el bot me avise también del cash que hay disponible
+   para invertir". Se añade una línea `Efectivo disponible: X USD/EUR` al final de `/cartera`
+   (`formatear_posiciones_abiertas()`, tanto texto plano como HTML) y al resumen diario
+   automático que ya se manda por Telegram — reutilizando `obtener_efectivo_disponible_usd()`
+   (Alpaca) / `obtener_fondos_disponibles_usd(ib)` (IBKR), que ya existían para el propio bucle
+   de compras. En IBKR se convierte a EUR con `valor_en_eur()` para cuadrar con el resto de
+   importes que muestra `/cartera` ahí.
+2. **Avisos de caída por umbral**: "que me avise con un mensaje cuando una posición haya bajado
+   más de un 3,5%, un 5%, un 6,5% y un 8%". `UMBRALES_AVISO_CAIDA_PCT = [-3.5, -5.0, -6.5, -8.0]`
+   y `verificar_umbral_caida()` (llamada en cada ciclo de `revisar_ventas()`/
+   `revisar_ventas_cripto()`, para TODAS las posiciones, no solo las que van a venderse) avisan
+   por Telegram la PRIMERA vez que el beneficio neto de una posición cruza cada umbral — es
+   puramente informativo, no afecta a ninguna decisión de compra/venta (el trailing stop sigue
+   siendo el único mecanismo que actúa de verdad). El estado (`_umbrales_caida_avisados`, clave
+   -> lista de umbrales ya avisados) se persiste en `ARCHIVO_ESTADO_VENTA` igual que el resto del
+   trailing stop, y se olvida en `cerrar_seguimiento_venta()` cuando la posición se cierra del
+   todo — si se vuelve a comprar el mismo valor más adelante, los avisos empiezan de cero. Si el
+   precio recupera y vuelve a caer por debajo del mismo umbral sin que la posición se haya
+   cerrado, NO se repite el aviso.
+
 ## Cosas que NO son bugs (para no perder tiempo re-investigándolas)
 
 - **`Error 10349` ("Order TIF was set to DAY based on order preset")**: aviso rutinario y

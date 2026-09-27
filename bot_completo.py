@@ -1411,19 +1411,27 @@ _scale_out_realizado = set()  # claves ya con su venta parcial hecha (mismo form
 # precio REAL de la venta}.
 _ultima_venta_total = {}
 
+# Avisos de caida por umbral (peticion del usuario, sept. 2026: "que me
+# avise cuando una posicion haya bajado mas de un 3.5%, un 5%, un 6.5% y un
+# 8%", mismo cambio que en bot_alpaca.py). clave -> lista de umbrales de
+# UMBRALES_AVISO_CAIDA_PCT ya avisados mientras la posicion sigue abierta.
+_umbrales_caida_avisados = {}
+
 
 def cargar_estado_venta():
     """Recupera _maximo_beneficio_neto_por_posicion/_scale_out_realizado/
-    _ultima_venta_total guardados en disco (ver ARCHIVO_ESTADO_VENTA) - se
-    llama una vez al arrancar el bot, para no perder el trailing stop ni el
-    cooldown de recompra en cada reinicio."""
-    global _maximo_beneficio_neto_por_posicion, _scale_out_realizado, _ultima_venta_total
+    _ultima_venta_total/_umbrales_caida_avisados guardados en disco (ver
+    ARCHIVO_ESTADO_VENTA) - se llama una vez al arrancar el bot, para no
+    perder el trailing stop ni el cooldown de recompra ni los avisos de
+    caida ya emitidos en cada reinicio."""
+    global _maximo_beneficio_neto_por_posicion, _scale_out_realizado, _ultima_venta_total, _umbrales_caida_avisados
     try:
         with open(ARCHIVO_ESTADO_VENTA, "r", encoding="utf-8") as f:
             datos = json.load(f)
         _maximo_beneficio_neto_por_posicion = dict(datos.get("maximo_beneficio_neto_por_posicion", {}))
         _scale_out_realizado = set(datos.get("scale_out_realizado", []))
         _ultima_venta_total = dict(datos.get("ultima_venta_total", {}))
+        _umbrales_caida_avisados = dict(datos.get("umbrales_caida_avisados", {}))
         if _maximo_beneficio_neto_por_posicion or _scale_out_realizado:
             log(f"Estado de venta (trailing stop) recuperado de {ARCHIVO_ESTADO_VENTA}: "
                 f"{len(_maximo_beneficio_neto_por_posicion)} posicion(es) trackeada(s).")
@@ -1437,6 +1445,7 @@ def _guardar_estado_venta():
             json.dump({
                 "maximo_beneficio_neto_por_posicion": _maximo_beneficio_neto_por_posicion,
                 "scale_out_realizado": sorted(_scale_out_realizado),
+                "umbrales_caida_avisados": _umbrales_caida_avisados,
                 "ultima_venta_total": _ultima_venta_total,
             }, f, indent=2, sort_keys=True)
     except OSError as e:
@@ -1555,12 +1564,40 @@ def decidir_accion_venta(clave, beneficio_pct, umbral, macd_alcista_fn=None):
 
 
 def cerrar_seguimiento_venta(clave):
-    """Olvida el maximo trackeado y la marca de salida parcial de una
-    posicion (llamar tras confirmar una venta TOTAL, para que si se vuelve
-    a comprar el mismo valor mas adelante, el trailing empiece de cero)."""
+    """Olvida el maximo trackeado, la marca de salida parcial y los avisos
+    de caida ya emitidos de una posicion (llamar tras confirmar una venta
+    TOTAL, para que si se vuelve a comprar el mismo valor mas adelante,
+    todo empieza de cero)."""
     _maximo_beneficio_neto_por_posicion.pop(clave, None)
     _scale_out_realizado.discard(clave)
+    _umbrales_caida_avisados.pop(clave, None)
     _guardar_estado_venta()
+
+
+# Avisos de caida por umbral (peticion del usuario, sept. 2026: "que me
+# avise cuando una posicion haya bajado mas de un 3.5%, un 5%, un 6.5% y un
+# 8%", mismo cambio que en bot_alpaca.py). Puramente informativo -no afecta
+# a ninguna decision de compra/venta-.
+UMBRALES_AVISO_CAIDA_PCT = [-3.5, -5.0, -6.5, -8.0]
+
+
+def verificar_umbral_caida(clave, ticker, mercado, beneficio_pct):
+    """Avisa por Telegram la PRIMERA vez que una posicion cruza cada umbral
+    de UMBRALES_AVISO_CAIDA_PCT. No repite el mismo umbral mientras la
+    posicion siga abierta (se olvida al cerrar_seguimiento_venta(), igual
+    que el trailing stop)."""
+    avisados = set(_umbrales_caida_avisados.get(clave, []))
+    cambio = False
+    for umbral in UMBRALES_AVISO_CAIDA_PCT:
+        if beneficio_pct <= umbral and umbral not in avisados:
+            avisados.add(umbral)
+            cambio = True
+            log(f"AVISO: {ticker} ({mercado}) ha caido mas de un {abs(umbral):.1f}% (ahora {beneficio_pct:+.2f}%).")
+            notificar_telegram(f"⚠️ <b>{ticker} ({mercado})</b> ha caído más de un "
+                                f"{formato_es(abs(umbral), 1)}% (ahora {formato_es(beneficio_pct, signo=True)}%).")
+    if cambio:
+        _umbrales_caida_avisados[clave] = sorted(avisados)
+        _guardar_estado_venta()
 
 
 # BUG REAL DE PRODUCCION (sept. 2026, mismo caso que en bot_alpaca.py:
@@ -2197,6 +2234,7 @@ def revisar_ventas(ib, mercados=None):
             comision_total = comision_compra + comision_venta
             comision_total_pct = comision_total / valor_compra * 100
             beneficio_pct = beneficio_pct_bruto - comision_total_pct
+            verificar_umbral_caida(clave_historial(mercado, contrato.symbol), contrato.symbol, mercado, beneficio_pct)
 
             # Prefijo comun con los datos base de la posicion, reutilizado en
             # todas las lineas de log de esta operacion.
@@ -3365,6 +3403,13 @@ def generar_resumen_cierre_mercado(ib, mercado):
                     lineas.append(f"{emoji} {symbol}: {formato_es(ganancia_eur, signo=True)} EUR "
                                   f"({formato_es(beneficio_pct, signo=True)}%)")
             lineas.append(f"<b>Ganancia total hoy</b>: {formato_es(total_ganancia_eur_acumulada, signo=True)} EUR")
+
+        # Efectivo disponible para nuevas compras (peticion del usuario,
+        # sept. 2026: "quiero que el bot me avise tambien del cash que hay
+        # disponible para invertir").
+        fondos_disponibles_usd = obtener_fondos_disponibles_usd(ib)
+        if fondos_disponibles_usd is not None:
+            lineas.append(f"\nEfectivo disponible: {formato_es(valor_en_eur(fondos_disponibles_usd, 'USD'))} EUR")
 
         notificar_telegram("\n".join(lineas))
 

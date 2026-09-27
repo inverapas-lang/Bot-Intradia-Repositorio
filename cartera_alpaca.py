@@ -74,6 +74,9 @@ def formatear_posiciones_abiertas(html=False, client=None, modo_etiqueta=None):
     (peticion del usuario, sept. 2026). Si no se pasan, se usa la cuenta
     activa del bot como siempre."""
     posiciones = bot.obtener_posiciones(client)
+    efectivo_disponible = bot.obtener_efectivo_disponible_usd(client)
+    efectivo_str = (f"Efectivo disponible: {bot.formato_es(efectivo_disponible)} USD"
+                     if efectivo_disponible is not None else "Efectivo disponible: no disponible (error al consultarlo)")
 
     # Las posiciones ABIERTAS vienen en vivo de la API de Alpaca, siempre en
     # el modo de la cuenta consultada (a diferencia del historial de
@@ -82,7 +85,7 @@ def formatear_posiciones_abiertas(html=False, client=None, modo_etiqueta=None):
     modo_actual = modo_etiqueta or ("PAPER" if bot.ALPACA_PAPER else "REAL")
     if not posiciones:
         titulo = f"📈 <b>POSICIONES ABIERTAS</b> [{modo_actual}]" if html else f"📈 POSICIONES ABIERTAS [{modo_actual}]"
-        return titulo + "\n(ninguna)"
+        return titulo + f"\n(ninguna)\n{efectivo_str}"
 
     total_invertido = 0.0
     total_actual = 0.0
@@ -141,7 +144,8 @@ def formatear_posiciones_abiertas(html=False, client=None, modo_etiqueta=None):
                   f"({bot.formato_es(total_invertido / bot.TIPO_CAMBIO_EUR_USD)} EUR)\n"
                   f"P/L: {bot.formato_es(pl_total_usd, signo=True)} USD "
                   f"({bot.formato_es(pl_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR, "
-                  f"{bot.formato_es(pl_total_pct, signo=True)}%)")
+                  f"{bot.formato_es(pl_total_pct, signo=True)}%)\n"
+                  f"{efectivo_str}")
         return f"📈 <b>POSICIONES ABIERTAS</b> [{modo_actual}]\n{tabla}\n{resumen}"
 
     lineas = [f"📈 POSICIONES ABIERTAS [{modo_actual}]"]
@@ -156,6 +160,7 @@ def formatear_posiciones_abiertas(html=False, client=None, modo_etiqueta=None):
                   f"P/L: {bot.formato_es(pl_total_usd, signo=True)} USD "
                   f"({bot.formato_es(pl_total_usd / bot.TIPO_CAMBIO_EUR_USD, signo=True)} EUR, "
                   f"{bot.formato_es(pl_total_pct, signo=True)}%)")
+    lineas.append(efectivo_str)
     return "\n".join(lineas)
 
 

@@ -81,6 +81,24 @@ check("formatear_posiciones_abiertas: incluye el ticker BTC",
 
 
 # ---------------------------------------------------------------------------
+# Efectivo disponible (peticion del usuario, sept. 2026: "quiero que el bot
+# me avise tambien del cash que hay disponible para invertir"), convertido
+# a EUR para cuadrar con el resto de /cartera.
+# ---------------------------------------------------------------------------
+class _IBFalsoCarteraConFondos(_IBFalsoCarteraCripto):
+    def accountSummary(self):
+        return [types.SimpleNamespace(tag="AvailableFunds", currency="USD", value="228.0")]
+
+
+tipo_cambio_original = bot.TIPO_CAMBIO_EUR_USD
+bot.TIPO_CAMBIO_EUR_USD = 1.14
+resultado_con_fondos = cartera.formatear_posiciones_abiertas(_IBFalsoCarteraConFondos())
+check("formatear_posiciones_abiertas: incluye el efectivo disponible convertido a EUR (228 USD / 1.14 = 200 EUR)",
+      "Efectivo disponible: 200,00 EUR" in resultado_con_fondos, f"resultado={resultado_con_fondos!r}")
+bot.TIPO_CAMBIO_EUR_USD = tipo_cambio_original
+
+
+# ---------------------------------------------------------------------------
 # formatear_operaciones_cerradas: mismo formato de tabla que
 # cartera_alpaca.py (peticion del usuario, sept. 2026) - Merc./Ticker/
 # Cant./Precio/%/EUR, "abierta desde" debajo de cada fila, linea en blanco

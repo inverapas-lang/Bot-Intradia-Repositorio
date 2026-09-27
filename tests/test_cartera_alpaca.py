@@ -67,6 +67,8 @@ class FakePos:
 
 obtener_posiciones_original = bot.obtener_posiciones
 bot.obtener_posiciones = lambda client=None: []
+obtener_efectivo_disponible_original = bot.obtener_efectivo_disponible_usd
+bot.obtener_efectivo_disponible_usd = lambda client=None: 123.45
 check("formatear_posiciones_abiertas sin posiciones -> '(ninguna)'",
       "(ninguna)" in cartera.formatear_posiciones_abiertas())
 
@@ -76,10 +78,15 @@ check("formatear_posiciones_abiertas (plano): incluye el ticker y el signo +",
       "AAPL" in resultado_plano and "+35,00" in resultado_plano, f"resultado={resultado_plano!r}")
 check("formatear_posiciones_abiertas (plano): formato español (coma decimal)",
       "35,00" in resultado_plano and "35.00" not in resultado_plano)
+check("formatear_posiciones_abiertas (plano): incluye el efectivo disponible (peticion del "
+      "usuario, sept. 2026)",
+      "Efectivo disponible: 123,45 USD" in resultado_plano, f"resultado={resultado_plano!r}")
 
 resultado_html = cartera.formatear_posiciones_abiertas(html=True)
 check("formatear_posiciones_abiertas (html): usa <pre> y negrita",
       "<pre>" in resultado_html and "<b>" in resultado_html)
+check("formatear_posiciones_abiertas (html): incluye el efectivo disponible",
+      "Efectivo disponible: 123,45 USD" in resultado_html, f"resultado={resultado_html!r}")
 
 # El titulo debe indicar el modo ACTUAL de conexion del bot (peticion del
 # usuario, sept. 2026): las posiciones abiertas vienen en vivo de la API,
@@ -339,6 +346,9 @@ check("formatear_operaciones_cerradas (html): un resto de redondeo tras vender (
       "resetea 'abierta desde' en la recompra (la ultima venta muestra 30min, no 2h)",
       "30min" in cerradas_html_btc_dust and "2h" not in cerradas_html_btc_dust,
       f"resultado={cerradas_html_btc_dust!r}")
+
+
+bot.obtener_efectivo_disponible_usd = obtener_efectivo_disponible_original
 
 
 if fallos:

@@ -1810,6 +1810,46 @@ bot._ultima_venta_total = ultima_venta_original
 
 
 # ---------------------------------------------------------------------------
+# verificar_umbral_caida (peticion del usuario, sept. 2026: "que me avise
+# cuando una posicion haya bajado mas de un 3.5%, un 5%, un 6.5% y un 8%").
+# ---------------------------------------------------------------------------
+umbrales_avisados_original = dict(bot._umbrales_caida_avisados)
+bot._umbrales_caida_avisados = {}
+mensajes_caida = []
+notificar_telegram_original_caida = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: mensajes_caida.append(msg)
+
+bot.verificar_umbral_caida("AAPL", -2.0)
+check("verificar_umbral_caida: por encima del primer umbral (-3.5%) -> no avisa",
+      mensajes_caida == [], f"mensajes={mensajes_caida!r}")
+
+bot.verificar_umbral_caida("AAPL", -4.0)
+check("verificar_umbral_caida: cruza el primer umbral (-3.5%) -> avisa una vez",
+      len(mensajes_caida) == 1 and "AAPL" in mensajes_caida[0] and "3,5%" in mensajes_caida[0],
+      f"mensajes={mensajes_caida!r}")
+
+mensajes_caida.clear()
+bot.verificar_umbral_caida("AAPL", -4.2)
+check("verificar_umbral_caida: sigue por debajo del mismo umbral (-3.5%) -> NO repite el aviso",
+      mensajes_caida == [], f"mensajes={mensajes_caida!r}")
+
+bot.verificar_umbral_caida("AAPL", -9.0)
+check("verificar_umbral_caida: caida brusca que cruza varios umbrales de golpe (-5%, -6.5%, -8%) "
+      "-> avisa de los 3 en el mismo ciclo",
+      len(mensajes_caida) == 3, f"mensajes={mensajes_caida!r}")
+
+mensajes_caida.clear()
+bot.cerrar_seguimiento_venta("AAPL")
+bot.verificar_umbral_caida("AAPL", -9.0)
+check("verificar_umbral_caida: tras cerrar_seguimiento_venta() (posicion cerrada y recomprada), "
+      "los umbrales se olvidan y vuelve a avisar desde cero",
+      len(mensajes_caida) == 4, f"mensajes={mensajes_caida!r}")
+
+bot._umbrales_caida_avisados = umbrales_avisados_original
+bot.notificar_telegram = notificar_telegram_original_caida
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()

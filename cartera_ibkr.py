@@ -128,10 +128,21 @@ def formatear_posiciones_abiertas(ib, html=False):
         key=lambda p: (bot.mercado_de_posicion(p), p.contract.symbol)
     )
 
+    # Efectivo disponible para nuevas compras, en EUR (peticion del
+    # usuario, sept. 2026: "quiero que el bot me avise tambien del cash
+    # que hay disponible para invertir") -mismo dato que ya usa
+    # revisar_compras() para no comprar de mas, convertido a EUR para
+    # cuadrar con el resto de importes que muestra /cartera aqui.
+    fondos_disponibles_usd = bot.obtener_fondos_disponibles_usd(ib)
+    if fondos_disponibles_usd is not None:
+        efectivo_str = f"Efectivo disponible: {bot.formato_es(bot.valor_en_eur(fondos_disponibles_usd, 'USD'))} EUR"
+    else:
+        efectivo_str = "Efectivo disponible: no disponible (error al consultarlo)"
+
     titulo_html = "📈 <b>POSICIONES ABIERTAS</b>"
     titulo_plano = "📈 POSICIONES ABIERTAS"
     if not posiciones:
-        return (titulo_html if html else titulo_plano) + "\n(ninguna)"
+        return (titulo_html if html else titulo_plano) + f"\n(ninguna)\n{efectivo_str}"
 
     total_invertido_eur = 0.0
     total_actual_eur = 0.0
@@ -215,7 +226,8 @@ def formatear_posiciones_abiertas(ib, html=False):
         tabla = "<pre>" + "\n".join(lineas_tabla).rstrip() + "</pre>"
         resumen = (f"<b>TOTAL</b> invertido: {bot.formato_es(total_invertido_eur)} EUR\n"
                   f"P/L: {bot.formato_es(pl_total_eur, signo=True)} EUR "
-                  f"({bot.formato_es(pl_total_pct, signo=True)}%)")
+                  f"({bot.formato_es(pl_total_pct, signo=True)}%)\n"
+                  f"{efectivo_str}")
         return f"{titulo_html}\n{tabla}\n{resumen}"
 
     lineas = [titulo_plano]
@@ -231,6 +243,7 @@ def formatear_posiciones_abiertas(ib, html=False):
                           f"({bot.formato_es(pl_pct, signo=True)}%)")
     lineas.append(f"TOTAL invertido: {bot.formato_es(total_invertido_eur)} EUR | "
                   f"P/L: {bot.formato_es(pl_total_eur, signo=True)} EUR ({bot.formato_es(pl_total_pct, signo=True)}%)")
+    lineas.append(efectivo_str)
     return "\n".join(lineas)
 
 

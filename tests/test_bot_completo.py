@@ -3019,6 +3019,40 @@ bot._ultima_venta_total = ultima_venta_original_ibkr
 
 
 # ---------------------------------------------------------------------------
+# verificar_umbral_caida (IBKR) (peticion del usuario, sept. 2026: "que me
+# avise cuando una posicion haya bajado mas de un 3.5%, un 5%, un 6.5% y un
+# 8%").
+# ---------------------------------------------------------------------------
+umbrales_avisados_original_ibkr = dict(bot._umbrales_caida_avisados)
+bot._umbrales_caida_avisados = {}
+mensajes_caida_ibkr = []
+notificar_telegram_original_caida_ibkr = bot.notificar_telegram
+bot.notificar_telegram = lambda msg: mensajes_caida_ibkr.append(msg)
+
+bot.verificar_umbral_caida("US:AAPL", "AAPL", "US", -2.0)
+check("verificar_umbral_caida (IBKR): por encima del primer umbral (-3.5%) -> no avisa",
+      mensajes_caida_ibkr == [], f"mensajes={mensajes_caida_ibkr!r}")
+
+bot.verificar_umbral_caida("US:AAPL", "AAPL", "US", -4.0)
+check("verificar_umbral_caida (IBKR): cruza el primer umbral (-3.5%) -> avisa una vez",
+      len(mensajes_caida_ibkr) == 1 and "AAPL (US)" in mensajes_caida_ibkr[0]
+      and "3,5%" in mensajes_caida_ibkr[0], f"mensajes={mensajes_caida_ibkr!r}")
+
+mensajes_caida_ibkr.clear()
+bot.verificar_umbral_caida("US:AAPL", "AAPL", "US", -4.2)
+check("verificar_umbral_caida (IBKR): sigue por debajo del mismo umbral -> NO repite el aviso",
+      mensajes_caida_ibkr == [], f"mensajes={mensajes_caida_ibkr!r}")
+
+bot.cerrar_seguimiento_venta("US:AAPL")
+bot.verificar_umbral_caida("US:AAPL", "AAPL", "US", -4.0)
+check("verificar_umbral_caida (IBKR): tras cerrar_seguimiento_venta(), se olvida y vuelve a avisar",
+      len(mensajes_caida_ibkr) == 1, f"mensajes={mensajes_caida_ibkr!r}")
+
+bot._umbrales_caida_avisados = umbrales_avisados_original_ibkr
+bot.notificar_telegram = notificar_telegram_original_caida_ibkr
+
+
+# ---------------------------------------------------------------------------
 # Resumen final
 # ---------------------------------------------------------------------------
 print()
