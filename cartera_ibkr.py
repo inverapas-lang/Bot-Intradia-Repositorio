@@ -286,6 +286,7 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         currency = o.get("currency", "?")
         mercado = o.get("mercado", "?")
         beneficio_pct = o.get("beneficio_pct")
+        es_ajuste_automatico = o.get("nota") is not None
 
         if coste_medio is not None:
             ganancia_local = (precio - coste_medio) * cantidad - comision
@@ -298,7 +299,7 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         clave = bot.clave_historial(mercado, o["ticker"])
         fecha_apertura = _fecha_apertura_posicion(operaciones_por_clave.get(clave, []), o["fecha_hora"])
         filas.append((o["fecha_hora"], mercado, o["ticker"], cantidad, precio,
-                      currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura))
+                      currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura, es_ajuste_automatico))
 
     beneficio_total_pct = (ganancia_total_eur / coste_total_eur * 100) if coste_total_eur else None
 
@@ -311,13 +312,17 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         # cada fila, junto al emoji verde/rojo, cuanto llevaba abierta la
         # posicion, y una linea en blanco entre operaciones.
         lineas_tabla = [f"  {'Merc.':<6}{'Ticker':<7}{'Cant.':>7}{'Precio':>8}{'%':>8}{'EUR':>8}"]
-        for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura in filas:
+        for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura, es_ajuste_automatico in filas:
             emoji = _emoji_pl(ganancia_eur) if ganancia_eur is not None else "⚪"
             cantidad_str = f"{round(cantidad, 4):g}"
             precio_str = bot.formato_es(precio)
-            pct_str = f"{bot.formato_es(beneficio_pct, signo=True)}%" if beneficio_pct is not None else "N/D"
-            ganancia_str = bot.formato_es(ganancia_eur, signo=True) if ganancia_eur is not None else "N/D"
-            lineas_tabla.append(f"{emoji} {mercado:<6}{ticker:<7}{cantidad_str:>7}{precio_str:>8}{pct_str:>8}{ganancia_str:>8}")
+            texto_sin_datos = "[ajuste automático]" if es_ajuste_automatico else "N/D"
+            pct_str = f"{bot.formato_es(beneficio_pct, signo=True)}%" if beneficio_pct is not None else texto_sin_datos
+            ganancia_str = bot.formato_es(ganancia_eur, signo=True) if ganancia_eur is not None else texto_sin_datos
+            if es_ajuste_automatico:
+                lineas_tabla.append(f"{emoji} {mercado:<6}{ticker:<7}{cantidad_str:>7}{precio_str:>8}  {texto_sin_datos}")
+            else:
+                lineas_tabla.append(f"{emoji} {mercado:<6}{ticker:<7}{cantidad_str:>7}{precio_str:>8}{pct_str:>8}{ganancia_str:>8}")
             if fecha_apertura is not None:
                 duracion = _formatear_duracion(datetime.fromisoformat(fecha_hora) - datetime.fromisoformat(fecha_apertura))
                 lineas_tabla.append(f"  abierta desde {_formatear_fecha_corta(fecha_apertura)} ({duracion})")
@@ -330,11 +335,15 @@ def formatear_operaciones_cerradas(desde, hasta, html=False):
         return f"{titulo_html}\n{tabla}\n{resumen}"
 
     lineas = [titulo_plano]
-    for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura in filas:
+    for fecha_hora, mercado, ticker, cantidad, precio, currency, ganancia_local, ganancia_eur, beneficio_pct, fecha_apertura, es_ajuste_automatico in filas:
         fecha_str = fecha_hora[:16].replace("T", " ")
-        ganancia_str = (f", ganancia {bot.formato_es(ganancia_local, signo=True)} {currency} / "
-                        f"{bot.formato_es(ganancia_eur, signo=True)} EUR") if ganancia_local is not None else ""
-        beneficio_pct_str = f" ({bot.formato_es(beneficio_pct, signo=True)}%)" if beneficio_pct is not None else ""
+        if es_ajuste_automatico:
+            ganancia_str = ", [ajuste automático: sin ganancia/perdida real]"
+            beneficio_pct_str = ""
+        else:
+            ganancia_str = (f", ganancia {bot.formato_es(ganancia_local, signo=True)} {currency} / "
+                            f"{bot.formato_es(ganancia_eur, signo=True)} EUR") if ganancia_local is not None else ""
+            beneficio_pct_str = f" ({bot.formato_es(beneficio_pct, signo=True)}%)" if beneficio_pct is not None else ""
         lineas.append(f"{fecha_str} {mercado} {ticker}: {bot.formato_es(cantidad, 6)} a {bot.formato_es(precio, 4)} "
                       f"{currency}{ganancia_str}{beneficio_pct_str}")
     pct_total_str = f" ({bot.formato_es(beneficio_total_pct, signo=True)}% sobre lo invertido)" if beneficio_total_pct is not None else ""

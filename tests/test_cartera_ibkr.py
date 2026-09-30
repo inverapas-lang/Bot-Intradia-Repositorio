@@ -144,6 +144,20 @@ check("formatear_operaciones_cerradas (plano): el TOTAL incluye el % sobre lo in
       "sobre lo invertido" in cerradas_plano_ibkr, f"resultado={cerradas_plano_ibkr!r}")
 
 
+# --- Ajuste automatico de verificar_historial_completo() (IBKR, sept. 2026,
+# mismo caso que en cartera_alpaca.py): una VENTA sintetica (con "nota") se
+# muestra como "[ajuste automatico]" en vez de "N/D". ---
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "mercado": "CRYPTO", "ticker": "LINK",
+                "lado": "VENTA", "cantidad": 0.0085, "precio": 14.75, "comision": 0.0, "currency": "USD",
+                "nota": "ajuste automatico: verificar_historial_completo"}], f)
+cerradas_ajuste_html_ibkr = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html, IBKR): un ajuste automatico muestra "
+      "'[ajuste automático]' en vez de 'N/D'",
+      "[ajuste automático]" in cerradas_ajuste_html_ibkr and "N/D" not in cerradas_ajuste_html_ibkr,
+      f"resultado={cerradas_ajuste_html_ibkr!r}")
+
+
 if fallos:
     print(f"\n{len(fallos)} test(s) FALLARON: {fallos}")
     sys.exit(1)

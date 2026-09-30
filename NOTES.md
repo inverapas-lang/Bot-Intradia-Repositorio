@@ -1280,6 +1280,12 @@ real de Alpaca/IBKR, nunca del historial. Solo se corrige la *cantidad* para que
 vuelva a ser internamente consistente (afecta a "abierta desde" y a los totales de `/hoy`/
 `/semana`, no al dinero).
 
+**Actualización (30 sept. 2026)**: el usuario preguntó por una fila de `/hoy` con círculo gris
+(⚪) y "N/D" en % y USD (caso real: una VENTA sintética de LINK/USD) — confuso porque parecía una
+venta real sin datos. `formatear_operaciones_cerradas()` (en ambos `cartera_*.py`) ahora detecta
+el campo `nota` (que solo llevan las operaciones sintéticas) y muestra `[ajuste automático]` en
+vez de `N/D`, para que quede claro de un vistazo que no es una operación real.
+
 ## Cooldown de recompra tras una venta total (sept. 2026, bug real: META/TSLA recomprados al mismo precio)
 
 **Caso real** (Alpaca, 23 sept. 2026): el bot vendía una posición completa y, en el mismo ciclo o

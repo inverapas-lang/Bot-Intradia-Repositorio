@@ -348,6 +348,27 @@ check("formatear_operaciones_cerradas (html): un resto de redondeo tras vender (
       f"resultado={cerradas_html_btc_dust!r}")
 
 
+# --- Ajuste automatico de verificar_historial_completo() (sept. 2026): una
+# VENTA sintetica (marcada con "nota", sin coste_medio ni beneficio_pct) se
+# muestra como "[ajuste automatico]" en vez de "N/D" a secas, para no
+# confundir al usuario pensando que es una venta real sin datos (caso real,
+# LINK/USD: el usuario pregunto por una fila asi). ---
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "LINK/USD", "lado": "VENTA",
+                "cantidad": 0.0085, "precio": 14.75, "modo": "REAL",
+                "nota": "ajuste automatico: verificar_historial_completo"}], f)
+cerradas_ajuste_html = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html): un ajuste automatico (con 'nota') muestra "
+      "'[ajuste automático]' en vez de 'N/D'",
+      "[ajuste automático]" in cerradas_ajuste_html and "N/D" not in cerradas_ajuste_html,
+      f"resultado={cerradas_ajuste_html!r}")
+
+cerradas_ajuste_plano = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=False)
+check("formatear_operaciones_cerradas (plano): un ajuste automatico tambien se distingue de una "
+      "venta real",
+      "[ajuste automático" in cerradas_ajuste_plano, f"resultado={cerradas_ajuste_plano!r}")
+
+
 bot.obtener_efectivo_disponible_usd = obtener_efectivo_disponible_original
 
 
