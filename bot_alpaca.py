@@ -1363,15 +1363,18 @@ def _texto_apertura_desde(ticker, hasta_fecha_hora):
     return f" (abierta desde {formatear_fecha_corta(fecha_apertura)}, {duracion})"
 
 
-def formatear_notificacion_compra(ticker, cantidad, precio, decimales_cantidad=4, unidad="acciones"):
+def formatear_notificacion_compra(ticker, cantidad, precio, decimales_cantidad=4, unidad="acciones", sufijo=""):
     """Mensaje de Telegram para una compra ejecutada, en varias lineas en
     vez de un solo parrafo denso -peticion del usuario, sept. 2026, para
     que sea mas facil de leer de un vistazo en el movil-."""
     total = cantidad * precio
-    return (f"🟢 COMPRA <b>{ticker}</b>\n"
-            f"Cantidad: {formato_es(cantidad, decimales_cantidad)} {unidad}\n"
-            f"Precio: {formato_es(precio)} USD\n"
-            f"Total: {formato_es(total)} USD")
+    lineas = [f"🟢 COMPRA <b>{ticker}</b>",
+              f"Cantidad: {formato_es(cantidad, decimales_cantidad)} {unidad}",
+              f"Precio: {formato_es(precio)} USD",
+              f"Total: {formato_es(total)} USD"]
+    if sufijo:
+        lineas.append(sufijo)
+    return "\n".join(lineas)
 
 
 def formatear_notificacion_venta(etiqueta_accion, ticker, cantidad, precio, beneficio_pct, beneficio_usd,
@@ -2077,14 +2080,32 @@ def revisar_compras():
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
-            compra_confirmada = estado == "filled"
-            if not compra_confirmada:
-                cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra, f"COMPRAS: {ticker}")
-                compra_confirmada = cantidad_tras_compra > cantidad_antes_compra + 1e-6
-            if compra_confirmada:
+            if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
                 notificar_telegram(formatear_notificacion_compra(ticker, cantidad_real, precio_real))
+            else:
+                # BUG REAL DE PRODUCCION (oct. 2026, caso real: NVDA): si el
+                # estado de la orden no confirma 'filled' pero la posicion SI
+                # aumento de verdad, antes se llamaba a obtener_ejecucion_real()
+                # con trade.id - el MISMO id cuyo estado ya sabemos que no es
+                # fiable aqui, asi que su lookup (filled_qty/filled_avg_price)
+                # caia en el mismo problema y devolvia cantidad_estimada en vez
+                # de lo realmente comprado. Resultado real: se registro una
+                # COMPRA de 0,1628 acciones mientras Alpaca habia comprado
+                # 0,3851 de verdad, un hueco de 0,2223 que solo se descubrio
+                # (y corrigio con un precio aproximado, el de mercado en ese
+                # momento) horas despues via verificar_historial_completo().
+                # Igual que en _registrar_venta_a_posteriori(), la cantidad
+                # fiable aqui es la DIFERENCIA REAL de posicion, no el id de
+                # una orden cuyo propio estado ya hemos descartado.
+                cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra, f"COMPRAS: {ticker}")
+                cantidad_real = cantidad_tras_compra - cantidad_antes_compra
+                if cantidad_real > 1e-6:
+                    registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_actual)
+                    notificar_telegram(formatear_notificacion_compra(
+                        ticker, cantidad_real, precio_actual,
+                        sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra: {type(e).__name__}: {e}. Se omite.")
             errores += 1
@@ -2196,16 +2217,25 @@ def revisar_compras_cripto():
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
-            compra_confirmada = estado == "filled"
-            if not compra_confirmada:
-                cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra_cripto,
-                                                                      f"COMPRAS: {ticker}")
-                compra_confirmada = cantidad_tras_compra > cantidad_antes_compra_cripto + 1e-9
-            if compra_confirmada:
+            if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
                 notificar_telegram(formatear_notificacion_compra(ticker, cantidad_real, precio_real,
                                                                    decimales_cantidad=6, unidad="unidades"))
+            else:
+                # Mismo fallo que en la compra de acciones (ver comentario
+                # equivalente mas arriba, caso real NVDA, oct. 2026): la
+                # cantidad fiable es la diferencia REAL de posicion, no
+                # obtener_ejecucion_real(trade.id, ...) con un id cuyo estado
+                # ya sabemos que no es fiable aqui.
+                cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra_cripto,
+                                                                      f"COMPRAS: {ticker}")
+                cantidad_real = cantidad_tras_compra - cantidad_antes_compra_cripto
+                if cantidad_real > 1e-9:
+                    registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_actual)
+                    notificar_telegram(formatear_notificacion_compra(
+                        ticker, cantidad_real, precio_actual, decimales_cantidad=6, unidad="unidades",
+                        sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
                 # Para que la SIGUIENTE cripto de este mismo ciclo vea el
                 # limite total ya actualizado (sin esto, dos señales en el
                 # mismo ciclo podrian sumar mas del limite entre las dos).

@@ -1005,6 +1005,16 @@ operaciones_wmt = bot.cargar_historial_operaciones()
 compras_wmt = [o for o in operaciones_wmt if o["ticker"] == "WMT" and o["lado"] == "COMPRA"]
 check("compra confirmada a posteriori (WMT): SI queda registrada en el historial (fuente de /hoy)",
       bool(compras_wmt), f"compras_wmt={compras_wmt}")
+# BUG REAL DE PRODUCCION (oct. 2026, caso real NVDA): la cantidad real
+# ejecutada (0.05, la que refleja get_all_positions()) es MENOR que la
+# cantidad ESTIMADA antes de la orden (~0.54, importe_a_usar/precio) -antes
+# se registraba la estimada (via obtener_ejecucion_real(trade.id, ...) con
+# filled_qty=None cayendo en el fallback), no la diferencia real de
+# posicion. Este check falla con el codigo viejo.
+check("compra confirmada a posteriori (WMT): registra la cantidad REAL (diferencia de posicion), "
+      "no la cantidad estimada antes de la orden",
+      bool(compras_wmt) and abs(compras_wmt[0]["cantidad"] - 0.05) < 1e-9,
+      f"compras_wmt={compras_wmt}")
 
 # Mismo caso, pero para una VENTA: si esperar_estado_final_orden() se rinde
 # sin un estado final, pero la posicion SI bajo de verdad, debe registrarse

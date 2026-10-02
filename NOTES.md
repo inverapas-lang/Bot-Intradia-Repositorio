@@ -1463,6 +1463,41 @@ restringido a una IP). Si la IP pública del PC cambia (router doméstico sin IP
 cambia, la conexión se corta con un error claro (no en silencio) — pero conviene revisarlo si
 algo deja de funcionar tras un corte de luz/reinicio del router.
 
+## Bug real: compra a posteriori registraba la cantidad ESTIMADA, no la REAL (oct. 2026)
+
+Caso real detectado por el usuario: una COMPRA de NVDA se notificó por Telegram con 0,1628
+acciones, pero más tarde `verificar_historial_completo()` tuvo que corregir el historial porque
+Alpaca tenía realmente 0,3851 acciones — un hueco de 0,2223 que solo se descubrió horas después
+(y con un precio aproximado, el de mercado en ese momento, no el precio real de esa compra).
+
+**Causa raíz**: cuando el estado de una orden de COMPRA no confirma `filled`/`Filled` a tiempo
+pero `verificar_orden_no_confirmada()` (Alpaca) / `verificar_posicion_tras_orden_no_confirmada()`
+(IBKR) detecta que la posición sí aumentó de verdad, el código antiguo seguía llamando a
+`obtener_ejecucion_real(trade.id, ...)` (Alpaca) o leía `trade.orderStatus.filled` (IBKR) para
+saber cuánto se había comprado — pero es el **mismo** `trade.id`/orden cuyo estado ya sabemos que
+no es fiable en esa rama, así que su cantidad de ejecución también podía ser poco fiable (null,
+o un fill parcial) y el código caía en la cantidad ESTIMADA antes de colocar la orden
+(`importe_a_usar / precio_actual`), no en la cantidad REALMENTE ejecutada.
+
+Es el mismo problema que `_registrar_venta_a_posteriori()` ya resolvía correctamente en el lado
+de las ventas (usa la diferencia real de posición, no el id de la orden) — pero el lado de las
+compras nunca tuvo el mismo tratamiento.
+
+**Fix** (`bot_alpaca.py` y `bot_completo.py`, acciones y cripto en ambos): en la rama "no
+confirmada a tiempo pero la posición sí cambió", la cantidad que se registra en el historial y se
+notifica por Telegram es ahora `cantidad_tras_compra - cantidad_antes_compra` (la diferencia real
+de posición, igual que en las ventas), usando el precio de referencia (`precio_actual`/
+`precio_compra_cripto`) como mejor aproximación disponible al precio real de ejecución (no hay
+forma de saberlo con certeza en esta vía, igual que en las ventas a posteriori). El mensaje de
+Telegram incluye el mismo sufijo `[confirmado a posteriori: el estado de la orden no fue
+fiable]` que ya se usaba en las ventas, para que quede claro que es una aproximación.
+`formatear_notificacion_compra()` (ambos bots) gana un parámetro `sufijo` opcional para esto.
+
+Con el fix, este hueco ya no debería producirse — la compra queda bien registrada en el momento,
+sin depender de que `verificar_historial_completo()` lo detecte y corrija horas después con un
+precio aproximado. Test de regresión en `tests/test_bot_alpaca.py` (caso WMT, cantidad estimada
+deliberadamente distinta de la cantidad real de la posición tras la orden).
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

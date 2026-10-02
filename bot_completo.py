@@ -1916,15 +1916,18 @@ def _texto_apertura_desde(mercado, ticker):
     return f" (abierta desde {formatear_fecha_corta(apertura)}, {duracion})"
 
 
-def formatear_notificacion_compra(ticker, mercado, cantidad, precio, currency, decimales_cantidad=4):
+def formatear_notificacion_compra(ticker, mercado, cantidad, precio, currency, decimales_cantidad=4, sufijo=""):
     """Mensaje de Telegram para una compra ejecutada, en varias lineas en
     vez de un solo parrafo denso -peticion del usuario, sept. 2026, mismo
     cambio que en bot_alpaca.py-."""
     total = cantidad * precio
-    return (f"🟢 COMPRA <b>{ticker}</b> ({mercado})\n"
-            f"Cantidad: {formato_es(cantidad, decimales_cantidad)}\n"
-            f"Precio: {formato_es(precio, 4)} {currency}\n"
-            f"Total: {formato_es(total, 4)} {currency}")
+    lineas = [f"🟢 COMPRA <b>{ticker}</b> ({mercado})",
+              f"Cantidad: {formato_es(cantidad, decimales_cantidad)}",
+              f"Precio: {formato_es(precio, 4)} {currency}",
+              f"Total: {formato_es(total, 4)} {currency}"]
+    if sufijo:
+        lineas.append(sufijo)
+    return "\n".join(lineas)
 
 
 def formatear_notificacion_venta(etiqueta_accion, ticker, mercado, cantidad, precio, currency,
@@ -2938,13 +2941,7 @@ def revisar_compras(ib, mercados=None):
                 estado = esperar_estado_final_orden(ib, trade)
                 log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
 
-                compra_confirmada_cripto = estado == 'Filled'
-                if not compra_confirmada_cripto:
-                    cantidad_tras_compra_cripto = verificar_posicion_tras_orden_no_confirmada(
-                        ib, contrato, cantidad_antes_compra_cripto, f"COMPRAS: {ticker}")
-                    compra_confirmada_cripto = cantidad_tras_compra_cripto > cantidad_antes_compra_cripto + 1e-6
-
-                if compra_confirmada_cripto:
+                if estado == 'Filled':
                     precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_compra_cripto
                     cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad_cripto
                     comision_ejecucion = estimar_comision_cripto(cantidad_ejecutada * precio_ejecucion)
@@ -2955,6 +2952,27 @@ def revisar_compras(ib, mercados=None):
                     notificar_telegram(formatear_notificacion_compra(
                         ticker, activo["mercado"], cantidad_ejecutada, precio_ejecucion, currency,
                         decimales_cantidad=6))
+                else:
+                    # BUG REAL DE PRODUCCION (oct. 2026, mismo caso que NVDA en
+                    # bot_alpaca.py): si el estado no confirma 'Filled' pero la
+                    # posicion SI aumento de verdad, trade.orderStatus.filled
+                    # pertenece a la MISMA orden cuyo estado ya sabemos que no
+                    # es fiable aqui, asi que puede quedarse corto (ej. solo
+                    # reflejar un fill parcial) frente a lo realmente ejecutado.
+                    # La cantidad fiable es la diferencia REAL de posicion.
+                    cantidad_tras_compra_cripto = verificar_posicion_tras_orden_no_confirmada(
+                        ib, contrato, cantidad_antes_compra_cripto, f"COMPRAS: {ticker}")
+                    cantidad_ejecutada = cantidad_tras_compra_cripto - cantidad_antes_compra_cripto
+                    if cantidad_ejecutada > 1e-6:
+                        comision_ejecucion = estimar_comision_cripto(cantidad_ejecutada * precio_compra_cripto)
+                        registrar_operacion_historial(activo["mercado"], ticker, "COMPRA", cantidad_ejecutada,
+                                                       precio_compra_cripto, comision_ejecucion, currency)
+                        if cantidad_antes_compra_cripto <= 1e-6:
+                            registrar_apertura_de_posicion(activo["mercado"], ticker)
+                        notificar_telegram(formatear_notificacion_compra(
+                            ticker, activo["mercado"], cantidad_ejecutada, precio_compra_cripto, currency,
+                            decimales_cantidad=6,
+                            sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
                 continue
 
             fraccionable = FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False)
@@ -3066,13 +3084,7 @@ def revisar_compras(ib, mercados=None):
                         f"cantidad directa) y el presupuesto ({importe_a_usar:.2f} {currency}) no llega "
                         f"ni para 1 accion entera a {precio_actual} {currency}, se omite.")
 
-            compra_confirmada = estado == 'Filled'
-            if not compra_confirmada:
-                cantidad_tras_compra = verificar_posicion_tras_orden_no_confirmada(
-                    ib, contrato, cantidad_antes_compra, f"COMPRAS: {ticker}")
-                compra_confirmada = cantidad_tras_compra > cantidad_antes_compra + 1e-6
-
-            if compra_confirmada:
+            if estado == 'Filled':
                 precio_ejecucion = getattr(trade.orderStatus, "avgFillPrice", None) or precio_actual
                 cantidad_ejecutada = getattr(trade.orderStatus, "filled", None) or cantidad
                 comision_ejecucion = estimar_comision(cantidad_ejecutada * precio_ejecucion, currency, cantidad_ejecutada)
@@ -3086,6 +3098,25 @@ def revisar_compras(ib, mercados=None):
                     registrar_apertura_de_posicion(activo["mercado"], ticker)
                 notificar_telegram(formatear_notificacion_compra(
                     ticker, activo["mercado"], cantidad_ejecutada, precio_ejecucion, currency))
+            else:
+                # BUG REAL DE PRODUCCION (oct. 2026, caso real NVDA en
+                # bot_alpaca.py, mismo fallo aqui): trade.orderStatus.filled
+                # pertenece a la MISMA orden cuyo estado ya sabemos que no es
+                # fiable aqui, asi que puede quedarse corto frente a lo
+                # realmente ejecutado. La cantidad fiable es la diferencia
+                # REAL de posicion.
+                cantidad_tras_compra = verificar_posicion_tras_orden_no_confirmada(
+                    ib, contrato, cantidad_antes_compra, f"COMPRAS: {ticker}")
+                cantidad_ejecutada = cantidad_tras_compra - cantidad_antes_compra
+                if cantidad_ejecutada > 1e-6:
+                    comision_ejecucion = estimar_comision(cantidad_ejecutada * precio_actual, currency, cantidad_ejecutada)
+                    registrar_operacion_historial(activo["mercado"], ticker, "COMPRA", cantidad_ejecutada,
+                                                   precio_actual, comision_ejecucion, currency)
+                    if cantidad_antes_compra <= 1e-6:
+                        registrar_apertura_de_posicion(activo["mercado"], ticker)
+                    notificar_telegram(formatear_notificacion_compra(
+                        ticker, activo["mercado"], cantidad_ejecutada, precio_actual, currency,
+                        sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
         except Exception as e:
             # Un fallo al procesar UNA señal de compra (precio raro, error de
             # red al colocar la orden, etc.) no debe abortar el escaneo del
