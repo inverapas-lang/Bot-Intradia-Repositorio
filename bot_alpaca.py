@@ -592,7 +592,16 @@ TEMPORALIDADES = [
     {"nombre": "1 dia",      "timeframe": TimeFrame(1, TimeFrameUnit.Day),    "duration_dias": 400,  "tipo": "larga"},
     {"nombre": "1 semana",   "timeframe": TimeFrame(1, TimeFrameUnit.Week),   "duration_dias": 5 * 365, "tipo": "larga"},
 ]
-NOMBRES_4_CORTAS = ["1 minuto", "5 minutos", "15 minutos", "30 minutos"]
+# Peticion del usuario (oct. 2026): el atajo rapido de decidir_senal() ahora
+# incluye TAMBIEN 1 hora -antes se quedaba en 30 minutos, dejando la unica
+# temporalidad "puente" entre el ruido de minutos y la tendencia del dia/
+# semana completamente fuera del atajo mas usado. En una semana con
+# tendencia bajista de fondo, 1min-30min cruzan a alcista constantemente por
+# simples rebotes de ruido aunque la tendencia de 1h siga bajista, y el
+# atajo compraba igualmente con solo que dia/semana no estuvieran en contra
+# -caso real detectado por el usuario, oct. 2026: entradas en F, T, PFE,
+# LINK justo al empezar una caida generalizada de mercado-.
+NOMBRES_CORTAS_ATAJO = ["1 minuto", "5 minutos", "15 minutos", "30 minutos", "1 hora"]
 
 
 # --- Vigilante de congelacion del proceso (identico a bot_completo.py) ---
@@ -716,18 +725,27 @@ def calcular_macd(cierres, rapida=12, lenta=26, senal=9):
 def decidir_senal(detalle):
     """Misma logica de decision que analizar_activo() en bot_completo.py,
     a partir de un dict {nombre_temporalidad: True/False/None}."""
-    # Peticion del usuario (sept. 2026): el atajo de "4 cortas alcistas"
+    # Peticion del usuario (sept. 2026): el atajo de "cortas alcistas"
     # tambien respeta que ninguna larga (dia/semana) este en contra -antes
-    # las ignoraba por completo, así que bastaba con las 4 cortas alcistas
+    # las ignoraba por completo, así que bastaba con las cortas alcistas
     # para comprar aunque la tendencia diaria o semanal fuera claramente
     # bajista (la peor categoria de entrada). Bug real corregido: la regla
     # de "1 de 7 en contra" de mas abajo nunca llegaba a aplicarse en este
-    # caso, porque el atajo la adelantaba siempre que las 4 cortas
-    # estuvieran alcistas (lo mas habitual).
+    # caso, porque el atajo la adelantaba siempre que las cortas estuvieran
+    # alcistas (lo mas habitual).
+    #
+    # Peticion del usuario (oct. 2026): NOMBRES_CORTAS_ATAJO ahora incluye 1
+    # hora (antes se quedaba en 30 minutos). Con solo 1min-30min, el atajo
+    # compraba sin mirar la unica temporalidad "puente" entre el ruido de
+    # minutos y la tendencia del dia/semana -en una semana con tendencia
+    # bajista de fondo, 1min-30min cruzan a alcista constantemente por
+    # simples rebotes de ruido, y el atajo entraba igualmente aunque la
+    # hora siguiera claramente bajista (caso real: F, T, PFE, LINK
+    # compradas justo al empezar una caida generalizada de mercado).
     largas_en_contra = any(detalle[tf["nombre"]] is False for tf in TEMPORALIDADES if tf["tipo"] == "larga")
-    cuatro_cortas_alcistas = (
-        all(detalle[n] is not None for n in NOMBRES_4_CORTAS)
-        and all(detalle[n] for n in NOMBRES_4_CORTAS)
+    cortas_atajo_alcistas = (
+        all(detalle[n] is not None for n in NOMBRES_CORTAS_ATAJO)
+        and all(detalle[n] for n in NOMBRES_CORTAS_ATAJO)
         and not largas_en_contra
     )
     faltan_datos = any(detalle[tf["nombre"]] is None for tf in TEMPORALIDADES)
@@ -741,7 +759,7 @@ def decidir_senal(detalle):
     # entrada) o una larga (contra la tendencia dominante, mala entrada).
     tf_en_contra = next((tf for tf in TEMPORALIDADES if detalle[tf["nombre"]] is False), None)
 
-    if cuatro_cortas_alcistas:
+    if cortas_atajo_alcistas:
         return "COMPRA"
     if faltan_datos:
         return "SIN_DATOS"

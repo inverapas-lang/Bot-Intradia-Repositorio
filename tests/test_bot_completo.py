@@ -381,10 +381,13 @@ class _IBPorTemporalidad:
         return []
 
 
-# Las 4 cortas alcistas y 1 hora BAJISTA, pero dia/semana ALCISTAS (sin
-# tendencia larga en contra): el atajo debe ganar y dar COMPRA, aunque con
-# la logica antigua (sin atajo) esto habria dado SIN_SENAL (cortas_ok=False
-# porque 1h esta en contra).
+# Las 4 cortas rapidas alcistas y 1 hora BAJISTA, pero dia/semana ALCISTAS
+# (sin tendencia larga en contra): el resultado sigue siendo COMPRA, pero
+# desde el fix de oct. 2026 (NOMBRES_CORTAS_ATAJO incluye 1h) YA NO es via
+# el atajo -1h bajista lo rompe-, sino via la excepcion independiente de
+# "1 de 7 en contra y es corta" (retroceso normal, peticion del usuario
+# sept. 2026). Mismo resultado final, pero por un camino distinto -ver el
+# siguiente test, donde SI cambia el resultado final-.
 series_atajo = {
     "1 min": SERIE_ALCISTA, "5 mins": SERIE_ALCISTA, "15 mins": SERIE_ALCISTA,
     "30 mins": SERIE_ALCISTA,
@@ -392,8 +395,29 @@ series_atajo = {
 }
 bot._cache_temporalidades_largas = {}
 _, decision_atajo = bot.analizar_activo(_IBPorTemporalidad(series_atajo), activo_prueba)
-check("analizar_activo: 4 cortas alcistas + 1h bajista, dia/semana OK -> COMPRA (el atajo manda)",
+check("analizar_activo: 4 cortas rapidas alcistas + 1h bajista, dia/semana OK -> COMPRA igual "
+      "(ya no por el atajo, que 1h rompe, sino por la excepcion de '1 de 7 en contra y es corta')",
       decision_atajo == "COMPRA", f"decision={decision_atajo}")
+
+# --- Bug real corregido (oct. 2026, peticion del usuario): con el atajo
+# viejo (sin 1h), si 1h era bajista Y ademas faltaba el dato de una larga
+# (None, p.ej. un fallo puntual al pedir las velas semanales), el atajo de
+# "4 cortas alcistas" disparaba IGUAL -comprando sin haber podido confirmar
+# ninguna tendencia de fondo, ni la de 1h (bajista) ni la larga
+# (desconocida)-, porque el atajo se evalua ANTES que la comprobacion de
+# datos faltantes. Con 1h ya dentro del atajo, este caso cae correctamente
+# en SIN_DATOS. ---
+series_1h_bajista_falta_larga = {
+    "1 min": SERIE_ALCISTA, "5 mins": SERIE_ALCISTA, "15 mins": SERIE_ALCISTA,
+    "30 mins": SERIE_ALCISTA,
+    "1 hour": SERIE_BAJISTA, "1 day": SERIE_ACELERANDO_ALTA, "1 week": [],  # [] -> < 35 velas -> None
+}
+bot._cache_temporalidades_largas = {}
+_, decision_1h_bajista_falta_larga = bot.analizar_activo(
+    _IBPorTemporalidad(series_1h_bajista_falta_larga), activo_prueba)
+check("analizar_activo: 1h bajista Y falta el dato de 'semana' -> SIN_DATOS, NO compra "
+      "(antes: el atajo de 4 cortas, sin 1h, disparaba igual y compraba a ciegas)",
+      decision_1h_bajista_falta_larga == "SIN_DATOS", f"decision={decision_1h_bajista_falta_larga}")
 
 # Si SOLO una de las 4 cortas requeridas esta bajista (p.ej. 1 minuto), el
 # atajo NO debe activarse. Con el resto de temporalidades tambien bajistas,

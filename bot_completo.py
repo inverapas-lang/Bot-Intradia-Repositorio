@@ -519,9 +519,14 @@ TEMPORALIDADES = [
     {"nombre": "1 semana",   "barSize": "1 week",  "duration": "5 Y",  "tipo": "larga"},
 ]
 
-# Atajo de compra: si estas 4 temporalidades cortas estan todas alcistas,
-# se compra sin mirar el resto (vease analizar_activo).
-NOMBRES_4_CORTAS = ["1 minuto", "5 minutos", "15 minutos", "30 minutos"]
+# Atajo de compra: si estas temporalidades cortas estan todas alcistas, se
+# compra sin mirar el resto (vease analizar_activo). Peticion del usuario
+# (oct. 2026): incluye TAMBIEN 1 hora -antes se quedaba en 30 minutos,
+# dejando fuera del atajo la unica temporalidad "puente" entre el ruido de
+# minutos y la tendencia del dia/semana. Mismo fix que en bot_alpaca.py
+# (caso real: entradas compradas justo al empezar una caida generalizada de
+# mercado, con 1h ya claramente bajista pero ignorada por el atajo).
+NOMBRES_CORTAS_ATAJO = ["1 minuto", "5 minutos", "15 minutos", "30 minutos", "1 hora"]
 
 # Atajo de compra EXCLUSIVO de cripto (peticion del usuario, sept. 2026):
 # ademas del atajo general de arriba (1/5/15/30 min), cripto comprueba
@@ -1283,21 +1288,26 @@ def analizar_activo(ib, activo):
         macd, linea_senal, _ = calcular_macd(cierres)
         detalle[tf['nombre']] = bool(macd.iloc[-1] > linea_senal.iloc[-1])
 
-    # Atajo: si las 4 temporalidades mas cortas (1min, 5min, 15min, 30min)
-    # estan todas alcistas, se compra directamente, sin mirar 1h ni la regla
-    # de "maximo 1 de 7 en contra" de mas abajo. SI se sigue respetando que
-    # ninguna larga (dia/semana) este en contra (peticion del usuario, sept.
-    # 2026): antes el atajo ignoraba dia/semana por completo, así que
-    # bastaba con las 4 cortas alcistas para comprar aunque la tendencia
-    # diaria o semanal fuera claramente bajista -la peor categoria de
-    # entrada, comprar contra la tendencia dominante-. Bug real corregido
-    # aqui: la vieja regla de "1 de 7 en contra" de mas abajo NUNCA llegaba
-    # a aplicarse en este caso, porque el atajo la adelantaba siempre que
-    # las 4 cortas estuvieran alcistas (lo mas habitual).
+    # Atajo: si las temporalidades cortas de NOMBRES_CORTAS_ATAJO (1min,
+    # 5min, 15min, 30min, 1h) estan todas alcistas, se compra directamente,
+    # sin mirar la regla de "maximo 1 de 7 en contra" de mas abajo. SI se
+    # sigue respetando que ninguna larga (dia/semana) este en contra
+    # (peticion del usuario, sept. 2026): antes el atajo ignoraba dia/semana
+    # por completo, así que bastaba con las cortas alcistas para comprar
+    # aunque la tendencia diaria o semanal fuera claramente bajista -la peor
+    # categoria de entrada, comprar contra la tendencia dominante-. Bug real
+    # corregido aqui: la vieja regla de "1 de 7 en contra" de mas abajo
+    # NUNCA llegaba a aplicarse en este caso, porque el atajo la adelantaba
+    # siempre que las cortas estuvieran alcistas (lo mas habitual).
+    #
+    # Peticion del usuario (oct. 2026): NOMBRES_CORTAS_ATAJO ahora incluye 1
+    # hora (antes el atajo se quedaba en 30 minutos y la ignoraba por
+    # completo) -ver comentario junto a su definicion, mismo fix que en
+    # bot_alpaca.py-.
     largas_en_contra = any(detalle[tf['nombre']] is False for tf in TEMPORALIDADES if tf['tipo'] == 'larga')
     cuatro_cortas_alcistas = (
-        all(detalle[n] is not None for n in NOMBRES_4_CORTAS)
-        and all(detalle[n] for n in NOMBRES_4_CORTAS)
+        all(detalle[n] is not None for n in NOMBRES_CORTAS_ATAJO)
+        and all(detalle[n] for n in NOMBRES_CORTAS_ATAJO)
         and not largas_en_contra
     )
 

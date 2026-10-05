@@ -57,19 +57,42 @@ todas_alcistas = {tf["nombre"]: True for tf in bot.TEMPORALIDADES}
 check("decidir_senal: las 7 temporalidades alcistas -> COMPRA",
       bot.decidir_senal(todas_alcistas) == "COMPRA")
 
-cuatro_cortas_alcistas_1h_bajista = dict(todas_alcistas)
-cuatro_cortas_alcistas_1h_bajista["1 hora"] = False  # fuera del atajo (no esta en NOMBRES_4_CORTAS)
-check("decidir_senal: atajo de 4 cortas alcistas (1h bajista, largas OK) -> COMPRA directa",
-      bot.decidir_senal(cuatro_cortas_alcistas_1h_bajista) == "COMPRA")
+# Con 1h DENTRO del atajo (fix oct. 2026, ver NOMBRES_CORTAS_ATAJO), este
+# caso ya NO dispara el atajo -pero el resultado final sigue siendo COMPRA,
+# a traves de la excepcion independiente de "1 de 7 en contra y es corta"
+# (retroceso normal, peticion del usuario sept. 2026) mas abajo. El fix de
+# 1h NO cambia este caso -1h bajista con largas CONOCIDAS (True) sigue
+# comprando igual, es lo esperado-; donde SI cambia el resultado es cuando
+# ademas falta un dato de una larga (ver siguiente test).
+una_hora_bajista_largas_ok = dict(todas_alcistas)
+una_hora_bajista_largas_ok["1 hora"] = False
+check("decidir_senal: 1h bajista con largas CONOCIDAS (dia/semana True) -> COMPRA igual, via "
+      "la excepcion de '1 de 7 en contra y es corta' (no via el atajo, que ya no dispara)",
+      bot.decidir_senal(una_hora_bajista_largas_ok) == "COMPRA")
+
+# --- Bug real corregido (oct. 2026, peticion del usuario): con el atajo
+# viejo (NOMBRES_4_CORTAS sin 1h), si 1h era bajista Y ademas faltaba el
+# dato de una larga (None, p.ej. un fallo puntual al pedir las velas
+# diarias/semanales), el atajo de "4 cortas alcistas" disparaba IGUAL
+# -comprando sin haber podido confirmar NINGUNA tendencia de fondo, ni la
+# de 1h (bajista) ni la diaria/semanal (desconocida)-, porque el atajo se
+# evalua ANTES que la comprobacion de datos faltantes. Con 1h ya dentro del
+# atajo, este caso ahora cae correctamente en SIN_DATOS. ---
+una_hora_bajista_falta_larga = dict(todas_alcistas)
+una_hora_bajista_falta_larga["1 hora"] = False
+una_hora_bajista_falta_larga["1 semana"] = None
+check("decidir_senal: 1h bajista Y falta el dato de una larga -> SIN_DATOS, NO compra "
+      "(antes: el atajo de 4 cortas, sin 1h, disparaba igual y compraba a ciegas)",
+      bot.decidir_senal(una_hora_bajista_falta_larga) == "SIN_DATOS")
 
 falta_una_temporalidad = dict(todas_alcistas)
 falta_una_temporalidad["1 semana"] = None
-falta_una_temporalidad["1 minuto"] = False  # rompe el atajo de 4 cortas
-check("decidir_senal: falta un dato (no en las 4 cortas) -> SIN_DATOS",
+falta_una_temporalidad["1 minuto"] = False  # rompe el atajo de cortas
+check("decidir_senal: falta un dato (no en las cortas del atajo) -> SIN_DATOS",
       bot.decidir_senal(falta_una_temporalidad) == "SIN_DATOS")
 
 una_corta_en_contra = dict(todas_alcistas)
-una_corta_en_contra["1 minuto"] = False  # rompe el atajo de 4 cortas, pero es un retroceso normal
+una_corta_en_contra["1 minuto"] = False  # rompe el atajo de cortas, pero es un retroceso normal
 check("decidir_senal: 1 de 7 en contra y es CORTA (retroceso normal) -> COMPRA",
       bot.decidir_senal(una_corta_en_contra) == "COMPRA")
 
@@ -92,13 +115,13 @@ una_semana_en_contra["1 semana"] = False
 check("decidir_senal: 1 de 7 en contra y es LARGA (semana) -> BLOQUEADO_TF_LARGA, NO compra",
       bot.decidir_senal(una_semana_en_contra) == "BLOQUEADO_TF_LARGA")
 
-# NOTA: "BLOQUEADO" (cortas ok, largas no) es un resultado que, con las 4
-# cortas dentro de NOMBRES_4_CORTAS, en la practica ya no puede darse: el
-# atajo de "4 cortas alcistas" dispara ANTES y devuelve COMPRA directamente
-# (mismo comportamiento documentado en bot_completo.py/NOTES.md). Se prueba
-# en su lugar el caso real: 2 en contra (fuera del atajo) -> SIN_SENAL.
+# NOTA: "BLOQUEADO" (cortas ok, largas no) es un resultado que, con todas
+# las cortas dentro de NOMBRES_CORTAS_ATAJO, en la practica ya no puede
+# darse: el atajo dispara ANTES y devuelve COMPRA directamente (mismo
+# comportamiento documentado en bot_completo.py/NOTES.md). Se prueba en su
+# lugar el caso real: 2 en contra (fuera del atajo) -> SIN_SENAL.
 dos_en_contra = dict(todas_alcistas)
-dos_en_contra["1 minuto"] = False  # rompe el atajo de 4 cortas
+dos_en_contra["1 minuto"] = False  # rompe el atajo de cortas
 dos_en_contra["1 dia"] = False
 check("decidir_senal: 2 de 7 en contra (atajo roto, cortas no ok) -> SIN_SENAL",
       bot.decidir_senal(dos_en_contra) == "SIN_SENAL")

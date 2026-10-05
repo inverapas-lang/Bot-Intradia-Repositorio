@@ -1498,6 +1498,40 @@ sin depender de que `verificar_historial_completo()` lo detecte y corrija horas 
 precio aproximado. Test de regresión en `tests/test_bot_alpaca.py` (caso WMT, cantidad estimada
 deliberadamente distinta de la cantidad real de la posición tras la orden).
 
+## Atajo de compra: 1 hora añadida a NOMBRES_CORTAS_ATAJO (oct. 2026)
+
+Contexto: con `/cartera` mostrando casi todas las posiciones en rojo durante una semana de
+caída generalizada del mercado, el usuario sospechó que la señal de entrada compraba en
+momentos subóptimos (no un tema de stop-loss, sino de "no entrar en el momento óptimo").
+
+**Causa identificada**: el atajo rápido de `decidir_senal()` (`bot_alpaca.py`) /
+`analizar_activo()` (`bot_completo.py`) solo exigía que las 4 temporalidades MÁS rápidas
+(1min, 5min, 15min, 30min) estuvieran alcistas, dejando **1 hora completamente fuera** —
+la única temporalidad "puente" entre el ruido de minutos y la tendencia real del día/semana.
+En una semana con tendencia bajista de fondo, 1min-30min cruzan a alcista constantemente por
+simples rebotes de ruido; el atajo compraba igual con solo que día/semana no estuvieran
+explícitamente en contra.
+
+**Fix**: `NOMBRES_4_CORTAS` renombrada a `NOMBRES_CORTAS_ATAJO` y ampliada a 5 temporalidades
+(incluye "1 hora"), en ambos bots.
+
+**Alcance real del fix (importante, para no sobreestimarlo)**: el resultado final de
+`decidir_senal()` con "1h bajista pero día/semana CONOCIDOS y alcistas" **no cambia** — sigue
+siendo COMPRA, pero ahora a través de la excepción independiente de "1 de 7 en contra y es
+una temporalidad corta" (retroceso normal, ya aceptada por el usuario en sept. 2026), no del
+atajo. Donde el fix SÍ cambia el resultado es en el caso combinado: 1h bajista **y además**
+falta el dato de una temporalidad larga (`None`, p.ej. un fallo puntual al pedir las velas
+semanales) — antes el atajo disparaba igualmente (se evalúa ANTES que la comprobación de
+datos faltantes), comprando sin haber podido confirmar ninguna tendencia de fondo; ahora cae
+correctamente en `SIN_DATOS`. Es una mejora real pero más acotada de lo que podría parecer a
+primera vista — no evita, por sí sola, comprar durante un rebote de ruido de corto plazo
+mientras 1h ya está claramente bajista y día/semana SÍ tienen datos (ese caso sigue
+permitiéndose a propósito, por la regla de "retroceso normal").
+
+Tests de regresión en `tests/test_bot_alpaca.py` y `tests/test_bot_completo.py` (casos:
+1h bajista con largas conocidas -> COMPRA igual pero por otro camino; 1h bajista + larga sin
+dato -> SIN_DATOS, antes compraba a ciegas).
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan
