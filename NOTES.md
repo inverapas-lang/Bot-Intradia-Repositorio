@@ -1532,6 +1532,38 @@ Tests de regresión en `tests/test_bot_alpaca.py` y `tests/test_bot_completo.py`
 1h bajista con largas conocidas -> COMPRA igual pero por otro camino; 1h bajista + larga sin
 dato -> SIN_DATOS, antes compraba a ciegas).
 
+## Bug real: "abierta desde" anclaba la fecha de un ajuste automático, no la de la compra real (oct. 2026)
+
+Caso real detectado por el usuario: `/cartera` mostraba T, WMT y XOM como "abierta desde 24 SEP",
+pero al reconstruir el historial real de Alpaca (pedido por SSH al servidor) se confirmó que:
+- T se compró de verdad el **15 sept** (0,867953083 acciones) — una compra que nunca se registró en
+  el historial local (el bug ya conocido de "compra de T no registrada", documentado más arriba).
+- El 24 sept corrió `verificar_historial_completo()`, detectó el hueco (Alpaca tenía la posición,
+  el historial no la explicaba) y lo reconcilió con una **COMPRA sintética** (marcada con `"nota"`)
+  usando el precio de mercado **de ese día**, no el precio/fecha real de la compra original.
+- `_fecha_apertura_posicion()` (`cartera_alpaca.py`) / `_texto_apertura_desde()` (`bot_alpaca.py`) /
+  `_fecha_apertura_posicion()` (`cartera_ibkr.py`) trataban esa COMPRA sintética igual que una
+  compra real al recorrer el historial — si era la que hacía que `cantidad_actual` pasara de ~0 a
+  positivo, su fecha se usaba como "apertura", anclando el display a la fecha de la CORRECCIÓN
+  (24 sept) en vez de la fecha real de la compra (15 sept) — 9 días de diferencia en este caso.
+
+**Fix** (los 3 sitios): si la COMPRA que "abre" la racha actual tiene `"nota"` (es un ajuste
+automático, no una operación real ejecutada por el bot), NO se usa su fecha como apertura — se deja
+`fecha_apertura` en `None` (desconocida) en vez de anclarla a una fecha equivocada. Su cantidad SÍ
+se sigue sumando con normalidad (sigue siendo necesaria para rastrear cuándo la posición se cierra
+del todo); solo cambia si esa compra concreta cuenta como "apertura fiable" para el display. Con
+`fecha_apertura is None`, el código existente ya omite la línea de "abierta desde" en vez de
+mostrar nada (mismo comportamiento que cuando no hay ninguna compra previa registrada).
+
+Nota: el usuario preguntó si en vez de esto `/cartera` podría pedirle la fecha de apertura
+directamente a Alpaca — no es posible, la API de posiciones de Alpaca no expone ningún campo de
+"fecha de apertura", solo cantidad y precio medio actuales; por eso el bot siempre lo ha calculado
+reconstruyendo su propio historial.
+
+Tests de regresión en `tests/test_bot_alpaca.py`, `tests/test_cartera_alpaca.py` y
+`tests/test_cartera_ibkr.py` (COMPRA con `"nota"` que abre la racha -> no se muestra "abierta
+desde", en vez de una fecha equivocada).
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

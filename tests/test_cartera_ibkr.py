@@ -158,6 +158,28 @@ check("formatear_operaciones_cerradas (html, IBKR): un ajuste automatico muestra
       f"resultado={cerradas_ajuste_html_ibkr!r}")
 
 
+# --- BUG REAL DE PRODUCCION (oct. 2026, caso real en Alpaca: T mostraba
+# "abierta desde 24 SEP" cuando la compra real fue 9 dias antes): una
+# COMPRA sintetica (con "nota") que abre la racha actual no debe anclar
+# "abierta desde" a su fecha -mismo fix que en cartera_alpaca.py-. ---
+compra_t_sintetica_ibkr = hoy_dt - timedelta(days=9)
+operaciones_ajuste_abre_ibkr = [
+    {"fecha_hora": compra_t_sintetica_ibkr.isoformat(timespec="seconds"), "mercado": "US", "ticker": "T",
+     "lado": "COMPRA", "cantidad": 0.868, "precio": 26.712, "comision": 0.0, "currency": "USD",
+     "nota": "ajuste automatico: verificar_historial_completo"},
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "mercado": "US", "ticker": "T",
+     "lado": "VENTA", "cantidad": 0.868, "precio": 27.0, "comision": 0.0, "currency": "USD",
+     "coste_medio": 26.712, "beneficio_pct": 1.08},
+]
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump(operaciones_ajuste_abre_ibkr, f)
+cerradas_html_ajuste_abre_ibkr = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html, IBKR): una COMPRA sintetica (con 'nota') que abre "
+      "la racha NO ancla 'abierta desde' a su fecha (9 dias atras)",
+      "T" in cerradas_html_ajuste_abre_ibkr and "abierta desde" not in cerradas_html_ajuste_abre_ibkr,
+      f"resultado={cerradas_html_ajuste_abre_ibkr!r}")
+
+
 if fallos:
     print(f"\n{len(fallos)} test(s) FALLARON: {fallos}")
     sys.exit(1)

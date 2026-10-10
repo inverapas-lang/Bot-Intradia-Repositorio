@@ -1360,7 +1360,22 @@ def _texto_apertura_desde(ticker, hasta_fecha_hora):
     desde DD MES, Xh Ymin)" para las notificaciones de venta (peticion del
     usuario, sept. 2026: saber cuanto ha durado una posicion sin tener que
     consultarlo aparte). Cadena vacia si no hay ninguna compra previa
-    registrada (dato incompleto)."""
+    registrada (dato incompleto).
+
+    BUG REAL DE PRODUCCION (oct. 2026, casos reales: T/WMT/XOM mostraban
+    "abierta desde" la fecha de una correccion automatica de
+    verificar_historial_completo(), no la fecha real de la primera compra -
+    para T, hasta 9 dias de diferencia, porque la compra real que abrio la
+    posicion (15 sept) nunca se registro -el bug original de "compra de T
+    no registrada"-, y se descubrio y corrigio el 24 sept con una COMPRA
+    sintetica a precio de mercado DE ESE DIA, no el precio/fecha real de
+    la compra-): una COMPRA sintetica (marcada con "nota") NO representa el
+    momento real en que se abrio la posicion, solo reconcilia una cantidad
+    que ya estaba en Alpaca de antes por un hueco de registro previo. Si
+    fuera la que "abre" la racha (cantidad_actual en ~0 justo antes), NO se
+    usa su fecha como apertura -se deja fecha_apertura en None (desconocida)
+    en vez de anclarla a una fecha equivocada-; su cantidad SI se sigue
+    sumando con normalidad, solo cambia si cuenta como apertura fiable."""
     modo_actual = "PAPER" if ALPACA_PAPER else "REAL"
     cantidad_actual = 0.0
     fecha_apertura = None
@@ -1371,7 +1386,7 @@ def _texto_apertura_desde(ticker, hasta_fecha_hora):
             continue
         if o["lado"] == "COMPRA":
             if cantidad_actual <= UMBRAL_POSICION_CERRADA_DUST:
-                fecha_apertura = o["fecha_hora"]
+                fecha_apertura = o["fecha_hora"] if o.get("nota") is None else None
             cantidad_actual += o["cantidad"]
         else:
             cantidad_actual = max(0.0, cantidad_actual - o["cantidad"])

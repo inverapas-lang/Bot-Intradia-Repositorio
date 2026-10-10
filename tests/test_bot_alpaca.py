@@ -1634,6 +1634,20 @@ check("formatear_notificacion_venta: el sufijo opcional (confirmado a posteriori
           "VENTA", "T", 0.434, 26.71, 1.07, 0.13, sufijo="[confirmado a posteriori: aviso]"),
       )
 
+# BUG REAL DE PRODUCCION (oct. 2026, caso real T: "abierta desde 24 SEP"
+# cuando la compra real fue el 15 sept, 9 dias antes): una COMPRA sintetica
+# de verificar_historial_completo() (con "nota") que abre la racha actual
+# no debe anclar "abierta desde" a su fecha -ver mismo fix en
+# cartera_alpaca.py/cartera_ibkr.py-.
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([{"fecha_hora": compra_hace_6d23h.isoformat(timespec="seconds"), "ticker": "T",
+                "lado": "COMPRA", "cantidad": 0.434, "precio": 26.42, "modo": "REAL",
+                "nota": "ajuste automatico: verificar_historial_completo"}], f)
+mensaje_venta_ajuste_abre = bot.formatear_notificacion_venta("VENTA", "T", 0.434, 26.71, 1.07, 0.13)
+check("formatear_notificacion_venta: una COMPRA sintetica (con 'nota') que abre la racha NO "
+      "ancla 'abierta desde' a su fecha -no muestra la linea, en vez de una fecha equivocada",
+      "abierta desde" not in mensaje_venta_ajuste_abre, f"mensaje={mensaje_venta_ajuste_abre!r}")
+
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_alpaca
 bot.ALPACA_PAPER = paper_original_notif
 

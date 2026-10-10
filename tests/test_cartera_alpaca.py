@@ -347,6 +347,30 @@ check("formatear_operaciones_cerradas (html): un resto de redondeo tras vender (
       "30min" in cerradas_html_btc_dust and "2h" not in cerradas_html_btc_dust,
       f"resultado={cerradas_html_btc_dust!r}")
 
+# --- BUG REAL DE PRODUCCION (oct. 2026, caso real: T mostraba "abierta
+# desde 24 SEP" en /cartera cuando la compra real que abrio la posicion fue
+# el 15 sept -9 dias antes-, porque el 24 sept una COMPRA SINTETICA de
+# verificar_historial_completo() (marcada con "nota") reconcilio un hueco
+# de historial previo y _fecha_apertura_posicion() la trato como si fuera
+# la compra real que abrio la posicion. Ahora una COMPRA con "nota" no debe
+# anclar la fecha de apertura. ---
+compra_t_sintetica = hoy_dt - timedelta(days=9)
+operaciones_ajuste_abre_posicion = [
+    {"fecha_hora": compra_t_sintetica.isoformat(timespec="seconds"), "ticker": "T", "lado": "COMPRA",
+     "cantidad": 0.867953083, "precio": 26.712, "modo": "REAL",
+     "nota": "ajuste automatico: verificar_historial_completo"},
+    {"fecha_hora": hoy_dt.isoformat(timespec="seconds"), "ticker": "T", "lado": "VENTA",
+     "cantidad": 0.867953083, "precio": 27.0, "coste_medio": 26.712, "beneficio_pct": 1.08, "modo": "REAL"},
+]
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump(operaciones_ajuste_abre_posicion, f)
+cerradas_html_ajuste_abre = cartera.formatear_operaciones_cerradas(hoy_dt.date(), hoy_dt.date(), html=True)
+check("formatear_operaciones_cerradas (html): una COMPRA sintetica (con 'nota') que abre la "
+      "racha NO ancla 'abierta desde' a su fecha (9 dias atras) -no muestra la linea, en vez de "
+      "una fecha equivocada",
+      "T" in cerradas_html_ajuste_abre and "abierta desde" not in cerradas_html_ajuste_abre,
+      f"resultado={cerradas_html_ajuste_abre!r}")
+
 
 # --- Ajuste automatico de verificar_historial_completo() (sept. 2026): una
 # VENTA sintetica (marcada con "nota", sin coste_medio ni beneficio_pct) se

@@ -101,7 +101,13 @@ def _fecha_apertura_posicion(operaciones_clave_ordenadas, hasta_fecha_hora):
 
     Mismo umbral UMBRAL_POSICION_CERRADA_DUST que cartera_alpaca.py/
     bot_alpaca.py (bug real, sept. 2026: 1e-9 era demasiado ajustado frente
-    al redondeo tipico de una ejecucion real, sobre todo en cripto)."""
+    al redondeo tipico de una ejecucion real, sobre todo en cripto).
+
+    Mismo fix que cartera_alpaca.py (oct. 2026, bug real T/WMT/XOM en
+    Alpaca): una COMPRA sintetica de verificar_historial_completo()
+    (marcada con "nota") no representa el momento real de apertura, solo
+    reconcilia una cantidad que ya estaba en la cuenta por un hueco de
+    registro previo -si es la que "abre" la racha, NO se usa su fecha."""
     UMBRAL_POSICION_CERRADA_DUST = 1e-5
     cantidad_actual = 0.0
     fecha_apertura = None
@@ -110,7 +116,7 @@ def _fecha_apertura_posicion(operaciones_clave_ordenadas, hasta_fecha_hora):
             break
         if o["lado"] == "COMPRA":
             if cantidad_actual <= UMBRAL_POSICION_CERRADA_DUST:
-                fecha_apertura = o["fecha_hora"]
+                fecha_apertura = o["fecha_hora"] if o.get("nota") is None else None
             cantidad_actual += o["cantidad"]
         else:
             cantidad_actual = max(0.0, cantidad_actual - o["cantidad"])

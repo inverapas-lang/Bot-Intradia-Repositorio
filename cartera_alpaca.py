@@ -191,7 +191,22 @@ def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora, mod
     dejan el saldo EXACTAMENTE a 0 (redondeo de la ejecucion real en
     Alpaca, tipicamente del orden de 1e-6) -mismo bug y misma correccion
     que UMBRAL_POSICION_CERRADA_DUST en bot_alpaca.py, ver ese comentario
-    para el detalle-."""
+    para el detalle-.
+
+    BUG REAL DE PRODUCCION (oct. 2026, casos reales: T/WMT/XOM mostraban
+    "abierta desde 24 SEP" cuando la compra real que abrio la posicion de
+    T fue en realidad el 15 sept -9 dias antes-: el 24 sept corrio
+    verificar_historial_completo() y encontro que esa compra real nunca se
+    habia registrado -el bug original de "compra de T no registrada"-, asi
+    que la reconcilio con una COMPRA sintetica (marcada con "nota") A
+    PRECIO DE MERCADO DE ESE DIA, no al precio/fecha real de la compra
+    original. Una COMPRA sintetica no representa el momento real de
+    apertura, solo reconcilia una cantidad que ya estaba en Alpaca por un
+    hueco de registro previo -si es la que "abre" la racha (cantidad en
+    ~0 justo antes), NO se usa su fecha; se deja fecha_apertura en None
+    (desconocida) en vez de anclarla a una fecha equivocada. Su cantidad
+    SI se sigue sumando con normalidad, solo cambia si cuenta como
+    apertura fiable."""
     UMBRAL_POSICION_CERRADA_DUST = 1e-5
     cantidad_actual = 0.0
     fecha_apertura = None
@@ -202,7 +217,7 @@ def _fecha_apertura_posicion(operaciones_ticker_ordenadas, hasta_fecha_hora, mod
             continue
         if o["lado"] == "COMPRA":
             if cantidad_actual <= UMBRAL_POSICION_CERRADA_DUST:
-                fecha_apertura = o["fecha_hora"]
+                fecha_apertura = o["fecha_hora"] if o.get("nota") is None else None
             cantidad_actual += o["cantidad"]
         else:
             cantidad_actual = max(0.0, cantidad_actual - o["cantidad"])
