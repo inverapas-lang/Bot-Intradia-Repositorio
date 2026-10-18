@@ -1414,6 +1414,18 @@ _maximo_beneficio_neto_por_posicion = {}  # clave_historial(mercado, ticker) -> 
 PORCENTAJE_SCALE_OUT = 0.5
 _scale_out_realizado = set()  # claves ya con su venta parcial hecha (mismo formato que el dict de arriba)
 
+
+def marcar_scale_out_realizado(clave):
+    """Marca el scale-out como hecho DE VERDAD (llamar solo tras confirmar
+    que la venta parcial se ejecuto realmente, nunca al decidirla) - mismo
+    fix que en bot_alpaca.py (bug real oct. 2026): antes,
+    decidir_accion_venta() marcaba _scale_out_realizado al DECIDIR la venta
+    parcial, antes de colocar la orden; si esa orden no llegaba a
+    ejecutarse, la marca se quedaba puesta igualmente y el scale-out
+    quedaba desactivado en silencio para siempre en esa posicion."""
+    _scale_out_realizado.add(clave)
+    _guardar_estado_venta()
+
 # Cooldown de recompra tras una venta TOTAL (mismo bug real que en
 # bot_alpaca.py, casos META/TSLA: se recompraba justo tras vender, casi al
 # mismo precio, y despues bajaba - ver COOLDOWN_RECOMPRA_MINUTOS mas abajo).
@@ -1566,7 +1578,10 @@ def decidir_accion_venta(clave, beneficio_pct, umbral, macd_alcista_fn=None):
         if macd_alcista_fn is not None and macd_alcista_fn():
             _guardar_estado_venta()
             return "MANTENER", info + " (scale-out aplazado: MACD 5min sigue claramente alcista)"
-        _scale_out_realizado.add(clave)
+        # NO se marca _scale_out_realizado aqui -solo se decide, todavia no
+        # se sabe si la orden se va a ejecutar de verdad-. Lo marca el
+        # llamador via marcar_scale_out_realizado() tras confirmar la
+        # ejecucion real (ver su docstring, bug real oct. 2026).
         _guardar_estado_venta()
         return "VENTA_PARCIAL", f"objetivo alcanzado ({beneficio_pct:.2f}% >= {umbral}%): asegurando el {PORCENTAJE_SCALE_OUT*100:.0f}%"
     _guardar_estado_venta()
@@ -2120,10 +2135,13 @@ def _registrar_venta_a_posteriori(mercado, contrato, cantidad_antes, cantidad_ah
     cantidad_ejecutada se deduce de la diferencia de posicion real (no hay
     un avgFillPrice fiable por esta via, asi que precio_actual es la mejor
     aproximacion disponible). Si la posicion quedo en ~0, se trata como
-    venta TOTAL (se olvida el seguimiento del trailing stop)."""
+    venta TOTAL (se olvida el seguimiento del trailing stop). Devuelve True
+    si de verdad se registro una venta (el llamador lo usa para saber si
+    debe marcar_scale_out_realizado()), False si no hubo ninguna ejecucion
+    real que registrar."""
     cantidad_ejecutada = cantidad_antes - cantidad_ahora
     if cantidad_ejecutada <= 1e-6:
-        return
+        return False
     beneficio_moneda = cantidad_ejecutada * (precio_actual - coste_medio) - comision_total
     registrar_operacion_historial(mercado, contrato.symbol, "VENTA", cantidad_ejecutada,
                                    precio_actual, comision_total, contrato.currency,
@@ -2134,6 +2152,7 @@ def _registrar_venta_a_posteriori(mercado, contrato, cantidad_antes, cantidad_ah
         sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
     if cantidad_ahora <= 1e-6:
         registrar_venta_total(clave_posicion, precio_actual)
+    return True
 
 
 def mercado_de_posicion(pos):
@@ -2355,12 +2374,17 @@ def revisar_ventas(ib, mercados=None):
                         contrato.currency, beneficio_pct_real, beneficio_moneda_real, decimales_cantidad=6))
                     if accion_cripto == "VENTA_TOTAL":
                         registrar_venta_total(clave_posicion_cripto, precio_ejecucion)
+                    elif accion_cripto == "VENTA_PARCIAL":
+                        marcar_scale_out_realizado(clave_posicion_cripto)
                 else:
                     cantidad_ahora_cripto = verificar_posicion_tras_orden_no_confirmada(
                         ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
-                    _registrar_venta_a_posteriori(mercado, contrato, cantidad, cantidad_ahora_cripto,
-                                                   precio_actual, comision_total, coste_medio, beneficio_pct,
-                                                   etiqueta_cripto, clave_posicion_cripto)
+                    se_vendio_cripto = _registrar_venta_a_posteriori(
+                        mercado, contrato, cantidad, cantidad_ahora_cripto,
+                        precio_actual, comision_total, coste_medio, beneficio_pct,
+                        etiqueta_cripto, clave_posicion_cripto)
+                    if se_vendio_cripto and accion_cripto == "VENTA_PARCIAL":
+                        marcar_scale_out_realizado(clave_posicion_cripto)
                 continue
 
             if (mercado != "?" and en_ventana_venta_forzada(mercado)
@@ -2455,7 +2479,21 @@ def revisar_ventas(ib, mercados=None):
             cantidad_a_vender = cantidad
             if accion == "VENTA_PARCIAL":
                 parcial = cantidad * PORCENTAJE_SCALE_OUT
-                parcial = round(parcial, DECIMALES_FRACCION) if FRACCIONABLE_POR_MERCADO.get(mercado, False) else int(parcial)
+                if FRACCIONABLE_POR_MERCADO.get(mercado, False):
+                    parcial = round(parcial, DECIMALES_FRACCION)
+                else:
+                    # BUG REAL DE PRODUCCION (oct. 2026): a diferencia de la
+                    # compra (obtener_incremento_lote()), aqui se redondeaba
+                    # a un entero cualquiera (int(parcial)) sin respetar el
+                    # lote minimo del exchange -en HK, donde se compra en
+                    # lotes fijos (p.ej. 100 acciones), una venta parcial de
+                    # una posicion de 3 lotes (300) podia salir en 150, que
+                    # no es multiplo del lote y probablemente IBKR la
+                    # rechace. Se redondea al multiplo de `incremento` mas
+                    # cercano hacia abajo (nunca vender mas de lo decidido),
+                    # igual que ya hace redondear_a_incremento() en cripto.
+                    _, incremento_lote = obtener_incremento_lote(ib, contrato)
+                    parcial = math.floor(parcial / incremento_lote) * incremento_lote
                 if parcial <= 0 or parcial >= cantidad:
                     # Posicion demasiado pequeña para dividir con sentido:
                     # se vende todo de una vez en su lugar.
@@ -2547,12 +2585,16 @@ def revisar_ventas(ib, mercados=None):
                     contrato.currency, beneficio_pct_real, beneficio_moneda_real))
                 if accion == "VENTA_TOTAL":
                     registrar_venta_total(clave_posicion, precio_ejecucion)
+                elif accion == "VENTA_PARCIAL":
+                    marcar_scale_out_realizado(clave_posicion)
             else:
                 cantidad_ahora = verificar_posicion_tras_orden_no_confirmada(
                     ib, contrato, cantidad, f"VENTAS: {contrato.symbol}")
-                _registrar_venta_a_posteriori(mercado, contrato, cantidad, cantidad_ahora, precio_actual,
-                                               comision_total, coste_medio, beneficio_pct, etiqueta_accion,
-                                               clave_posicion)
+                se_vendio = _registrar_venta_a_posteriori(mercado, contrato, cantidad, cantidad_ahora, precio_actual,
+                                                           comision_total, coste_medio, beneficio_pct, etiqueta_accion,
+                                                           clave_posicion)
+                if se_vendio and accion == "VENTA_PARCIAL":
+                    marcar_scale_out_realizado(clave_posicion)
         except Exception as e:
             # Un fallo al procesar UNA posicion (p.ej. dato raro, error de red al
             # colocar la orden) no debe abortar la revision de las demas

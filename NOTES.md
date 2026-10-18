@@ -1622,6 +1622,45 @@ falso positivo. El fix del punto 2 no "arregla" este tipo de hueco real (sigue c
 solo con un ciclo de retraso) — está pensado para evitar corregir con datos transitorios, no
 para dejar de corregir huecos reales.
 
+## Revisión de la lógica de venta (oct. 2026) — dos bugs reales con impacto en dinero
+
+Revisión dedicada a la lógica de venta (trailing stop, salida parcial/scale-out), pedida por el
+usuario tras la revisión general anterior. Dos bugs reales encontrados y arreglados en ambos bots:
+
+### 1. El scale-out se podía quedar bloqueado para siempre si la primera orden no se ejecutaba
+
+`decidir_accion_venta()` marcaba `_scale_out_realizado.add(clave)` en el momento de **decidir**
+la venta parcial, antes incluso de colocar la orden — el propio código ya documentaba que las
+órdenes IOC/DAY de venta a veces no llegan a ejecutarse ese ciclo si el precio se mueve rápido,
+pero nada revertía la marca si la orden no se ejecutaba. Resultado: si el primer intento de
+scale-out fallaba, `decidir_accion_venta()` nunca volvía a proponer `VENTA_PARCIAL` para esa
+posición — el "asegurar el 50% de la ganancia" quedaba desactivado en silencio para siempre, con
+todo el beneficio dependiendo solo del trailing stop normal.
+
+**Fix**: `decidir_accion_venta()` ya NO marca `_scale_out_realizado` al decidir — solo lo hace el
+llamador (`revisar_ventas()`/`revisar_ventas_cripto()`), mediante la nueva función
+`marcar_scale_out_realizado(clave)`, y SOLO tras confirmar que la venta parcial se ejecutó de
+verdad (rama `filled`, o la rama "confirmada a posteriori" si `_registrar_venta_a_posteriori()`
+devuelve `True`). Si la orden no se ejecuta, la posición queda disponible para reintentar el
+scale-out en el siguiente ciclo. `_registrar_venta_a_posteriori()` (ambos bots) ahora devuelve
+`True`/`False` según si registró una venta real, en vez de no devolver nada.
+
+### 2. La venta parcial en HK/KR no redondeaba al lote mínimo del exchange
+
+Al comprar, el bot sí consulta `obtener_incremento_lote()` para respetar los lotes fijos de Hong
+Kong (p.ej. múltiplos de 100 acciones). Pero la venta parcial calculaba `int(cantidad * 0.5)` sin
+ningún redondeo al incremento del exchange — una posición de 1430 acciones (lotes de 100) daría
+una venta parcial de 715, que no es múltiplo de 100 y probablemente IBKR la rechace.
+
+**Fix** (`bot_completo.py`): para mercados no fraccionables (HK/KR), la cantidad parcial se
+redondea hacia abajo al múltiplo de `sizeIncrement` más cercano (`obtener_incremento_lote()`),
+igual que ya hace `redondear_a_incremento()` en cripto. Combinado con el bug #1 (ahora corregido),
+una venta rechazada por este motivo ya no bloqueaba el scale-out para siempre tampoco.
+
+Tests de regresión en ambos bots: orden de scale-out que no se ejecuta -> el siguiente ciclo SI
+reintenta (antes se quedaba bloqueado); venta parcial en HK con una cantidad que daría un número
+no múltiplo de 100 sin el fix -> la cantidad final SI es múltiplo del lote.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

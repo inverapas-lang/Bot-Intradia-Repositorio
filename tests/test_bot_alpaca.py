@@ -928,6 +928,42 @@ check("venta principal de acciones: si la orden IOC no se ejecuta (mercado nunca
       "limite protegido), NO se registra ninguna venta ni se avisa por Telegram",
       mensajes_ioc_no_ejecutada == [], f"mensajes={mensajes_ioc_no_ejecutada}")
 
+# --- BUG REAL DE PRODUCCION (oct. 2026): decidir_accion_venta() marcaba
+# _scale_out_realizado en el momento de DECIDIR la venta parcial, antes de
+# saber si la orden se ejecutaria de verdad. Si la primera orden de scale-
+# out no se ejecuta (IOC cancelada, como arriba), el ciclo siguiente debe
+# SEGUIR proponiendo VENTA_PARCIAL para esa posicion -antes, se quedaba
+# bloqueada para siempre-. Se reutiliza _TradingClientIOCNoEjecutada: la
+# posicion nunca cambia entre ciclos (como si la IOC se cancelara
+# siempre), asi que dos llamadas seguidas a revisar_ventas() deben
+# colocar DOS ordenes de intento de scale-out, no solo una. ---
+bot.macd_5min_bajista_2_velas = lambda ticker: False
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+cliente_scale_out_reintenta = _TradingClientIOCNoEjecutada(posiciones=[_posicion_trailing(100.0)])
+bot._trading_client = cliente_scale_out_reintenta
+bot._data_client = _DataClientPrecioFijo(100.59)  # +0.59%: arma el trailing y dispara el scale-out
+sleep_original_scale_out = bot.time.sleep
+bot.time.sleep = lambda s: None
+try:
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)  # 1er intento de scale-out, IOC no se ejecuta
+    con_reloj_fijo(miercoles_regular, bot.revisar_ventas)  # 2o ciclo: debe reintentar el scale-out
+    scale_out_tras_2_intentos = set(bot._scale_out_realizado)
+finally:
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_alpaca
+    bot.time.sleep = sleep_original_scale_out
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+
+check("scale-out: si la primera orden no se ejecuta, el siguiente ciclo SI reintenta el scale-out "
+      "(2 ordenes colocadas en 2 ciclos, no solo 1) -antes quedaba bloqueado para siempre-",
+      len(cliente_scale_out_reintenta.ordenes) == 2, f"ordenes={cliente_scale_out_reintenta.ordenes}")
+check("scale-out: tras 2 intentos fallidos, _scale_out_realizado sigue vacio (nunca se confirmo "
+      "una ejecucion real)",
+      scale_out_tras_2_intentos == set(), f"_scale_out_realizado={scale_out_tras_2_intentos}")
+
 # --- BUG REAL DE PRODUCCION (sept. 2026, el mismo dia que se despliega la
 # venta LIMITADA+IOC de arriba): Alpaca rechaza toda orden con cantidad
 # FRACCIONARIA combinada con IOC ("fractional orders must be DAY orders",

@@ -827,6 +827,72 @@ check("revisar_ventas: con el mercado CERRADO, no coloca ninguna orden aunque to
 
 
 # ---------------------------------------------------------------------------
+# 8b-bis. BUG REAL DE PRODUCCION (oct. 2026): la venta parcial (scale-out)
+# en mercados NO fraccionables (HK, KR) se redondeaba con int(cantidad*0.5)
+# sin respetar el lote minimo del exchange (sizeIncrement) -a diferencia de
+# la compra, que ya lo hace via obtener_incremento_lote(). Una posicion de
+# HK comprada en lotes de 100 (14 lotes = 1400 acciones) generaria una
+# venta parcial de 700 (int(1400*0.5)), que SI es multiplo de 100 por
+# casualidad -se elige aqui una cantidad que NO lo sea sin el fix (1430,
+# int(1430*0.5)=715, no multiplo de 100) para demostrarlo.
+# ---------------------------------------------------------------------------
+class _IBFalsoVentaParcialHK:
+    def __init__(self):
+        self.ordenes_colocadas = []
+        self.ordenes_objeto = []
+        self._posiciones = [_Posicion("2259", 1430, 100, currency="HKD")]
+
+    def reqPositions(self):
+        pass
+
+    def positions(self):
+        return self._posiciones
+
+    def sleep(self, segundos):
+        pass
+
+    def reqHistoricalData(self, contrato, **kwargs):
+        return [_Vela(102.0)]  # +2% bruto sobre el coste medio
+
+    def reqContractDetails(self, contrato):
+        return [types.SimpleNamespace(minSize=100, sizeIncrement=100)]
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_colocadas.append(contrato.symbol)
+        self.ordenes_objeto.append(orden)
+        return types.SimpleNamespace(orderStatus=types.SimpleNamespace(status="Filled"), isDone=lambda: True)
+
+
+en_venta_forzada_original_hk = bot.en_ventana_venta_forzada
+macd_2velas_original_hk = bot.macd_5min_bajista_2_velas
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: False
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
+ib_venta_parcial_hk = _IBFalsoVentaParcialHK()
+try:
+    bot.revisar_ventas(ib_venta_parcial_hk)
+finally:
+    bot.es_horario_operativo = es_horario_original_ventas
+    bot.en_ventana_venta_forzada = en_venta_forzada_original_hk
+    bot.macd_5min_bajista_2_velas = macd_2velas_original_hk
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+    bot._ultima_venta_total = {}
+
+check("venta parcial HK: coloca exactamente una orden (scale-out)",
+      ib_venta_parcial_hk.ordenes_colocadas == ["2259"], f"ordenes={ib_venta_parcial_hk.ordenes_colocadas}")
+if ib_venta_parcial_hk.ordenes_objeto:
+    cantidad_vendida_hk = ib_venta_parcial_hk.ordenes_objeto[-1].totalQuantity
+    check("venta parcial HK: la cantidad vendida es multiplo del lote minimo (100), no "
+          "int(1430*0.5)=715 (que no lo es)",
+          cantidad_vendida_hk % 100 == 0 and 0 < cantidad_vendida_hk < 1430,
+          f"cantidad={cantidad_vendida_hk}")
+
+
+# ---------------------------------------------------------------------------
 # 9. Robustez de revisar_compras: un valor cuya senal de COMPRA revienta al
 #    calcular el precio (ej. fallo de red al pedir la cotizacion) NO debe
 #    impedir que se analice y, si toca, se compre el SIGUIENTE valor de la
@@ -1785,6 +1851,42 @@ check("venta principal (trailing): si la orden IOC no se ejecuta (posicion sin c
       "NO se registra ninguna venta ni se avisa por Telegram",
       telegram_capturados_ioc == [], f"mensajes={telegram_capturados_ioc}")
 
+# --- BUG REAL DE PRODUCCION (oct. 2026, mismo fix que en bot_alpaca.py):
+# decidir_accion_venta() marcaba _scale_out_realizado al DECIDIR la venta
+# parcial, antes de saber si la orden se ejecutaria de verdad. Si la
+# primera orden de scale-out no se ejecuta (IOC cancelada), el ciclo
+# siguiente debe SEGUIR proponiendo VENTA_PARCIAL -antes quedaba bloqueado
+# para siempre-. La posicion no cambia entre ciclos (como si la IOC se
+# cancelara siempre), asi que dos llamadas seguidas deben colocar DOS
+# ordenes de intento de scale-out. ---
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_venta_forzada = lambda mercado: False
+bot.fuera_de_sesion_regular_us = lambda: False
+bot.macd_5min_bajista_2_velas = lambda ib, contrato: False
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+bot._ultima_venta_total = {}
+ib_scale_out_reintenta = _IBFalsoTrailingIOCNoEjecutada(avgCost=100, precio_inicial=100.59)
+try:
+    bot.revisar_ventas(ib_scale_out_reintenta)  # 1er intento de scale-out, IOC cancelada
+    bot.revisar_ventas(ib_scale_out_reintenta)  # 2o ciclo: debe reintentar el scale-out
+    scale_out_ibkr_tras_2_intentos = set(bot._scale_out_realizado)
+finally:
+    bot.es_horario_operativo = es_horario_original_trailing
+    bot.en_ventana_venta_forzada = en_venta_forzada_original
+    bot.macd_5min_bajista_2_velas = macd_2velas_original
+    bot.fuera_de_sesion_regular_us = fuera_de_sesion_regular_us_original
+    bot._maximo_beneficio_neto_por_posicion = {}
+    bot._scale_out_realizado = set()
+    bot._ultima_venta_total = {}
+
+check("scale-out (IBKR): si la primera orden no se ejecuta, el siguiente ciclo SI reintenta "
+      "(2 ordenes colocadas en 2 ciclos, no solo 1)",
+      ib_scale_out_reintenta.ordenes_colocadas == ["TRAIL", "TRAIL"],
+      f"ordenes={ib_scale_out_reintenta.ordenes_colocadas}")
+check("scale-out (IBKR): tras 2 intentos fallidos, _scale_out_realizado sigue vacio",
+      scale_out_ibkr_tras_2_intentos == set(), f"_scale_out_realizado={scale_out_ibkr_tras_2_intentos}")
+
 # --- Escalones de trailing stop segun el maximo alcanzado (peticion del
 # usuario, sept. 2026): cuanto mas alto el pico, mas margen de retroceso se
 # permite antes de vender -mismo cambio que en bot_alpaca.py-. ---
@@ -1811,6 +1913,11 @@ bot._ultima_venta_total = {}
 accion, motivo = bot.decidir_accion_venta("US:ESCALON", 3.5, bot.UMBRAL_BENEFICIO_PCT)
 check("escalones trailing stop: primera vez en el umbral (3.5%) -> SALIDA PARCIAL",
       accion == "VENTA_PARCIAL", f"accion={accion}, motivo={motivo}")
+# decidir_accion_venta() ya NO marca _scale_out_realizado por si sola (bug
+# real oct. 2026, ver su docstring) -el llamador (revisar_ventas()) lo hace
+# tras confirmar que la venta parcial se ejecuto de verdad; aqui se simula
+# esa confirmacion a mano para poder seguir probando el siguiente ciclo.
+bot.marcar_scale_out_realizado("US:ESCALON")
 accion, motivo = bot.decidir_accion_venta("US:ESCALON", 3.0, bot.UMBRAL_BENEFICIO_PCT)
 check("escalones trailing stop: con maximo de 3.5% (margen 0.7 pts), un retroceso de 0.5 pts NO vende",
       accion == "MANTENER", f"accion={accion}, motivo={motivo}")

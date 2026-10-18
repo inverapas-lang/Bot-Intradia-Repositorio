@@ -280,6 +280,27 @@ _maximo_beneficio_neto_por_posicion = {}  # ticker -> % neto maximo visto en la 
 PORCENTAJE_SCALE_OUT = 0.5
 _scale_out_realizado = set()  # tickers ya con su venta parcial hecha
 
+
+def marcar_scale_out_realizado(clave):
+    """Marca el scale-out como hecho DE VERDAD (llamar solo tras confirmar
+    que la venta parcial se ejecuto realmente, nunca al decidirla).
+
+    BUG REAL DE PRODUCCION (oct. 2026): antes, decidir_accion_venta()
+    marcaba _scale_out_realizado en el momento de DECIDIR la venta parcial,
+    antes incluso de colocar la orden -si esa orden IOC/DAY no llegaba a
+    ejecutarse ese ciclo (el propio codigo documenta que pasa, ver
+    revisar_ventas()), la marca se quedaba puesta igualmente y
+    decidir_accion_venta() nunca volvia a proponer VENTA_PARCIAL para esa
+    posicion -el "asegurar el 50% de la ganancia" quedaba desactivado en
+    silencio para siempre, dejando todo el beneficio a merced del trailing
+    stop normal-. Ahora decidir_accion_venta() NO toca el estado; es el
+    llamador (revisar_ventas()/revisar_ventas_cripto()) quien llama a esto
+    SOLO tras confirmar una ejecucion real (filled o confirmada a
+    posteriori), asi que una orden que no se ejecuta deja la posicion
+    disponible para reintentar el scale-out en el siguiente ciclo."""
+    _scale_out_realizado.add(clave)
+    _guardar_estado_venta()
+
 # Cooldown de recompra tras una venta TOTAL (peticion del usuario, sept.
 # 2026, caso real: META y TSLA se recompraban justo tras venderse, casi al
 # mismo precio, y despues bajaban -ver COOLDOWN_RECOMPRA_MINUTOS mas abajo
@@ -386,7 +407,10 @@ def decidir_accion_venta(clave, beneficio_pct, umbral, macd_alcista_fn=None):
         if macd_alcista_fn is not None and macd_alcista_fn():
             _guardar_estado_venta()
             return "MANTENER", info + " (scale-out aplazado: MACD 5min sigue claramente alcista)"
-        _scale_out_realizado.add(clave)
+        # NO se marca _scale_out_realizado aqui -solo se decide, todavia no
+        # se sabe si la orden se va a ejecutar de verdad-. Lo marca el
+        # llamador via marcar_scale_out_realizado() tras confirmar la
+        # ejecucion real (ver su docstring, bug real oct. 2026).
         _guardar_estado_venta()
         return "VENTA_PARCIAL", f"objetivo alcanzado ({beneficio_pct:.2f}% >= {umbral}%): asegurando el {PORCENTAJE_SCALE_OUT*100:.0f}%"
     _guardar_estado_venta()
@@ -1199,10 +1223,12 @@ def _registrar_venta_a_posteriori(ticker, cantidad_antes, cantidad_ahora, precio
     que SI cobra comision), se resta del beneficio bruto; si no (acciones,
     sin comision), el beneficio es directamente el bruto. Si la posicion
     quedo en ~0, se trata como venta TOTAL (se olvida el seguimiento del
-    trailing stop)."""
+    trailing stop). Devuelve True si de verdad se registro una venta (el
+    llamador lo usa para saber si debe marcar_scale_out_realizado()),
+    False si no hubo ninguna ejecucion real que registrar."""
     cantidad_ejecutada = cantidad_antes - cantidad_ahora
     if cantidad_ejecutada <= 1e-6:
-        return
+        return False
     beneficio_pct_bruto = (precio_actual - coste_medio) / coste_medio * 100
     beneficio_usd_bruto = cantidad_ejecutada * (precio_actual - coste_medio)
     if calcular_comision:
@@ -1221,6 +1247,7 @@ def _registrar_venta_a_posteriori(ticker, cantidad_antes, cantidad_ahora, precio
         decimales_cantidad=6, sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
     if cantidad_ahora <= 1e-6:
         registrar_venta_total(ticker, precio_actual)
+    return True
 
 
 def cancelar_ordenes_abiertas(ticker):
@@ -1825,10 +1852,14 @@ def revisar_ventas():
                     etiqueta_accion, ticker, cantidad_real, precio_real, beneficio_pct_real, beneficio_usd_real))
                 if accion == "VENTA_TOTAL":
                     registrar_venta_total(ticker, precio_real)
+                elif accion == "VENTA_PARCIAL":
+                    marcar_scale_out_realizado(ticker)
             else:
                 cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
-                _registrar_venta_a_posteriori(ticker, cantidad, cantidad_ahora, precio_actual,
-                                               coste_medio, etiqueta_accion)
+                se_vendio = _registrar_venta_a_posteriori(ticker, cantidad, cantidad_ahora, precio_actual,
+                                                           coste_medio, etiqueta_accion)
+                if se_vendio and accion == "VENTA_PARCIAL":
+                    marcar_scale_out_realizado(ticker)
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion: {type(e).__name__}: {e}. Se omite.")
 
@@ -2000,12 +2031,16 @@ def revisar_ventas_cripto():
                     decimales_cantidad=6, unidad="unidades"))
                 if accion == "VENTA_TOTAL":
                     registrar_venta_total(ticker, precio_real)
+                elif accion == "VENTA_PARCIAL":
+                    marcar_scale_out_realizado(ticker)
             else:
                 cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
-                _registrar_venta_a_posteriori(
+                se_vendio = _registrar_venta_a_posteriori(
                     ticker, cantidad, cantidad_ahora, precio_actual, coste_medio, etiqueta_accion,
                     calcular_comision=lambda qty, precio: (estimar_comision_cripto_alpaca(qty * coste_medio)
                                                             + estimar_comision_cripto_alpaca(qty * precio)))
+                if se_vendio and accion == "VENTA_PARCIAL":
+                    marcar_scale_out_realizado(ticker)
         except Exception as e:
             log(f"VENTAS: {ticker} - ERROR inesperado al procesar la posicion cripto: {type(e).__name__}: {e}. Se omite.")
 
