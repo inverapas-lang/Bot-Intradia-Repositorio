@@ -983,6 +983,49 @@ check("revisar_compras: el valor que viene DESPUES del que falla si se llega a c
       "GOOD" in ib_falso_compras.ordenes_colocadas,
       f"ordenes_colocadas={ib_falso_compras.ordenes_colocadas}")
 
+# --- BUG REAL DE PRODUCCION (oct. 2026, mismo fix que en bot_alpaca.py):
+# si la compra solo se autoriza por el bypass del cooldown de recompra, la
+# orden debe ser LIMITADA al precio de la decision, no a mercado sin
+# proteccion de precio. ---
+class _IBFalsoComprasBypassCooldown(_IBFalsoCompras):
+    def __init__(self):
+        super().__init__()
+        self.ordenes_objeto = []
+
+    def placeOrder(self, contrato, orden):
+        self.ordenes_objeto.append(orden)
+        return super().placeOrder(contrato, orden)
+
+
+precio_cierre_good = 100 * (1.02 ** 59)  # ultimo cierre que genera _IBFalsoCompras para "GOOD"
+ultima_venta_original_bypass_ibkr = dict(bot._ultima_venta_total)
+bot.registrar_venta_total("US:GOOD", precio_cierre_good / 1.02)  # vendido justo debajo del precio actual (+~2%)
+bot.ACTIVOS = [{"ticker": "GOOD", "exchange": "SMART", "currency": "USD", "mercado": "US"}]
+bot.es_horario_operativo = lambda mercado: True
+bot.en_ventana_sin_compra = lambda mercado: False
+bot.en_postmercado_us = lambda: False
+ib_bypass_cooldown = _IBFalsoComprasBypassCooldown()
+try:
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_bypass_cooldown)
+finally:
+    bot.ACTIVOS = activos_originales
+    bot.es_horario_operativo = es_horario_original
+    bot.en_ventana_sin_compra = en_ventana_sin_compra_original
+    bot.en_postmercado_us = en_postmercado_us_original
+    bot._ultima_venta_total = ultima_venta_original_bypass_ibkr
+
+check("revisar_compras (IBKR): recompra autorizada por el bypass del cooldown -> coloca exactamente una orden",
+      ib_bypass_cooldown.ordenes_colocadas == ["GOOD"], f"ordenes={ib_bypass_cooldown.ordenes_colocadas}")
+if ib_bypass_cooldown.ordenes_objeto:
+    orden_bypass_ibkr = ib_bypass_cooldown.ordenes_objeto[-1]
+    check("revisar_compras (IBKR): la recompra tras bypass de cooldown usa una orden LIMITADA (LMT), "
+          "no a mercado (MKT) sin proteccion de precio",
+          orden_bypass_ibkr.orderType == "LMT", f"orderType={orden_bypass_ibkr.orderType}")
+    check("revisar_compras (IBKR): el limite de la recompra tras bypass es el precio de la decision",
+          abs(orden_bypass_ibkr.lmtPrice - precio_cierre_good) < 1e-6,
+          f"lmtPrice={orden_bypass_ibkr.lmtPrice}, esperado={precio_cierre_good}")
+
 
 # ---------------------------------------------------------------------------
 # 10. Ordenes fraccionarias: deben usar cashQty (importe en efectivo) y
@@ -3172,24 +3215,30 @@ bot._huecos_pendientes_confirmacion.clear()
 ultima_venta_original_ibkr = dict(bot._ultima_venta_total)
 bot._ultima_venta_total = {}
 
-sin_venta_previa_ibkr, motivo_sin_venta_ibkr = bot.puede_comprar_tras_venta("US:META", 750.0)
+sin_venta_previa_ibkr, motivo_sin_venta_ibkr, bypass_sin_venta_ibkr = bot.puede_comprar_tras_venta("US:META", 750.0)
 check("puede_comprar_tras_venta (IBKR): sin ninguna venta previa registrada -> permite comprar",
       sin_venta_previa_ibkr is True and motivo_sin_venta_ibkr is None)
+check("puede_comprar_tras_venta (IBKR): sin venta previa, no es un bypass de cooldown",
+      bypass_sin_venta_ibkr is False)
 
 bot.registrar_venta_total("US:META", 750.28)
-bloqueado_mismo_precio_ibkr, motivo_bloqueo_ibkr = bot.puede_comprar_tras_venta("US:META", 750.40)
+bloqueado_mismo_precio_ibkr, motivo_bloqueo_ibkr, _ = bot.puede_comprar_tras_venta("US:META", 750.40)
 check("puede_comprar_tras_venta (IBKR): justo tras vender, recomprar casi al mismo precio -> BLOQUEADO",
       bloqueado_mismo_precio_ibkr is False and "cooldown" in motivo_bloqueo_ibkr, f"motivo={motivo_bloqueo_ibkr!r}")
 
-permitido_subida_accion_ibkr, _ = bot.puede_comprar_tras_venta("US:META", 750.28 * 1.006)  # +0.6% > umbral 0.5%
+permitido_subida_accion_ibkr, _, bypass_subida_accion_ibkr = bot.puede_comprar_tras_venta(
+    "US:META", 750.28 * 1.006)  # +0.6% > umbral 0.5%
 check("puede_comprar_tras_venta (IBKR, accion): si el precio sube >= 0.5% desde la venta, SI permite "
       "comprar (no perderse una subida real)", permitido_subida_accion_ibkr is True)
+check("puede_comprar_tras_venta (IBKR, accion): la subida que salta el cooldown SI se marca como "
+      "bypass (bug real oct. 2026: la compra debe protegerse con orden limitada, no a mercado)",
+      bypass_subida_accion_ibkr is True)
 
 bot.registrar_venta_total("CRYPTO:BTC", 84783.60)
-bloqueado_cripto_08pct_ibkr, _ = bot.puede_comprar_tras_venta("CRYPTO:BTC", 84783.60 * 1.008)  # +0.8% < 1%
+bloqueado_cripto_08pct_ibkr, _, _ = bot.puede_comprar_tras_venta("CRYPTO:BTC", 84783.60 * 1.008)  # +0.8% < 1%
 check("puede_comprar_tras_venta (IBKR, cripto): +0.8% NO llega al umbral de cripto (1%) -> sigue bloqueado",
       bloqueado_cripto_08pct_ibkr is False)
-permitido_cripto_15pct_ibkr, _ = bot.puede_comprar_tras_venta("CRYPTO:BTC", 84783.60 * 1.015)  # +1.5% >= 1%
+permitido_cripto_15pct_ibkr, _, _ = bot.puede_comprar_tras_venta("CRYPTO:BTC", 84783.60 * 1.015)  # +1.5% >= 1%
 check("puede_comprar_tras_venta (IBKR, cripto): +1.5% SI supera el umbral de cripto (1%) -> permite comprar",
       permitido_cripto_15pct_ibkr is True)
 
@@ -3197,9 +3246,11 @@ bot._ultima_venta_total["US:META"] = {
     "fecha_hora": (datetime.now() - timedelta(minutes=bot.COOLDOWN_RECOMPRA_MINUTOS + 1)).isoformat(timespec="seconds"),
     "precio": 750.28,
 }
-permitido_tras_cooldown_ibkr, _ = bot.puede_comprar_tras_venta("US:META", 750.28)
+permitido_tras_cooldown_ibkr, _, bypass_tras_cooldown_ibkr = bot.puede_comprar_tras_venta("US:META", 750.28)
 check(f"puede_comprar_tras_venta (IBKR): pasados los {bot.COOLDOWN_RECOMPRA_MINUTOS} min de cooldown, "
       "permite comprar aunque el precio no haya subido", permitido_tras_cooldown_ibkr is True)
+check("puede_comprar_tras_venta (IBKR): tras expirar el cooldown por tiempo, NO es un bypass",
+      bypass_tras_cooldown_ibkr is False)
 
 bot._ultima_venta_total = ultima_venta_original_ibkr
 

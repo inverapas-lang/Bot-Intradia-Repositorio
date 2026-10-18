@@ -457,30 +457,48 @@ def registrar_venta_total(ticker, precio):
 
 
 def puede_comprar_tras_venta(ticker, precio_actual):
-    """Devuelve (True, None) si no hay ningun cooldown activo para este
-    ticker, o (False, motivo) si hay que bloquear la compra. El cooldown
-    dura COOLDOWN_RECOMPRA_MINUTOS desde la ultima venta TOTAL, pero se
-    salta si el precio actual ya esta claramente por encima (>= el umbral
-    de la clase de activo) del precio al que se vendio -para no perderse
-    una subida real, solo bloquear la recompra "boba" al mismo precio o
-    peor."""
+    """Devuelve (True, None, False) si no hay ningun cooldown activo para
+    este ticker, o (False, motivo, False) si hay que bloquear la compra. El
+    cooldown dura COOLDOWN_RECOMPRA_MINUTOS desde la ultima venta TOTAL,
+    pero se salta si el precio actual ya esta claramente por encima (>= el
+    umbral de la clase de activo) del precio al que se vendio -para no
+    perderse una subida real, solo bloquear la recompra "boba" al mismo
+    precio o peor-; en ese caso devuelve (True, None, True), con el tercer
+    valor (bypass_cooldown) distinguiendo este caso de "nunca hubo cooldown"
+    para que el llamador pueda proteger la compra (ver uso en
+    revisar_compras()/revisar_compras_cripto()).
+
+    BUG REAL DE PRODUCCION (oct. 2026): el bypass se decidia con
+    precio_actual (una foto de precio ya desactualizada al llegar aqui),
+    pero la compra posterior en sesion regular era una orden A MERCADO sin
+    ningun limite de precio -a diferencia de las ventas, que ya se habian
+    cambiado a ordenes limitadas por este mismo motivo de slippage (ver
+    comentario en revisar_ventas())-. Si el precio bajaba entre la decision
+    y la ejecucion, la compra podia acabar ejecutandose POR DEBAJO del
+    precio de venta original: exactamente la "recompra boba" que el
+    cooldown existe para evitar, sin que nada lo detectara ni lo
+    impidiera. bypass_cooldown=True hace que el llamador use una orden
+    LIMITADA al precio de la decision en vez de a mercado, acotando el
+    peor caso al precio que justifico el bypass (no es una garantia
+    matematica de "nunca por debajo del precio de venta", pero reduce
+    mucho el margen de slippage frente a una orden a mercado sin limite)."""
     info = _ultima_venta_total.get(ticker)
     if info is None:
-        return True, None
+        return True, None, False
     fecha_venta = datetime.fromisoformat(info["fecha_hora"])
     minutos_transcurridos = (datetime.now() - fecha_venta).total_seconds() / 60
     if minutos_transcurridos >= COOLDOWN_RECOMPRA_MINUTOS:
-        return True, None
+        return True, None, False
     precio_venta = info["precio"]
     umbral_pct = UMBRAL_RECOMPRA_TRAS_VENTA_CRIPTO_PCT if es_cripto(ticker) else UMBRAL_RECOMPRA_TRAS_VENTA_ACCIONES_PCT
     subida_pct = (precio_actual - precio_venta) / precio_venta * 100 if precio_venta else 0.0
     if subida_pct >= umbral_pct:
-        return True, None
+        return True, None, True
     minutos_restantes = COOLDOWN_RECOMPRA_MINUTOS - minutos_transcurridos
     motivo = (f"cooldown de recompra activo (vendido hace {minutos_transcurridos:.1f}min a {precio_venta:g}, "
               f"ahora {precio_actual:g} = {subida_pct:+.2f}%, hace falta +{umbral_pct}% o esperar "
               f"{minutos_restantes:.1f}min mas)")
-    return False, motivo
+    return False, motivo, False
 
 
 # Avisos de caida por umbral (peticion del usuario, sept. 2026: "que me
@@ -2096,7 +2114,7 @@ def revisar_compras():
                 log(f"COMPRAS: {ticker} - senal de COMPRA pero no se pudo obtener precio, se omite.")
                 continue
 
-            puede_comprar, motivo_cooldown = puede_comprar_tras_venta(ticker, precio_actual)
+            puede_comprar, motivo_cooldown, bypass_cooldown = puede_comprar_tras_venta(ticker, precio_actual)
             if not puede_comprar:
                 log(f"COMPRAS: {ticker} - senal de COMPRA pero {motivo_cooldown}, se omite.")
                 continue
@@ -2169,6 +2187,22 @@ def revisar_compras():
                 orden = LimitOrderRequest(symbol=ticker, qty=cantidad_estimada, limit_price=precio_actual,
                                            side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
                                            extended_hours=True)
+            elif bypass_cooldown:
+                # BUG REAL DE PRODUCCION (oct. 2026): esta compra solo se
+                # autoriza porque el precio ya supera el umbral de
+                # recompra tras una venta reciente (ver puede_comprar_
+                # tras_venta()) - una orden A MERCADO sin limite podia
+                # acabar ejecutandose por debajo del precio de venta
+                # original pese a esa comprobacion, por slippage entre la
+                # decision y la ejecucion. Se usa LIMITADA al precio de la
+                # decision, igual que fuera de sesion, para acotar el
+                # peor caso.
+                log(f"COMPRAS: {ticker} - senal de COMPRA, comprando ~{cantidad_estimada:g} acciones "
+                    f"(importe {importe_a_usar:.2f} USD) a ~{precio_actual} USD (posicion actual: "
+                    f"{valor_posicion_actual:.2f} USD, limite: {limite_por_valor_usd:.2f} USD). "
+                    f"[recompra tras cooldown: orden limitada al precio de la decision]")
+                orden = LimitOrderRequest(symbol=ticker, qty=cantidad_estimada, limit_price=precio_actual,
+                                           side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
             else:
                 log(f"COMPRAS: {ticker} - senal de COMPRA, comprando ~{cantidad_estimada:g} acciones "
                     f"(importe {importe_a_usar:.2f} USD) a ~{precio_actual} USD (posicion actual: "
@@ -2262,7 +2296,7 @@ def revisar_compras_cripto():
                 log(f"COMPRAS: {ticker} - senal de COMPRA pero no se pudo obtener precio, se omite.")
                 continue
 
-            puede_comprar, motivo_cooldown = puede_comprar_tras_venta(ticker, precio_actual)
+            puede_comprar, motivo_cooldown, bypass_cooldown = puede_comprar_tras_venta(ticker, precio_actual)
             if not puede_comprar:
                 log(f"COMPRAS: {ticker} - senal de COMPRA pero {motivo_cooldown}, se omite.")
                 continue
@@ -2307,11 +2341,23 @@ def revisar_compras_cripto():
 
             cantidad_estimada = round(importe_a_usar / precio_actual, DECIMALES_FRACCION_CRIPTO)
 
-            log(f"COMPRAS: {ticker} (cripto) - senal de COMPRA, comprando ~{cantidad_estimada:g} unidades "
-                f"(importe {importe_a_usar:.2f} USD) a ~{precio_actual} USD (posicion actual: "
-                f"{valor_posicion_actual:.2f} USD, limite: {limite_por_valor_usd:.2f} USD).")
-            orden = MarketOrderRequest(symbol=ticker, notional=round(importe_a_usar, 2),
-                                        side=OrderSide.BUY, time_in_force=TimeInForce.IOC)
+            if bypass_cooldown:
+                # Mismo fix que en revisar_compras() (acciones, bug real
+                # oct. 2026): esta compra solo se autoriza por el bypass
+                # del cooldown de recompra, asi que se acota a una orden
+                # LIMITADA al precio de la decision en vez de a mercado.
+                log(f"COMPRAS: {ticker} (cripto) - senal de COMPRA, comprando ~{cantidad_estimada:g} unidades "
+                    f"(importe {importe_a_usar:.2f} USD) a ~{precio_actual} USD (posicion actual: "
+                    f"{valor_posicion_actual:.2f} USD, limite: {limite_por_valor_usd:.2f} USD). "
+                    f"[recompra tras cooldown: orden limitada al precio de la decision]")
+                orden = LimitOrderRequest(symbol=ticker, qty=cantidad_estimada, limit_price=precio_actual,
+                                           side=OrderSide.BUY, time_in_force=TimeInForce.IOC)
+            else:
+                log(f"COMPRAS: {ticker} (cripto) - senal de COMPRA, comprando ~{cantidad_estimada:g} unidades "
+                    f"(importe {importe_a_usar:.2f} USD) a ~{precio_actual} USD (posicion actual: "
+                    f"{valor_posicion_actual:.2f} USD, limite: {limite_por_valor_usd:.2f} USD).")
+                orden = MarketOrderRequest(symbol=ticker, notional=round(importe_a_usar, 2),
+                                            side=OrderSide.BUY, time_in_force=TimeInForce.IOC)
 
             cancelar_ordenes_abiertas(ticker)
             cantidad_antes_compra_cripto = next((float(p.qty) for p in posiciones if p.symbol == ticker), 0.0)

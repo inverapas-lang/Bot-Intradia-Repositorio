@@ -1661,6 +1661,54 @@ Tests de regresión en ambos bots: orden de scale-out que no se ejecuta -> el si
 reintenta (antes se quedaba bloqueado); venta parcial en HK con una cantidad que daría un número
 no múltiplo de 100 sin el fix -> la cantidad final SI es múltiplo del lote.
 
+## Revisión de la lógica de compra (oct. 2026) — el cooldown de recompra se podía saltar sin protección de precio
+
+Revisión dedicada a la lógica de compra (cooldown de recompra, límites de exposición, caja
+disponible), pedida por el usuario tras las dos revisiones anteriores (verificación de
+historial/exposición cripto, y lógica de venta). Un bug real confirmado en ambos bots; el resto
+de puntos revisados (reserva optimista de caja y de `MAX_POSICIONES_ABIERTAS` dentro de un mismo
+ciclo de `revisar_compras()`) ya estaban bien implementados.
+
+### El bypass del cooldown de recompra se decidía con un precio ya desactualizado, sin proteger la compra
+
+`puede_comprar_tras_venta()` existe para evitar "recomprar al mismo precio o peor justo después de
+vender" — permite saltarse el cooldown si el precio actual ya subió lo suficiente sobre el precio
+de venta. Pero la compra resultante, en sesión regular, era una **orden a mercado sin ningún
+límite de precio** (`MarketOrderRequest`/`MarketOrder`) — a diferencia de las ventas, que ya se
+habían cambiado a órdenes limitadas por este mismo motivo de slippage. Si el precio bajaba entre
+la decisión y la ejecución, la compra podía acabar ejecutándose por debajo del precio de venta
+original: exactamente la "recompra boba" que el cooldown existe para evitar, sin que nada lo
+detectara ni lo impidiera.
+
+**Fix**: `puede_comprar_tras_venta()` ahora devuelve un tercer valor, `bypass_cooldown` (`True`
+solo cuando la compra se autoriza específicamente por el salto de precio del cooldown, no cuando
+nunca hubo cooldown o expiró por tiempo). Cuando es `True`, la compra usa una orden **LIMITADA al
+precio de la decisión** en vez de a mercado — mismo patrón ya usado para compras fuera de sesión
+regular — acotando el peor caso al precio que justificó el bypass. No es una garantía matemática
+de "nunca por debajo del precio de venta" (un límite de compra es un techo de precio, no un
+suelo — para eso haría falta una orden stop, un cambio de arquitectura mayor que no se ha hecho
+aquí), pero reduce mucho el margen de slippage frente a una orden a mercado sin ningún límite.
+
+En IBKR, las compras de CRYPTO ya usaban órdenes limitadas siempre (`crear_orden_limitada_cripto()`)
+y no necesitaban este fix; solo afectaba a acciones (US/HK/KR).
+
+Tests de regresión en ambos bots: `puede_comprar_tras_venta()` marca `bypass_cooldown` correctamente
+en cada caso, y `revisar_compras()` extremo a extremo confirma que la recompra tras el bypass usa
+una orden limitada al precio de la decisión, no a mercado.
+
+### Puntos revisados sin encontrar problema
+
+- Reserva optimista de caja (`efectivo_disponible_usd`/`fondos_disponibles_usd`) y de
+  `MAX_POSICIONES_ABIERTAS` dentro de un mismo ciclo: ya se descuentan/actualizan correctamente
+  tras cada compra real, para que la siguiente señal del mismo ciclo vea los límites ya reducidos.
+- El límite de exposición POR POSICIÓN INDIVIDUAL (`LIMITE_EXPOSICION_PCT`) no tiene el mismo tipo
+  de bug que el límite TOTAL de cripto (cada ticker se procesa una sola vez por ciclo, no hay
+  agregación entre señales que necesite refrescarse).
+- Posible desfase de caja ENTRE el ciclo de cripto y el de acciones (llamadas separadas que corren
+  una detrás de otra en el mismo paso del bucle): identificado como una hipótesis razonable pero
+  no confirmada -dependería de latencia real de la API del bróker en reflejar un fill reciente,
+  algo que no se puede verificar solo leyendo el código-, se deja anotado sin arreglar.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

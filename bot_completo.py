@@ -1653,31 +1653,44 @@ def registrar_venta_total(clave, precio):
 
 
 def puede_comprar_tras_venta(clave, precio_actual):
-    """Devuelve (True, None) si no hay ningun cooldown activo para esta
-    clave (mercado:ticker), o (False, motivo) si hay que bloquear la
-    compra. El cooldown dura COOLDOWN_RECOMPRA_MINUTOS desde la ultima
-    venta TOTAL, pero se salta si el precio actual ya esta claramente por
-    encima (>= el umbral de la clase de activo) del precio al que se
-    vendio -para no perderse una subida real, solo bloquear la recompra
-    "boba" al mismo precio o peor."""
+    """Devuelve (True, None, False) si no hay ningun cooldown activo para
+    esta clave (mercado:ticker), o (False, motivo, False) si hay que
+    bloquear la compra. El cooldown dura COOLDOWN_RECOMPRA_MINUTOS desde la
+    ultima venta TOTAL, pero se salta si el precio actual ya esta
+    claramente por encima (>= el umbral de la clase de activo) del precio
+    al que se vendio -para no perderse una subida real, solo bloquear la
+    recompra "boba" al mismo precio o peor-; en ese caso devuelve (True,
+    None, True), con el tercer valor (bypass_cooldown) distinguiendo este
+    caso de "nunca hubo cooldown" para que el llamador pueda proteger la
+    compra (ver uso en revisar_compras()).
+
+    BUG REAL DE PRODUCCION (oct. 2026, mismo fix que en bot_alpaca.py): el
+    bypass se decidia con precio_actual (una foto ya desactualizada al
+    llegar aqui), pero la compra posterior en sesion regular era una orden
+    A MERCADO sin ningun limite de precio. Si el precio bajaba entre la
+    decision y la ejecucion, la compra podia acabar ejecutandose por
+    debajo del precio de venta original -la "recompra boba" que el
+    cooldown existe para evitar-. bypass_cooldown=True hace que el
+    llamador use una orden LIMITADA al precio de la decision en vez de a
+    mercado, acotando el peor caso."""
     info = _ultima_venta_total.get(clave)
     if info is None:
-        return True, None
+        return True, None, False
     fecha_venta = datetime.fromisoformat(info["fecha_hora"])
     minutos_transcurridos = (datetime.now() - fecha_venta).total_seconds() / 60
     if minutos_transcurridos >= COOLDOWN_RECOMPRA_MINUTOS:
-        return True, None
+        return True, None, False
     precio_venta = info["precio"]
     umbral_pct = (UMBRAL_RECOMPRA_TRAS_VENTA_CRIPTO_PCT if clave.startswith("CRYPTO:")
                   else UMBRAL_RECOMPRA_TRAS_VENTA_ACCIONES_PCT)
     subida_pct = (precio_actual - precio_venta) / precio_venta * 100 if precio_venta else 0.0
     if subida_pct >= umbral_pct:
-        return True, None
+        return True, None, True
     minutos_restantes = COOLDOWN_RECOMPRA_MINUTOS - minutos_transcurridos
     motivo = (f"cooldown de recompra activo (vendido hace {minutos_transcurridos:.1f}min a {precio_venta:g}, "
               f"ahora {precio_actual:g} = {subida_pct:+.2f}%, hace falta +{umbral_pct}% o esperar "
               f"{minutos_restantes:.1f}min mas)")
-    return False, motivo
+    return False, motivo, False
 
 
 CONTRATO_EUR_USD = Forex('EURUSD')  # contrato de forex para el tipo de cambio real (ver mas abajo)
@@ -2874,7 +2887,7 @@ def revisar_compras(ib, mercados=None):
             precio_actual = velas_precio[-1].close
             currency = activo["currency"]
 
-            puede_comprar, motivo_cooldown = puede_comprar_tras_venta(
+            puede_comprar, motivo_cooldown, bypass_cooldown = puede_comprar_tras_venta(
                 clave_historial(activo["mercado"], ticker), precio_actual)
             if not puede_comprar:
                 log(f"COMPRAS: {ticker} ({activo['mercado']}) - senal de COMPRA pero {motivo_cooldown}, se omite.")
@@ -2885,14 +2898,31 @@ def revisar_compras(ib, mercados=None):
             # precio exacto (con outsideRth) en vez de orden a mercado.
             usar_limite_fuera_horario = activo["mercado"] == "US" and fuera_de_sesion_regular_us()
 
+            # BUG REAL DE PRODUCCION (oct. 2026, mismo fix que en
+            # bot_alpaca.py): si esta compra solo se autoriza por el
+            # bypass del cooldown de recompra (ver puede_comprar_tras_
+            # venta()), una orden A MERCADO sin limite podia acabar
+            # ejecutandose por debajo del precio de venta original pese a
+            # esa comprobacion, por slippage entre la decision y la
+            # ejecucion -la "recompra boba" que el cooldown existe para
+            # evitar-. Se usa LIMITADA al precio de la decision igual que
+            # fuera de sesion (variable separada de usar_limite_fuera_
+            # horario a proposito: NO debe afectar a fracciones_no_
+            # disponibles mas abajo, que es un problema distinto -la API
+            # de IBKR rechazando fracciones fuera de horario-, las
+            # fracciones SI funcionan en sesion regular).
+            usar_limite_por_cooldown = bypass_cooldown and not usar_limite_fuera_horario
+
             def _orden_compra_cash(importe):
-                if usar_limite_fuera_horario:
-                    return crear_orden_limitada_cash('BUY', importe, precio_actual, fuera_horario_regular=True)
+                if usar_limite_fuera_horario or usar_limite_por_cooldown:
+                    return crear_orden_limitada_cash('BUY', importe, precio_actual,
+                                                       fuera_horario_regular=usar_limite_fuera_horario)
                 return crear_orden_mercado_cash('BUY', importe)
 
             def _orden_compra(cant):
-                if usar_limite_fuera_horario:
-                    return crear_orden_limitada('BUY', cant, precio_actual, fuera_horario_regular=True)
+                if usar_limite_fuera_horario or usar_limite_por_cooldown:
+                    return crear_orden_limitada('BUY', cant, precio_actual,
+                                                 fuera_horario_regular=usar_limite_fuera_horario)
                 return crear_orden_mercado('BUY', cant)
 
             if en_ventana_sin_compra(activo["mercado"]):
@@ -3118,6 +3148,8 @@ def revisar_compras(ib, mercados=None):
                 f"a ~{precio_actual} {currency} (posicion actual: {valor_posicion_actual_usd:.2f} USD, "
                 f"limite: {limite_por_valor_usd:.2f} USD)."
                 + (" [pre/postmercado: orden limitada al precio exacto]" if usar_limite_fuera_horario else "")
+                + (" [recompra tras cooldown: orden limitada al precio de la decision]"
+                   if usar_limite_por_cooldown else "")
                 + (" [fracciones no disponibles fuera de sesion regular: acciones enteras directamente]"
                    if fracciones_no_disponibles else ""))
             cantidad_antes_compra = next(

@@ -428,6 +428,45 @@ if ordenes_regular:
     check("revisar_compras en sesion regular: NO tiene extended_hours activado",
           not ordenes_regular[0].extended_hours)
 
+# --- BUG REAL DE PRODUCCION (oct. 2026): si la compra solo se autoriza por
+# el bypass del cooldown de recompra (precio ya por encima del umbral tras
+# una venta reciente), debe usar una orden LIMITADA al precio de la
+# decision, no a mercado sin proteccion -antes, el bypass se decidia con un
+# precio ya desactualizado y la compra podia ejecutarse por debajo del
+# precio de venta original pese a la comprobacion. ---
+precio_cierre_alcista = 100 * (1.02 ** 59)  # ultimo cierre que genera _fake_data_client_alcista()
+ultima_venta_original_bypass = dict(bot._ultima_venta_total)
+# Se registra directamente (en vez de via registrar_venta_total(), que usa
+# datetime.now() real/naive) con una fecha_hora AWARE acorde al reloj fijo
+# que con_reloj_fijo() va a simular dentro de revisar_compras() -si no,
+# puede_comprar_tras_venta() revienta restando un datetime naive de uno aware.
+bot._ultima_venta_total["AAPL"] = {
+    "fecha_hora": (miercoles_regular - timedelta(minutes=5)).isoformat(timespec="seconds"),
+    "precio": precio_cierre_alcista / 1.02,  # vendido justo debajo del precio actual (+~2%)
+}
+bot._trading_client = _TradingClientFalso(portfolio_value=10_000)
+bot._data_client = _fake_data_client_alcista()
+try:
+    bot._cache_largas_por_dia = {}
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    ordenes_bypass_cooldown = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot._ultima_venta_total = ultima_venta_original_bypass
+
+check("revisar_compras: recompra autorizada por el bypass del cooldown -> coloca exactamente una orden",
+      len(ordenes_bypass_cooldown) == 1, f"ordenes={ordenes_bypass_cooldown}")
+if ordenes_bypass_cooldown:
+    orden_bypass = ordenes_bypass_cooldown[0]
+    check("revisar_compras: la recompra tras bypass de cooldown usa una orden LIMITADA (qty), "
+          "no a mercado (notional) sin proteccion de precio",
+          orden_bypass.qty is not None and orden_bypass.notional is None,
+          f"orden={orden_bypass}")
+    check("revisar_compras: el limite de la recompra tras bypass es el precio de la decision",
+          abs(orden_bypass.limit_price - precio_cierre_alcista) < 1e-6,
+          f"limit_price={orden_bypass.limit_price}, esperado={precio_cierre_alcista}")
+
 # --- Compras en premercado: debe colocar una orden LIMITADA con qty
 # fraccionaria (Alpaca admite fracciones en limitadas con extended_hours
 # desde marzo 2024, ya no exige cantidad entera) ---
@@ -1924,35 +1963,45 @@ bot.obtener_cantidad_posicion_real = obtener_cantidad_original_reintento
 ultima_venta_original = dict(bot._ultima_venta_total)
 bot._ultima_venta_total = {}
 
-sin_venta_previa, motivo_sin_venta = bot.puede_comprar_tras_venta("META", 750.0)
+sin_venta_previa, motivo_sin_venta, bypass_sin_venta = bot.puede_comprar_tras_venta("META", 750.0)
 check("puede_comprar_tras_venta: sin ninguna venta previa registrada -> permite comprar",
       sin_venta_previa is True and motivo_sin_venta is None)
+check("puede_comprar_tras_venta: sin venta previa, no es un bypass de cooldown (nunca hubo cooldown)",
+      bypass_sin_venta is False)
 
 bot.registrar_venta_total("META", 750.28)
-bloqueado_mismo_precio, motivo_bloqueo = bot.puede_comprar_tras_venta("META", 750.40)
+bloqueado_mismo_precio, motivo_bloqueo, _ = bot.puede_comprar_tras_venta("META", 750.40)
 check("puede_comprar_tras_venta: justo tras vender, recomprar casi al mismo precio -> BLOQUEADO",
       bloqueado_mismo_precio is False and "cooldown" in motivo_bloqueo, f"motivo={motivo_bloqueo!r}")
 
-permitido_subida_accion, _ = bot.puede_comprar_tras_venta("META", 750.28 * 1.006)  # +0.6% > umbral 0.5%
+permitido_subida_accion, _, bypass_subida_accion = bot.puede_comprar_tras_venta("META", 750.28 * 1.006)  # +0.6% > umbral 0.5%
 check("puede_comprar_tras_venta (accion): si el precio sube >= 0.5% desde la venta, SI permite comprar "
       "(no perderse una subida real)", permitido_subida_accion is True)
+check("puede_comprar_tras_venta (accion): la subida que salta el cooldown SI se marca como bypass "
+      "(bug real oct. 2026: la compra debe protegerse con una orden limitada, no a mercado)",
+      bypass_subida_accion is True)
 
 bot.registrar_venta_total("BTC/USD", 84783.60)
-bloqueado_cripto_08pct, _ = bot.puede_comprar_tras_venta("BTC/USD", 84783.60 * 1.008)  # +0.8% < umbral cripto 1%
+bloqueado_cripto_08pct, _, _ = bot.puede_comprar_tras_venta("BTC/USD", 84783.60 * 1.008)  # +0.8% < umbral cripto 1%
 check("puede_comprar_tras_venta (cripto): +0.8% NO llega al umbral de cripto (1%) -> sigue bloqueado",
       bloqueado_cripto_08pct is False)
-permitido_cripto_15pct, _ = bot.puede_comprar_tras_venta("BTC/USD", 84783.60 * 1.015)  # +1.5% >= umbral 1%
+permitido_cripto_15pct, _, bypass_cripto_15pct = bot.puede_comprar_tras_venta("BTC/USD", 84783.60 * 1.015)  # +1.5% >= umbral 1%
 check("puede_comprar_tras_venta (cripto): +1.5% SI supera el umbral de cripto (1%) -> permite comprar",
       permitido_cripto_15pct is True)
+check("puede_comprar_tras_venta (cripto): tambien se marca como bypass de cooldown",
+      bypass_cripto_15pct is True)
 
 # Pasado el cooldown completo, se permite comprar aunque el precio no haya subido nada.
 bot._ultima_venta_total["META"] = {
     "fecha_hora": (datetime.now() - timedelta(minutes=bot.COOLDOWN_RECOMPRA_MINUTOS + 1)).isoformat(timespec="seconds"),
     "precio": 750.28,
 }
-permitido_tras_cooldown, _ = bot.puede_comprar_tras_venta("META", 750.28)
+permitido_tras_cooldown, _, bypass_tras_cooldown = bot.puede_comprar_tras_venta("META", 750.28)
 check(f"puede_comprar_tras_venta: pasados los {bot.COOLDOWN_RECOMPRA_MINUTOS} min de cooldown, permite "
       "comprar aunque el precio no haya subido", permitido_tras_cooldown is True)
+check("puede_comprar_tras_venta: tras expirar el cooldown por tiempo (no por precio), NO es un bypass "
+      "-no hace falta proteger la compra con limite por este motivo-",
+      bypass_tras_cooldown is False)
 
 bot._ultima_venta_total = ultima_venta_original
 
