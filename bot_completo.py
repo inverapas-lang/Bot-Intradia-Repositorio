@@ -1976,6 +1976,11 @@ def obtener_cantidad_posicion_real(ib, ticker, currency):
     return 0.0
 
 
+# {clave: diferencia detectada en la comprobacion anterior} - ver bug real
+# WMT (oct. 2026, Alpaca) en el docstring de verificar_historial_completo().
+_huecos_pendientes_confirmacion = {}
+
+
 def verificar_historial_completo(ib):
     """Version IBKR de la comprobacion equivalente de bot_alpaca.py (bug
     real, sept. 2026: una compra REAL de T y, despues, dos ventas de AAPL
@@ -2001,7 +2006,19 @@ def verificar_historial_completo(ib):
     bot_alpaca.py, aqui no hace falta distinguir REAL/PAPER: esa distincion
     la da el puerto de conexion (ib.connect()), no un campo del historial.
     Al corregir la cantidad en el momento, el hueco no vuelve a aparecer en
-    el siguiente ciclo -no hace falta ninguna deduplicacion de avisos-."""
+    el siguiente ciclo -no hace falta ninguna deduplicacion de avisos-.
+
+    BUG REAL DE PRODUCCION (oct. 2026, caso real en Alpaca: WMT recibio una
+    COMPRA sintetica sin que hubiera ningun hueco real -el extracto de
+    Activity de Alpaca no mostraba ninguna operacion de WMT en esas fechas-,
+    y "abierta desde" se anclo a esa fecha equivocada): esta funcion
+    corregia a la primera, fiandose de una UNICA lectura de ib.positions().
+    Ahora se exige que el MISMO hueco (misma clave, diferencia de cantidad
+    practicamente igual) se vea en DOS comprobaciones SEGUIDAS
+    (~INTERVALO_REVISION_HISTORIAL_SEGUNDOS aparte) antes de corregir -la
+    primera vez solo se anota como pendiente. Un hueco real sigue
+    corrigiendose, con un ciclo de retraso; uno transitorio desaparece solo
+    en la siguiente comprobacion y nunca llega a corregirse."""
     cantidades_historial = {}
     tickers_por_clave = {}
     ultimo_precio_historial = {}
@@ -2031,7 +2048,17 @@ def verificar_historial_completo(ib):
         cantidad_historial = cantidades_historial.get(clave, 0.0)
         diferencia = cantidad_real - cantidad_historial
         if abs(diferencia) <= 1e-6:
+            _huecos_pendientes_confirmacion.pop(clave, None)
             continue
+        diferencia_anterior = _huecos_pendientes_confirmacion.get(clave)
+        if diferencia_anterior is None or abs(diferencia - diferencia_anterior) > 1e-6:
+            _huecos_pendientes_confirmacion[clave] = diferencia
+            log(f"AVISO: {ticker} ({mercado}) tiene un POSIBLE hueco de historial (IBKR {cantidad_real:g}, "
+                f"historial {cantidad_historial:g}); se espera a que se confirme en la siguiente "
+                f"comprobacion (~{INTERVALO_REVISION_HISTORIAL_SEGUNDOS // 60} min) antes de corregirlo "
+                f"automaticamente.")
+            continue
+        del _huecos_pendientes_confirmacion[clave]
         lado_ajuste = "COMPRA" if diferencia > 0 else "VENTA"
         cantidad_ajuste = abs(diferencia)
         precio_ajuste = ultimo_precio_historial.get(clave)
@@ -2730,6 +2757,14 @@ def revisar_compras(ib, mercados=None):
     # varias señales dentro del MISMO ciclo no se salten el limite entre
     # ellas.
     posiciones_abiertas_tickers = {p.contract.symbol for p in posiciones_actuales if p.position > 0}
+    # BUG REAL DE PRODUCCION (oct. 2026, mismo bug que en bot_alpaca.py):
+    # calcular_exposicion_total_cripto_usd(posiciones_actuales) usa la MISMA
+    # foto de posiciones (pedida una vez al principio) en cada iteracion del
+    # bucle, asi que 2+ señales de compra cripto en el mismo ciclo veian
+    # siempre la exposicion de ANTES de la primera compra, pudiendo superar
+    # el limite entre las dos. Se lleva aparte el importe ya comprado de
+    # cripto en ESTE ciclo y se suma al calculo (ver uso mas abajo).
+    exposicion_cripto_ya_comprada_este_ciclo_usd = 0.0
     fondos_disponibles_usd = obtener_fondos_disponibles_usd(ib)
     if fondos_disponibles_usd is None:
         log("COMPRAS: no se pudo obtener AvailableFunds de la cuenta; no se aplicara el limite de "
@@ -2915,7 +2950,8 @@ def revisar_compras(ib, mercados=None):
                 # orden (con margen de seguridad del 25%), para no
                 # encadenar rechazos "Error 201: ... would cause your
                 # crypto account(s) to exceed..." en cada ciclo.
-                exposicion_cripto_actual_usd = calcular_exposicion_total_cripto_usd(posiciones_actuales)
+                exposicion_cripto_actual_usd = (calcular_exposicion_total_cripto_usd(posiciones_actuales)
+                                                 + exposicion_cripto_ya_comprada_este_ciclo_usd)
                 limite_cripto_total_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT / 100)
                 if exposicion_cripto_actual_usd + importe_a_usar > limite_cripto_total_usd:
                     log(f"COMPRAS: {ticker} - senal de COMPRA pero comprar {importe_a_usar:.2f} USD mas "
@@ -2962,6 +2998,7 @@ def revisar_compras(ib, mercados=None):
                     notificar_telegram(formatear_notificacion_compra(
                         ticker, activo["mercado"], cantidad_ejecutada, precio_ejecucion, currency,
                         decimales_cantidad=6))
+                    exposicion_cripto_ya_comprada_este_ciclo_usd += cantidad_ejecutada * precio_ejecucion
                 else:
                     # BUG REAL DE PRODUCCION (oct. 2026, mismo caso que NVDA en
                     # bot_alpaca.py): si el estado no confirma 'Filled' pero la
@@ -2983,6 +3020,7 @@ def revisar_compras(ib, mercados=None):
                             ticker, activo["mercado"], cantidad_ejecutada, precio_compra_cripto, currency,
                             decimales_cantidad=6,
                             sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
+                        exposicion_cripto_ya_comprada_este_ciclo_usd += cantidad_ejecutada * precio_compra_cripto
                 continue
 
             fraccionable = FRACCIONABLE_POR_MERCADO.get(activo["mercado"], False)

@@ -1440,6 +1440,11 @@ def formatear_notificacion_venta(etiqueta_accion, ticker, cantidad, precio, bene
     return "\n".join(lineas)
 
 
+# {ticker: diferencia detectada en la comprobacion anterior} - ver bug real
+# WMT (oct. 2026) en el docstring de verificar_historial_completo().
+_huecos_pendientes_confirmacion = {}
+
+
 def verificar_historial_completo():
     """BUG REAL DE PRODUCCION (sept. 2026): una compra de T se ejecuto de
     verdad en Alpaca -confirmado en el extracto de "Activity" de la propia
@@ -1470,7 +1475,25 @@ def verificar_historial_completo():
     hay forma de saber el precio real de una operacion que nunca se
     registro). Avisa por Telegram de la correccion aplicada. Al corregir
     la cantidad en el momento, el hueco no vuelve a aparecer en el
-    siguiente ciclo -no hace falta ninguna deduplicacion de avisos-."""
+    siguiente ciclo -no hace falta ninguna deduplicacion de avisos-.
+
+    BUG REAL DE PRODUCCION (oct. 2026, caso real: WMT recibio una COMPRA
+    sintetica el 24 sept sin que hubiera NINGUN hueco real -el extracto de
+    Activity de Alpaca de esas fechas no muestra ninguna operacion de WMT-,
+    y luego "abierta desde" se anclo a esa fecha equivocada, 9 dias antes
+    de lo real): esta funcion corregia a la primera, fiandose de una UNICA
+    lectura de obtener_posiciones() -si esa lectura puntual es transitoriamente
+    inconsistente (p.ej. una sincronizacion a medias en el lado de Alpaca),
+    el hueco detectado es falso pero se corrige igual, de forma permanente.
+    Ahora se exige que el MISMO hueco (mismo ticker, diferencia de cantidad
+    practicamente igual, tolerancia _TOLERANCIA_HUECO_PERSISTENTE) se vea en
+    DOS comprobaciones SEGUIDAS (~INTERVALO_REVISION_HISTORIAL_SEGUNDOS
+    aparte) antes de corregir -la primera vez solo se anota como pendiente,
+    sin tocar el historial ni avisar por Telegram. Un hueco real (como el
+    de T, con una compra que de verdad falto por registrar) sigue
+    corrigiendose, solo que con un ciclo de retraso; uno transitorio
+    desaparece solo en la siguiente comprobacion (cantidad_real volvera a
+    cuadrar) y nunca llega a corregirse."""
     modo_actual = "PAPER" if ALPACA_PAPER else "REAL"
     cantidades_historial = {}
     ultimo_precio_historial = {}
@@ -1489,7 +1512,17 @@ def verificar_historial_completo():
         cantidad_historial = cantidades_historial.get(ticker, 0.0)
         diferencia = cantidad_real - cantidad_historial
         if abs(diferencia) <= 1e-6:
+            _huecos_pendientes_confirmacion.pop(ticker, None)
             continue
+        diferencia_anterior = _huecos_pendientes_confirmacion.get(ticker)
+        if diferencia_anterior is None or abs(diferencia - diferencia_anterior) > 1e-6:
+            _huecos_pendientes_confirmacion[ticker] = diferencia
+            log(f"AVISO: {ticker} tiene un POSIBLE hueco de historial (Alpaca {cantidad_real:g}, "
+                f"historial {cantidad_historial:g}, {modo_actual}); se espera a que se confirme en "
+                f"la siguiente comprobacion (~{INTERVALO_REVISION_HISTORIAL_SEGUNDOS // 60} min) "
+                f"antes de corregirlo automaticamente.")
+            continue
+        del _huecos_pendientes_confirmacion[ticker]
         lado_ajuste = "COMPRA" if diferencia > 0 else "VENTA"
         cantidad_ajuste = abs(diferencia)
         pos = posiciones_reales.get(ticker)
@@ -2250,11 +2283,23 @@ def revisar_compras_cripto():
             trade = _trading_client.submit_order(order_data=orden)
             estado = esperar_estado_final_orden(trade.id)
             log(f"COMPRAS: {ticker} - estado de la orden: {estado}")
+            # BUG REAL DE PRODUCCION (oct. 2026): el incremento de
+            # exposicion_cripto_actual_usd (para que la SIGUIENTE cripto de
+            # este mismo ciclo vea el limite total ya actualizado, y asi 2+
+            # señales del mismo ciclo no se salten el limite entre ellas)
+            # solo pasaba en la rama "orden no confirmada" de aqui abajo, y
+            # encima fuera del "if cantidad_real > 1e-9" -asi que NUNCA se
+            # actualizaba tras una compra normal (estado == "filled", el
+            # caso habitual), y SI se actualizaba aunque la orden no
+            # comprara nada de verdad. Ahora se actualiza con la cantidad
+            # REALMENTE comprada, en las dos ramas, solo si de verdad hubo
+            # compra.
             if estado == "filled":
                 cantidad_real, precio_real = obtener_ejecucion_real(trade.id, cantidad_estimada, precio_actual)
                 registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_real)
                 notificar_telegram(formatear_notificacion_compra(ticker, cantidad_real, precio_real,
                                                                    decimales_cantidad=6, unidad="unidades"))
+                exposicion_cripto_actual_usd += cantidad_real * precio_real
             else:
                 # Mismo fallo que en la compra de acciones (ver comentario
                 # equivalente mas arriba, caso real NVDA, oct. 2026): la
@@ -2269,10 +2314,7 @@ def revisar_compras_cripto():
                     notificar_telegram(formatear_notificacion_compra(
                         ticker, cantidad_real, precio_actual, decimales_cantidad=6, unidad="unidades",
                         sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
-                # Para que la SIGUIENTE cripto de este mismo ciclo vea el
-                # limite total ya actualizado (sin esto, dos señales en el
-                # mismo ciclo podrian sumar mas del limite entre las dos).
-                exposicion_cripto_actual_usd += importe_a_usar
+                    exposicion_cripto_actual_usd += cantidad_real * precio_actual
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra cripto: {type(e).__name__}: {e}. Se omite.")
             errores += 1

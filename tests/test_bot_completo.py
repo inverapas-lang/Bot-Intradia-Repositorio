@@ -2284,6 +2284,31 @@ check("revisar_compras CRYPTO: NO compra si superaria el limite de exposicion TO
       len(ib_falso_cerca_del_limite.ordenes_colocadas) == 0,
       f"ordenes={ib_falso_cerca_del_limite.ordenes_colocadas}")
 
+# --- BUG REAL DE PRODUCCION (oct. 2026, mismo bug que en bot_alpaca.py):
+# exposicion_cripto_actual_usd se recalculaba cada vez a partir de
+# posiciones_actuales -una foto pedida UNA sola vez al principio del ciclo,
+# nunca refrescada- asi que 2 señales de cripto en el MISMO ciclo veian
+# siempre la exposicion de ANTES de la primera compra. Con NetLiquidation
+# 300 (limite 25% = 75 USD) y LIMITE_EXPOSICION_PCT=15% (45 USD por compra,
+# sin posicion previa), una sola compra de BTC o ETH respeta el limite
+# (45 < 75) pero las dos juntas no (90 > 75) -> la 2a debe bloquearse. ---
+bot.ACTIVOS = [activo_btc, activo_eth]
+bot.analizar_activo = lambda ib, activo: (bot.crear_contrato(ib, activo), "COMPRA")
+bot._exchange_cripto_cache = None
+ib_falso_dos_criptos = _IBFalsoComprasCripto()
+try:
+    bot._cache_temporalidades_largas = {}
+    bot.revisar_compras(ib_falso_dos_criptos)
+finally:
+    bot.ACTIVOS = activos_originales_compras
+    bot.analizar_activo = analizar_activo_original
+
+check("revisar_compras CRYPTO: 2 señales en el mismo ciclo (BTC+ETH), cada una por debajo del "
+      "limite total pero juntas por encima -> solo se coloca 1 orden (antes del fix se colocaban "
+      "las 2, al no refrescarse la exposicion entre ambas)",
+      len(ib_falso_dos_criptos.ordenes_colocadas) == 1,
+      f"ordenes={ib_falso_dos_criptos.ordenes_colocadas}")
+
 
 # --- redondear_a_incremento / redondear_precio_a_tick / obtener_detalles_cripto:
 #     bug real de produccion (sept. 2026), en DOS partes - LTC/BCH/SOL/LINK
@@ -2945,12 +2970,21 @@ check("verificar_historial_completo (IBKR): historial completo -> no corrige nad
 # Caso 2 (bug real T): IBKR tiene mas acciones de las que explica el historial -> se autocorrige
 # con una COMPRA sintetica (usa el ultimo precio conocido del historial, 26.90, ya que IBKR no
 # expone un precio en vivo barato en el objeto de posicion). El siguiente ciclo ya no repite nada.
+#
+# Bug real WMT en Alpaca (oct. 2026): el hueco se tiene que CONFIRMAR en dos
+# comprobaciones seguidas antes de corregir -ver docstring de
+# verificar_historial_completo()-, asi que se llama dos veces.
+bot._huecos_pendientes_confirmacion.clear()
 mensajes_reconciliacion_ibkr.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-15T15:31:45", "mercado": "US", "ticker": "T",
                 "lado": "VENTA", "cantidad": 1, "precio": 26.90, "comision": 1.0, "currency": "USD"}], f)
 bot.verificar_historial_completo(_IBFalsoHistorial([_Posicion("T", 3, 26.5)]))
-check("verificar_historial_completo (IBKR): falta una compra -> avisa de la correccion automatica",
+check("verificar_historial_completo (IBKR): 1a comprobacion de un hueco -> NO corrige todavia",
+      mensajes_reconciliacion_ibkr == [], f"mensajes={mensajes_reconciliacion_ibkr!r}")
+bot.verificar_historial_completo(_IBFalsoHistorial([_Posicion("T", 3, 26.5)]))
+check("verificar_historial_completo (IBKR): falta una compra -> avisa de la correccion automatica "
+      "(2a comprobacion, el hueco se confirma)",
       len(mensajes_reconciliacion_ibkr) == 1 and "T (US)" in mensajes_reconciliacion_ibkr[0]
       and "corregido automáticamente" in mensajes_reconciliacion_ibkr[0],
       f"mensajes={mensajes_reconciliacion_ibkr!r}")
@@ -2969,11 +3003,13 @@ check("verificar_historial_completo (IBKR): tras la correccion, el siguiente cic
 # distingue por secType). La clave US:BCH no tiene ningun precio en el historial (nunca se
 # registro nada ahi) -> no se puede autocorregir, se omite con un log (sin mensaje de Telegram);
 # la clave CRYPTO:BCH si tiene historial propio -> se autocorrige con una VENTA sintetica.
+bot._huecos_pendientes_confirmacion.clear()
 mensajes_reconciliacion_ibkr.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-01T10:00:00", "mercado": "CRYPTO", "ticker": "BCH",
                 "lado": "COMPRA", "cantidad": 5, "precio": 300.0, "comision": 1.0, "currency": "USD"}], f)
 posicion_us_bch = _Posicion("BCH", 5, 300.0)
+bot.verificar_historial_completo(_IBFalsoHistorial([posicion_us_bch]))
 bot.verificar_historial_completo(_IBFalsoHistorial([posicion_us_bch]))
 check("verificar_historial_completo (IBKR): una compra CRYPTO no explica una posicion US del mismo "
       "ticker -> solo se corrige la clave CRYPTO:BCH (tiene historial propio), no US:BCH (sin "
@@ -2987,17 +3023,36 @@ check("verificar_historial_completo (IBKR): una compra CRYPTO no explica una pos
 # dice que la posicion sigue abierta pero IBKR ya no la tiene (dos ventas no quedaron
 # registradas) -> se autocorrige con una VENTA sintetica, aunque el ticker ya no aparezca entre
 # ib.positions().
+bot._huecos_pendientes_confirmacion.clear()
 mensajes_reconciliacion_ibkr.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-15T19:49:53", "mercado": "US", "ticker": "AAPL",
                 "lado": "COMPRA", "cantidad": 2, "precio": 150.0, "comision": 1.0, "currency": "USD"}], f)
 bot.verificar_historial_completo(_IBFalsoHistorial([]))  # AAPL ya no tiene posicion abierta en IBKR
-check("verificar_historial_completo (IBKR): falta una venta (posicion ya cerrada) -> avisa de la correccion",
+bot.verificar_historial_completo(_IBFalsoHistorial([]))
+check("verificar_historial_completo (IBKR): falta una venta (posicion ya cerrada) -> avisa de la correccion "
+      "(tras confirmarse en 2 comprobaciones)",
       len(mensajes_reconciliacion_ibkr) == 1 and "AAPL (US)" in mensajes_reconciliacion_ibkr[0]
       and "corregido automáticamente" in mensajes_reconciliacion_ibkr[0], f"mensajes={mensajes_reconciliacion_ibkr!r}")
 
+# Caso 5 (bug real WMT en Alpaca, oct. 2026): un hueco que aparece en UNA sola comprobacion y
+# luego desaparece (lectura transitoria del broker) nunca debe llegar a corregirse.
+bot._huecos_pendientes_confirmacion.clear()
+mensajes_reconciliacion_ibkr.clear()
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([], f)
+bot.verificar_historial_completo(_IBFalsoHistorial([_Posicion("WMT", 1, 109.66)]))
+check("verificar_historial_completo (IBKR): 1a comprobacion detecta un posible hueco -> no corrige todavia",
+      mensajes_reconciliacion_ibkr == [], f"mensajes={mensajes_reconciliacion_ibkr!r}")
+bot.verificar_historial_completo(_IBFalsoHistorial([]))  # en la 2a comprobacion, el hueco ya no esta
+check("verificar_historial_completo (IBKR): hueco transitorio (desaparece en la 2a comprobacion) -> "
+      "nunca se llega a corregir",
+      mensajes_reconciliacion_ibkr == [] and bot.cargar_historial_operaciones() == [],
+      f"mensajes={mensajes_reconciliacion_ibkr!r}")
+
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_reconciliacion_ibkr
 bot.notificar_telegram = notificar_telegram_original_reconciliacion_ibkr
+bot._huecos_pendientes_confirmacion.clear()
 
 
 # ---------------------------------------------------------------------------

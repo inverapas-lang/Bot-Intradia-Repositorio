@@ -1309,6 +1309,33 @@ finally:
 check("revisar_compras_cripto: NO compra si superaria el limite de exposicion TOTAL en cripto (20%)",
       len(ordenes_compra_cripto_limite) == 0, f"ordenes={ordenes_compra_cripto_limite}")
 
+# --- BUG REAL DE PRODUCCION (oct. 2026): exposicion_cripto_actual_usd (el
+# contador que evita que 2+ señales de cripto del MISMO ciclo se salten
+# juntas el limite total) solo se actualizaba en la rama "orden no
+# confirmada", y encima fuera del "si de verdad se compro algo" -asi que
+# una compra normal (estado == "filled", el caso habitual) NUNCA lo
+# actualizaba. Con 2 señales de cripto en el mismo ciclo y un limite que
+# una sola compra respeta pero las dos juntas no, el bug dejaba pasar las
+# dos; con el fix, la segunda debe bloquearse. ---
+activos_cripto_originales_exposicion = bot.ACTIVOS_CRYPTO
+bot.ACTIVOS_CRYPTO = ["BTC/USD", "ETH/USD"]
+portfolio_value_exposicion = 400.0  # limite 20% = 80 USD; cada compra estandar son ~51.3 USD
+bot._trading_client = _TradingClientFalso(portfolio_value=portfolio_value_exposicion, posiciones=[])
+bot._crypto_data_client = _fake_crypto_data_client_alcista()
+try:
+    bot._cache_largas_por_dia = {}
+    bot.revisar_compras_cripto()
+finally:
+    ordenes_compra_cripto_exposicion = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._crypto_data_client = crypto_data_client_original
+    bot.ACTIVOS_CRYPTO = activos_cripto_originales_exposicion
+
+check("revisar_compras_cripto: 2 señales en el mismo ciclo, cada una por debajo del limite pero "
+      "juntas por encima -> solo se coloca 1 orden (la 2a se bloquea al ver ya la exposicion "
+      "de la 1a, antes del fix se colocaban las 2)",
+      len(ordenes_compra_cripto_exposicion) == 1, f"ordenes={ordenes_compra_cripto_exposicion}")
+
 # --- BUG REAL DE PRODUCCION (sept. 2026): Alpaca devuelve el simbolo de
 # las posiciones de cripto YA ABIERTAS sin la barra ('LINKUSD', no
 # 'LINK/USD' como en ACTIVOS_CRYPTO y en todo el resto del codigo). Sin
@@ -1720,6 +1747,13 @@ check("verificar_historial_completo: historial completo -> no corrige nada",
 # -0.867953083 (demasiadas ventas sin ninguna compra) -> se autocorrige con una COMPRA sintetica
 # que cierra exactamente esa diferencia, usando el ULTIMO precio conocido del historial (no hay
 # posicion abierta de la que leer un precio en vivo). El siguiente ciclo ya no detecta ningun hueco.
+#
+# Bug real WMT (oct. 2026): ahora el hueco se tiene que CONFIRMAR en dos
+# comprobaciones seguidas antes de corregir -ver docstring de
+# verificar_historial_completo()-, asi que cada caso de aqui abajo llama a
+# la funcion DOS veces: la primera solo deja el hueco pendiente (sin tocar
+# el historial ni avisar), la segunda ya corrige.
+bot._huecos_pendientes_confirmacion.clear()
 mensajes_reconciliacion.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-15T15:31:45", "ticker": "T",
@@ -1728,7 +1762,14 @@ with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
                 "lado": "VENTA", "cantidad": 0.433953083, "precio": 26.95, "modo": "REAL"}], f)
 bot.obtener_posiciones = lambda: []  # T ya no tiene posicion abierta en Alpaca (se cerro del todo)
 bot.verificar_historial_completo()
-check("verificar_historial_completo: falta una compra -> avisa de la correccion automatica por Telegram",
+check("verificar_historial_completo: 1a comprobacion de un hueco -> NO corrige todavia (queda pendiente "
+      "de confirmar en la siguiente)",
+      mensajes_reconciliacion == [] and not any(
+          o["ticker"] == "T" and "nota" in o for o in bot.cargar_historial_operaciones()),
+      f"mensajes={mensajes_reconciliacion!r}")
+bot.verificar_historial_completo()
+check("verificar_historial_completo: falta una compra -> avisa de la correccion automatica por Telegram "
+      "(2a comprobacion, el hueco se confirma)",
       len(mensajes_reconciliacion) == 1 and "T" in mensajes_reconciliacion[0]
       and "corregido automáticamente" in mensajes_reconciliacion[0], f"mensajes={mensajes_reconciliacion!r}")
 operaciones_t_corregidas = [o for o in bot.cargar_historial_operaciones() if o["ticker"] == "T"]
@@ -1744,26 +1785,32 @@ check("verificar_historial_completo: tras la correccion, el siguiente ciclo ya n
 
 # Caso 3: una compra PAPER no debe contar para explicar una posicion en modo REAL -> se autocorrige
 # igualmente (el hueco es real desde el punto de vista de la cuenta REAL actual).
+bot._huecos_pendientes_confirmacion.clear()
 mensajes_reconciliacion.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-01T10:00:00", "ticker": "WMT",
                 "lado": "COMPRA", "cantidad": 2.0, "precio": 90.0, "modo": "PAPER"}], f)
 bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="WMT", qty="2.0", current_price="95.0")]
 bot.verificar_historial_completo()
-check("verificar_historial_completo: una compra PAPER no cuenta para una posicion REAL -> se autocorrige igualmente",
+bot.verificar_historial_completo()
+check("verificar_historial_completo: una compra PAPER no cuenta para una posicion REAL -> se autocorrige "
+      "igualmente (tras confirmarse en 2 comprobaciones)",
       len(mensajes_reconciliacion) == 1, f"mensajes={mensajes_reconciliacion!r}")
 
 # Caso 4 (bug real AAPL, sept. 2026): el historial dice que la posicion sigue abierta pero Alpaca
 # ya la vendio del todo (dos VENTAS fuera de sesion no quedaron registradas). Como ya no hay
 # posicion abierta (no hay Position.current_price disponible), la VENTA sintetica usa el ULTIMO
 # precio conocido en el propio historial (330.306, el de la compra original) como aproximacion.
+bot._huecos_pendientes_confirmacion.clear()
 mensajes_reconciliacion.clear()
 with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
     json.dump([{"fecha_hora": "2026-09-15T19:49:53", "ticker": "AAPL",
                 "lado": "COMPRA", "cantidad": 0.092853293, "precio": 330.306, "modo": "REAL"}], f)
 bot.obtener_posiciones = lambda: []  # AAPL ya no tiene posicion abierta en Alpaca (se vendio del todo)
 bot.verificar_historial_completo()
-check("verificar_historial_completo: falta una venta (posicion ya cerrada) -> avisa de la correccion",
+bot.verificar_historial_completo()
+check("verificar_historial_completo: falta una venta (posicion ya cerrada) -> avisa de la correccion "
+      "(tras confirmarse en 2 comprobaciones)",
       len(mensajes_reconciliacion) == 1 and "AAPL" in mensajes_reconciliacion[0]
       and "corregido automáticamente" in mensajes_reconciliacion[0], f"mensajes={mensajes_reconciliacion!r}")
 operaciones_aapl_corregidas = [o for o in bot.cargar_historial_operaciones() if o["ticker"] == "AAPL"]
@@ -1773,10 +1820,28 @@ check("verificar_historial_completo: la VENTA sintetica usa el ultimo precio con
           for o in operaciones_aapl_corregidas),
       f"operaciones={operaciones_aapl_corregidas!r}")
 
+# Caso 5 (bug real WMT, oct. 2026): un hueco que aparece en UNA sola comprobacion y luego
+# desaparece (lectura transitoria del broker) NUNCA debe llegar a corregirse.
+bot._huecos_pendientes_confirmacion.clear()
+mensajes_reconciliacion.clear()
+with open(bot.ARCHIVO_HISTORIAL_OPERACIONES, "w") as f:
+    json.dump([], f)
+bot.obtener_posiciones = lambda: [types.SimpleNamespace(symbol="WMT", qty="0.367", current_price="109.66")]
+bot.verificar_historial_completo()
+check("verificar_historial_completo: 1a comprobacion detecta un posible hueco -> no corrige todavia",
+      mensajes_reconciliacion == [], f"mensajes={mensajes_reconciliacion!r}")
+bot.obtener_posiciones = lambda: []  # en la 2a comprobacion, el hueco YA NO esta (era transitorio)
+bot.verificar_historial_completo()
+check("verificar_historial_completo: hueco transitorio (desaparece en la 2a comprobacion) -> NUNCA se "
+      "llega a corregir",
+      mensajes_reconciliacion == [] and bot.cargar_historial_operaciones() == [],
+      f"mensajes={mensajes_reconciliacion!r}")
+
 bot.ARCHIVO_HISTORIAL_OPERACIONES = historial_original_reconciliacion
 bot.ALPACA_PAPER = paper_original_reconciliacion
 bot.obtener_posiciones = obtener_posiciones_original_reconciliacion
 bot.notificar_telegram = notificar_telegram_original_slippage
+bot._huecos_pendientes_confirmacion.clear()
 
 
 # ---------------------------------------------------------------------------

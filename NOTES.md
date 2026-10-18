@@ -1564,6 +1564,64 @@ Tests de regresión en `tests/test_bot_alpaca.py`, `tests/test_cartera_alpaca.py
 `tests/test_cartera_ibkr.py` (COMPRA con `"nota"` que abre la racha -> no se muestra "abierta
 desde", en vez de una fecha equivocada).
 
+## Revisión general de bugs (oct. 2026) — dos fallos reales con impacto en dinero
+
+Tras varios casos reales reportados por el usuario (WMT, T, MA con fechas de "abierta desde"
+mal calculadas, algunas por ajustes automáticos que no correspondían a ningún hueco real —
+confirmado comparando con el extracto real de Activity de Alpaca vía SSH), se pidió una
+revisión general del código en busca de más bugs. Se encontraron y arreglaron dos:
+
+### 1. El límite de exposición total en cripto no se actualizaba bien dentro del mismo ciclo
+
+**Alpaca** (`revisar_compras_cripto()`): `exposicion_cripto_actual_usd` solo se incrementaba en
+la rama "la orden no confirmó 'filled' a tiempo", y además fuera de la comprobación de si de
+verdad se compró algo. Si la compra se ejecutaba con normalidad (`estado == "filled"`, el caso
+habitual), el contador nunca se actualizaba — dos señales de compra cripto en el mismo ciclo
+podían superar juntas el límite del 20% sin que el bot lo detectara, porque la segunda veía el
+valor de ANTES de la primera compra.
+
+**IBKR** (compras CRYPTO en `revisar_compras()`): mismo problema por otra vía — `posiciones_actuales`
+se pide una sola vez al principio del ciclo y nunca se refresca, así que
+`calcular_exposicion_total_cripto_usd(posiciones_actuales)` da siempre el mismo valor dentro del
+ciclo, aunque ya se hayan comprado otras criptos.
+
+**Fix**: en ambos bots, se lleva aparte el importe ya comprado de cripto en ESTE ciclo
+(`exposicion_cripto_ya_comprada_este_ciclo_usd` en IBKR; incremento directo de
+`exposicion_cripto_actual_usd` en Alpaca) y se suma al cálculo de exposición, actualizándose tras
+CADA compra real (ambas ramas: filled y confirmada a posteriori), con la cantidad realmente
+comprada. Tests de regresión: 2 señales de cripto en el mismo ciclo, cada una por debajo del
+límite pero juntas por encima -> solo se coloca 1 orden.
+
+### 2. `verificar_historial_completo()` se fiaba de una única lectura de posiciones
+
+Caso real: WMT recibió una corrección automática el 24 sept sin que hubiera ningún hueco real —
+confirmado comparando con el extracto de Activity de Alpaca de esas fechas (sin ninguna
+operación de WMT), lo que hizo que "abierta desde" mostrara una fecha equivocada 9 días después
+(ver sección "Bug real: 'abierta desde' anclaba la fecha de un ajuste automático..." más abajo).
+La función se fiaba de una ÚNICA lectura de `obtener_posiciones()`/`ib.positions()` antes de
+corregir de forma permanente — si esa lectura puntual del bróker era transitoriamente
+inconsistente, el hueco detectado era falso pero se corregía igual.
+
+**Fix** (ambos bots): se exige que el MISMO hueco (mismo ticker/clave, diferencia de cantidad
+prácticamente igual) se vea en DOS comprobaciones SEGUIDAS (~30 min aparte, el intervalo que ya
+tenía configurado) antes de corregir. La primera vez solo se anota como pendiente
+(`_huecos_pendientes_confirmacion`), sin tocar el historial ni avisar por Telegram. Un hueco real
+(como el de T, con una compra que de verdad faltó por registrar) sigue corrigiéndose, con un
+ciclo de retraso; uno transitorio desaparece solo en la siguiente comprobación y nunca llega a
+corregirse. Tests de regresión en ambos bots: hueco que se confirma en 2 comprobaciones ->
+corrige; hueco que desaparece en la 2a comprobación -> nunca corrige.
+
+### Caso MA (oct. 2026): no todas las correcciones automáticas son falsos positivos
+
+A diferencia de WMT, al investigar MA (compra sintética 0,0467 el 14 oct) se confirmó que SÍ
+había un hueco real: antes de esa fecha no existía ninguna compra REAL de MA en el historial
+(las 11 compras de principios de sept. son de una época de pruebas en PAPER, correctamente
+excluidas del cálculo REAL), así que Alpaca tenía de verdad esas acciones sin que el historial
+las explicara — el mismo tipo de fallo original (compra ejecutada que nunca se registró), no un
+falso positivo. El fix del punto 2 no "arregla" este tipo de hueco real (sigue corrigiéndose,
+solo con un ciclo de retraso) — está pensado para evitar corregir con datos transitorios, no
+para dejar de corregir huecos reales.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan
