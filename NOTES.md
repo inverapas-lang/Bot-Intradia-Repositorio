@@ -880,7 +880,14 @@ ninguno de los dos, así que `telegram_bot_ibkr.py` usa mecanismos propios:
 - **`/actualizar`** (añadido sept. 2026, petición del usuario: desplegar sin necesitar un
   cliente SSH, igual que ya tenía `/actualizar` en `telegram_bot.py`/Alpaca — pero aquí la
   implementación es distinta a propósito). En Alpaca, `systemctl restart` para y arranca en
-  el mismo comando, prácticamente sin ventana de riesgo. Aquí parar es **cooperativo y
+  el mismo comando. **Corrección (oct. 2026):** se asumía aquí que eso era "prácticamente sin
+  ventana de riesgo" porque el reinicio es rápido, pero no era así — `bot_alpaca.py` no tenía
+  ningún manejador de `SIGTERM` (lo que `systemctl restart` envía primero), así que el proceso
+  se mataba en el instante exacto en que llegaba la señal, sin ninguna garantía de que no fuera
+  a mitad de registrar una compra/venta en el historial. Esto se confirmó como causa raíz real
+  de huecos de historial (T y MA, ver más abajo) y ahora `bot_alpaca.py` tiene el mismo
+  mecanismo cooperativo que ya tenía `bot_completo.py` (ver sección nueva más abajo). Aquí
+  (IBKR) parar sigue siendo **cooperativo y
   asíncrono** (el mismo mecanismo de `/parar` de arriba: puede tardar hasta 30-60s en hacer
   efecto de verdad). Lanzar `run.bot.bat` de nuevo ANTES de que el proceso viejo muera del
   todo dejaría **dos instancias del bot corriendo a la vez con dinero real** — el riesgo más
@@ -1708,6 +1715,70 @@ una orden limitada al precio de la decisión, no a mercado.
   una detrás de otra en el mismo paso del bucle): identificado como una hipótesis razonable pero
   no confirmada -dependería de latencia real de la API del bróker en reflejar un fill reciente,
   algo que no se puede verificar solo leyendo el código-, se deja anotado sin arreglar.
+
+## Revisión del watchdog de congelación y recuperación tras caída/reinicio (oct. 2026)
+
+Petición del usuario: seguir buscando la **causa raíz** de los huecos de historial de T (15
+sept.) y MA (14 oct.) -ya mitigados con el debounce de `verificar_historial_completo()` de la
+sección anterior, pero sin saber todavía POR QUÉ se producían esos huecos en primer lugar-.
+
+### Bug real encontrado y corregido: `bot_alpaca.py` no tenía ningún manejador de `SIGTERM`
+
+`bot_completo.py` (IBKR) ya tenía desde la migración a la nube un mecanismo de parada
+cooperativa: un archivo de señal (`detener_bot.flag`/`ARCHIVO_DETENER`) que el bucle principal
+comprueba entre ciclos, nunca a mitad de una orden, y un manejador de `SIGTERM` que crea ese
+archivo en vez de dejar que el proceso muera de inmediato. `bot_alpaca.py` **no tenía nada de
+esto** -se confirmó con un `grep` que no encontró ni una sola referencia a `SIGTERM` ni a
+ningún mecanismo de parada cooperativa en todo el archivo-.
+
+Esto importa porque `/actualizar` en `telegram_bot.py` (Alpaca) llama directamente a
+`systemctl restart bot-alpaca`. `systemctl restart` manda primero `SIGTERM` y, si el proceso no
+termina solo, lo mata por la fuerza tras un plazo de gracia. Sin un manejador, Python no hace
+nada especial con `SIGTERM` por defecto: el proceso se termina en el acto, en cualquier punto en
+el que estuviera el código en ese instante -incluido a mitad de registrar una compra/venta en el
+historial, justo el tipo de corte que podía dejar una compra real ejecutada en el bróker sin su
+entrada correspondiente en el historial local-. Esto coincide con el patrón observado: tanto T
+como MA tenían compras reales sin registrar, y el usuario había pedido un `/actualizar` el mismo
+día en ambos casos. Se confirma como la hipótesis de más alta confianza para la causa raíz de
+estos huecos (no se puede demostrar con un 100% de certeza sin logs de systemd de ese instante
+exacto, ya rotados, pero es la explicación que mejor encaja con la evidencia disponible).
+
+**Fix**: se replicó en `bot_alpaca.py` el mismo mecanismo que ya tenía `bot_completo.py`:
+`ARCHIVO_DETENER`, `peticion_de_parada_pendiente()`, `_manejar_sigterm()` (registrado con
+`signal.signal(signal.SIGTERM, _manejar_sigterm)` en `main()`), un chequeo del flag al principio
+de cada vuelta del bucle principal -nunca a mitad de una orden- que hace un `break` limpio y
+borra el flag, y limpieza de un flag residual de una sesión anterior al arrancar. Con esto, un
+`systemctl restart bot-alpaca` (lo que hace `/actualizar`) ahora espera a que termine el ciclo en
+curso antes de cerrar, igual que ya pasaba en IBKR.
+
+**Corrección de una nota anterior**: la sección de migración de IBKR a la nube (más arriba en
+este documento) decía que en Alpaca el reinicio era "prácticamente sin ventana de riesgo" porque
+para y arranca en el mismo comando `systemctl restart` -esa frase asumía, sin haberlo
+comprobado, que el proceso se cerraba de forma ordenada; en realidad no había ningún manejador de
+señal, así que la ventana de riesgo sí existía y es justo lo que se acaba de corregir aquí-.
+
+### Otros hallazgos de esta revisión, evaluados y no priorizados
+
+- **Carrera del propio `vigilante_congelacion()` con una orden a mitad de colocar**: ese hilo
+  vigilante llama a `os._exit(1)` sin ninguna coordinación si el heartbeat lleva más de
+  `UMBRAL_CONGELACION_SEGUNDOS` (20 min) sin actualizarse. En teoría podría cortar a mitad de una
+  orden real, igual que el bug de `SIGTERM` de arriba. Pero el margen es mucho más amplio aquí
+  (20 min vs. el límite de 10s de `esperar_estado_final_orden()` y el timeout de 30s de
+  `HTTP_TIMEOUT_SEGUNDOS` en cada llamada a la API, con un `log()` -que refresca el heartbeat- en
+  cada intento de orden), así que esta carrera exigiría una congelación real y prolongada del
+  bot justo durante una orden, un caso mucho más raro que un reinicio rutinario por
+  `/actualizar`. Se deja anotado como riesgo residual, no como causa probable de los huecos
+  observados.
+- **Sin reconciliación con el bróker al arrancar**: tras un reinicio (rutinario o por caída), el
+  bot no compara el historial local contra las posiciones reales del bróker hasta el primer
+  ciclo normal de `verificar_historial_completo()` -y con el debounce nuevo, hace falta que el
+  hueco persista en 2 comprobaciones (~30-60 min) antes de corregirse-. Es una ventana más
+  pequeña que el bug de `SIGTERM` ya corregido, pero sigue siendo un borde conocido sin arreglar
+  en ambos bots.
+
+Tests de regresión (ambos nuevos, en `test_bot_alpaca.py`): `peticion_de_parada_pendiente()`
+devuelve `False` sin archivo de parada y `True` tras `_manejar_sigterm()`; `_manejar_sigterm()`
+crea el archivo correctamente.
 
 ## Preguntas abiertas / sin decidir
 

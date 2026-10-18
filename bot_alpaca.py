@@ -38,6 +38,7 @@ de activos) antes de dejarlo corriendo desatendido.
 
 import json
 import os
+import signal
 import threading
 import time
 from datetime import date, datetime, time as dt_time, timedelta, timezone
@@ -655,6 +656,41 @@ UMBRAL_CONGELACION_SEGUNDOS = 20 * 60
 ARCHIVO_LATIDO = "latido_bot_alpaca.txt"
 ARCHIVO_PID = "bot_alpaca.pid"
 INTERVALO_MIN_ESCRITURA_LATIDO_SEGUNDOS = 10
+
+# BUG REAL DE PRODUCCION (oct. 2026): a diferencia de bot_completo.py (IBKR,
+# que SI tiene este mecanismo desde que se migro a la nube), este bot nunca
+# gestionaba SIGTERM -asi que un 'systemctl restart bot-alpaca' (exactamente
+# lo que hace /actualizar) lo terminaba de golpe con la accion por defecto
+# de Python ante SIGTERM, SIN ningun try/finally ni limpieza, en cualquier
+# punto en el que estuviera el hilo principal -incluido justo entre
+# submit_order() (la orden YA esta en el broker) y registrar_operacion_
+# historial() (el historial local TODAVIA no se ha actualizado)-. Esto
+# coincide exactamente con el patron de los huecos reales de historial ya
+# vistos (T 15 sept, MA 14 oct): una compra que SI se ejecuto en Alpaca
+# pero nunca quedo registrada porque el proceso murio a medias. NOTES.md
+# daba por hecho que "systemctl restart para y arranca en el mismo
+# comando, practicamente sin ventana de riesgo" -ese supuesto era
+# incorrecto: la ventana de riesgo es real cada vez que /actualizar
+# reinicia el bot mientras una orden esta en vuelo, no solo ante una
+# congelacion real. Mismo mecanismo que bot_completo.py: al recibir
+# SIGTERM, se deja un archivo de señal en vez de dejar que Python termine
+# de golpe; el bucle principal lo ve en su siguiente vuelta (como mucho al
+# terminar el ciclo de compras/ventas en curso, nunca a mitad de una orden)
+# y sale limpio por su cuenta.
+ARCHIVO_DETENER = "detener_bot_alpaca.flag"
+
+
+def peticion_de_parada_pendiente():
+    return os.path.exists(ARCHIVO_DETENER)
+
+
+def _manejar_sigterm(signum, frame):
+    log("Señal SIGTERM recibida: pidiendo parada limpia (espera a que termine el ciclo en curso).")
+    try:
+        with open(ARCHIVO_DETENER, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except OSError as e:
+        log(f"No se pudo crear el archivo de parada al recibir SIGTERM: {type(e).__name__}: {e}")
 
 
 def actualizar_latido():
@@ -2514,10 +2550,22 @@ def evitar_suspension_windows():
 
 def main():
     evitar_suspension_windows()
+    signal.signal(signal.SIGTERM, _manejar_sigterm)
     escribir_pid()
     actualizar_latido()
     cargar_estado_venta()
     threading.Thread(target=vigilante_congelacion, daemon=True).start()
+
+    # Si queda un archivo de parada de una sesion anterior, se ignora al
+    # arrancar: un arranque nuevo nunca debe autopararse de inmediato (mismo
+    # mecanismo que bot_completo.py).
+    if peticion_de_parada_pendiente():
+        log(f"Aviso: existia una peticion de parada pendiente ({ARCHIVO_DETENER}) de una sesion "
+            f"anterior, se ignora al arrancar de nuevo.")
+        try:
+            os.remove(ARCHIVO_DETENER)
+        except OSError:
+            pass
 
     modo_texto = "PAPER (simulado)" if ALPACA_PAPER else "REAL - DINERO REAL"
     log("#" * 60)
@@ -2533,6 +2581,15 @@ def main():
 
     while True:
         try:
+            if peticion_de_parada_pendiente():
+                log(f"Parada solicitada (archivo {ARCHIVO_DETENER} detectado): cerrando limpiamente "
+                    f"(nunca a mitad de una orden, solo entre ciclos).")
+                try:
+                    os.remove(ARCHIVO_DETENER)
+                except OSError:
+                    pass
+                break
+
             # Cripto opera 24/7 (añadido sept. 2026): a diferencia de antes,
             # cuando el mercado de US estaba cerrado el bot dormia horas de
             # un tiron (segundos_hasta_apertura()). Ahora ya no tiene

@@ -26,6 +26,7 @@ bot.ARCHIVO_LATIDO = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "latido_bot_alpaca.t
 bot.ARCHIVO_PID = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "bot_alpaca.pid")
 bot.ARCHIVO_HISTORIAL_OPERACIONES = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "historial_operaciones_alpaca_test.json")
 bot.ARCHIVO_ESTADO_VENTA = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "estado_venta_test.json")
+bot.ARCHIVO_DETENER = os.path.join(_DIR_TEMP_ESTADO_RUNTIME, "detener_bot_alpaca_test.flag")
 
 fallos = []
 
@@ -2044,6 +2045,30 @@ check("verificar_umbral_caida: tras cerrar_seguimiento_venta() (posicion cerrada
 
 bot._umbrales_caida_avisados = umbrales_avisados_original
 bot.notificar_telegram = notificar_telegram_original_caida
+
+
+# ---------------------------------------------------------------------------
+# peticion_de_parada_pendiente / _manejar_sigterm (fix oct. 2026: antes
+# bot_alpaca.py no tenia ningun manejador de SIGTERM, asi que un
+# "systemctl restart" (lo que hace /actualizar) mataba el proceso al
+# instante, incluso a mitad de registrar una compra/venta -hipotesis
+# confirmada como causa raiz de los huecos de historial de T y MA-.
+# ---------------------------------------------------------------------------
+if os.path.exists(bot.ARCHIVO_DETENER):
+    os.remove(bot.ARCHIVO_DETENER)
+
+check("peticion_de_parada_pendiente: False si no existe el archivo de parada",
+      bot.peticion_de_parada_pendiente() is False)
+
+bot._manejar_sigterm(15, None)
+check("_manejar_sigterm: crea el archivo de parada al recibir SIGTERM",
+      os.path.exists(bot.ARCHIVO_DETENER))
+check("peticion_de_parada_pendiente: True tras _manejar_sigterm",
+      bot.peticion_de_parada_pendiente() is True)
+
+os.remove(bot.ARCHIVO_DETENER)
+check("peticion_de_parada_pendiente: vuelve a False tras borrar el archivo",
+      bot.peticion_de_parada_pendiente() is False)
 
 
 # ---------------------------------------------------------------------------
