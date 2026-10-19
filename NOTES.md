@@ -1780,6 +1780,30 @@ Tests de regresión (ambos nuevos, en `test_bot_alpaca.py`): `peticion_de_parada
 devuelve `False` sin archivo de parada y `True` tras `_manejar_sigterm()`; `_manejar_sigterm()`
 crea el archivo correctamente.
 
+## Bug real encontrado y corregido: notificaciones de Telegram que desaparecen sin rastro (oct. 2026)
+
+Caso real reportado por el usuario: a las 15:48 y 15:58 el bot compró WMT por un total de 90,08
+USD, pero el `/cartera` de las 15:10 mostraba solo 14,76 USD de efectivo disponible -y entre
+medias no había llegado ningún aviso de VENTA por Telegram-. El usuario confirmó contra el
+Activity real de Alpaca (captura de pantalla) que sí hubo una venta real: **CVX, 0,420833095
+unidades, +94,36 USD, a las 15:35:10** -exactamente el efectivo que faltaba, y justo antes de las
+dos compras de WMT-. Esa venta nunca llegó como mensaje a Telegram.
+
+**Causa**: `notificar_telegram()` solo capturaba excepciones de `requests.post()` (fallos de
+RED: timeout, DNS, conexión caída). Pero si Telegram responde con un error PROPIO (HTTP 4xx/5xx
+-mensaje mal formado para `parse_mode: HTML`, rate limit 429 por mandar varios avisos seguidos,
+chat bloqueado...-), `requests.post()` **no lanza ninguna excepción por eso** -hay que comprobar
+`response.ok`/`response.status_code` explícitamente, cosa que no se hacía-. Resultado: el aviso
+se perdía sin dejar ni rastro, ni siquiera en el log del propio bot, mientras que la venta en sí
+(ya ejecutada en el bróker, ya registrada en el historial local) seguía siendo 100% real.
+
+**Fix** (idéntico en ambos bots, mismo código duplicado): `notificar_telegram()` ahora comprueba
+`respuesta.ok` tras el `requests.post()` y, si Telegram rechazó el mensaje, lo registra en el log
+con el código HTTP y el cuerpo de la respuesta (aunque sigue sin lanzar excepción hacia el
+llamador, que era el comportamiento buscado a propósito -no interrumpir el ciclo de trading por
+un fallo de notificación-). No recupera avisos ya perdidos, pero a partir de ahora un fallo de
+este tipo queda visible en `/log` en vez de desaparecer en silencio.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

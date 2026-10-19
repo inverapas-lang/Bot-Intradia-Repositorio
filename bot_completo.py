@@ -81,15 +81,26 @@ def notificar_telegram(mensaje):
     """Envia un mensaje a Telegram (compra/venta ejecutada, resumen diario).
     No lanza excepcion nunca hacia el llamador: un fallo de red o de
     configuracion aqui no debe interrumpir ni un ciclo de trading ni el
-    guardado del historial, solo se registra en el log normal."""
+    guardado del historial, solo se registra en el log normal.
+
+    BUG REAL DE PRODUCCION (oct. 2026, encontrado en bot_alpaca.py -caso
+    real: venta de CVX que SI se ejecuto pero de la que el usuario nunca
+    recibio aviso- y replicado aqui por tener el mismo codigo): antes solo
+    se capturaba una excepcion de `requests.post()` (fallo de RED: timeout,
+    DNS...), pero si Telegram respondia con un error propio (HTTP 4xx/5xx
+    -mensaje mal formado, rate limit 429, chat bloqueado...-), `requests` NO
+    lanza excepcion por si solo para eso, asi que el aviso desaparecia sin
+    dejar ni rastro en el log."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        requests.post(
+        respuesta = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             data={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"},
             timeout=TELEGRAM_TIMEOUT_SEGUNDOS,
         )
+        if not respuesta.ok:
+            log(f"Telegram rechazo la notificacion (HTTP {respuesta.status_code}): {respuesta.text[:300]}")
     except Exception as e:
         log(f"No se pudo enviar la notificacion a Telegram: {type(e).__name__}: {e}")
 
