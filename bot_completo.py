@@ -299,7 +299,9 @@ UMBRAL_BENEFICIO_CRYPTO_PCT = 0.3  # cripto: umbral mas bajo que acciones (petic
                                     # 2026) - ya es NETO de comision (beneficio_pct la resta antes de
                                     # compararlo), y cripto es 24/7 y mas rapida: esperar al 0.5% de
                                     # acciones puede dejar escapar subidas que luego revierten.
-MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2  # % por debajo del precio actual al vender con orden limitada
+MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.15  # % por debajo del precio actual al vender con orden
+# limitada; bajado de 0.2 (oct. 2026, mismo ajuste que en bot_alpaca.py, peticion del usuario:
+# limite mas pegado al precio de decision, a cambio de algo mas de riesgo de no rellenarse)
 INTERVALO_SEGUNDOS = 4 * 60  # 4 minutos: US/HK/KR
 CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto (peticion del usuario, sept. 2026):
                                  # 24/7 y mas rapida que acciones, un ciclo cada 4 min puede dejar

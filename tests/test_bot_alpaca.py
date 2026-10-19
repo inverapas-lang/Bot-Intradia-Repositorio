@@ -230,8 +230,8 @@ check("en_ventana_venta_forzada: 15:50 ET (10 min antes del cierre) -> True",
 # ---------------------------------------------------------------------------
 check("es_cantidad_fraccionaria: 3.544 -> True", bot.es_cantidad_fraccionaria(3.544) is True)
 check("es_cantidad_fraccionaria: 3.0 -> False", bot.es_cantidad_fraccionaria(3.0) is False)
-check("calcular_precio_limite_venta: 0.2% por debajo del precio actual",
-      abs(bot.calcular_precio_limite_venta(100.0) - 99.8) < 1e-9)
+check("calcular_precio_limite_venta: MARGEN_ORDEN_LIMITADA_VENTA_PCT por debajo del precio actual",
+      abs(bot.calcular_precio_limite_venta(100.0) - (100.0 - bot.MARGEN_ORDEN_LIMITADA_VENTA_PCT)) < 1e-9)
 
 
 # ---------------------------------------------------------------------------

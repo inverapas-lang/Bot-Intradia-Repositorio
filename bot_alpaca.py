@@ -238,7 +238,9 @@ MINUTOS_SIN_COMPRAR_ANTES_CIERRE = 90    # ultimos 90 min antes del cierre: no c
 MINUTOS_VENTA_FORZADA_ANTES_CIERRE = 15  # ultimos 15 min: vender lo que tenga entre +0.5% y +2% de beneficio
 BENEFICIO_MAX_VENTA_FORZADA_PCT = 2.0
 UMBRAL_BENEFICIO_PCT = 0.5
-MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.2
+MARGEN_ORDEN_LIMITADA_VENTA_PCT = 0.15  # bajado de 0.2 (oct. 2026, peticion del usuario: limite
+# mas pegado al precio de decision -caso real CVX, beneficio casi nulo por tardar en rellenarse-,
+# a cambio de algo mas de riesgo de que la orden no se ejecute si el precio cae rapido ese ciclo)
 
 # Criterio de venta: trailing stop + refuerzo de 2 velas + salida parcial
 # (peticion del usuario, sept. 2026). Al principio solo se aplico a

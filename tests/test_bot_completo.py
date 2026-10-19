@@ -79,14 +79,14 @@ for precio, esperado in casos_tick:
 # 3. calcular_precio_limite_venta
 # ---------------------------------------------------------------------------
 pl_usd = bot.calcular_precio_limite_venta(100.0, "USD")
-check("precio limite USD: 0.2% por debajo de 100 -> 99.8",
-      abs(pl_usd - 99.8) < 1e-9, f"obtenido={pl_usd}")
+check("precio limite USD: MARGEN_ORDEN_LIMITADA_VENTA_PCT por debajo de 100 -> 99.85",
+      abs(pl_usd - (100.0 - bot.MARGEN_ORDEN_LIMITADA_VENTA_PCT)) < 1e-9, f"obtenido={pl_usd}")
 
 pl_krw = bot.calcular_precio_limite_venta(10050, "KRW")
-# 10050 * 0.998 = 10029.9 -> tick de 10 (rango 5000-20000) -> redondeo hacia abajo a 10020
+# 10050 * 0.9985 = 10034.925 -> tick de 10 (rango 5000-20000) -> redondeo hacia abajo a 10030
 check("precio limite KRW: redondeado al tick de KRX hacia abajo",
       pl_krw % bot.tick_size_krx(pl_krw) == 0, f"obtenido={pl_krw}")
-check("precio limite KRW: valor esperado 10020", pl_krw == 10020, f"obtenido={pl_krw}")
+check("precio limite KRW: valor esperado 10030", pl_krw == 10030, f"obtenido={pl_krw}")
 
 
 # ---------------------------------------------------------------------------

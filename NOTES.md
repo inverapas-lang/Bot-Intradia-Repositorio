@@ -1824,6 +1824,24 @@ mensaje de error confundía al usuario.
 ningún apagado cooperativo, se queda rápido; `stop`/`restart` (los que SÍ pueden esperar un ciclo
 completo) suben a 160s, con margen sobre los 130s de `INTERVALO_SEGUNDOS`-.
 
+## Ajuste de MARGEN_ORDEN_LIMITADA_VENTA_PCT: 0.2% -> 0.15% (oct. 2026)
+
+Petición del usuario, a raíz de revisar un caso real: una venta de CVX (3 días en cartera, apenas
+se movió de precio) acabó con un beneficio casi nulo (+$0.03, +0,03%) pese a que la decisión de
+vender exigía al menos un 0,5% de beneficio. La causa no es un bug -la venta usa a propósito una
+orden LIMITADA, no a mercado, para no vender nunca por debajo del límite fijado (ver el bug real
+de sept. 2026 con META/SMCI que motivó ese cambio, más arriba en este documento)-, pero si la
+orden tarda uno o varios ciclos en rellenarse, el precio real de ejecución puede quedar bastante
+por debajo del precio que había cuando se decidió vender, comiéndose buena parte del margen.
+
+Se consideró volver a vender a mercado, pero se descartó explícitamente (reintroduciría el riesgo
+ya solucionado de vender en pérdidas por slippage). En su lugar, se estrecha el margen del límite
+(más pegado al precio de decisión -> se rellena antes, capturando más del beneficio que había en
+el momento de decidir), a cambio de algo más de riesgo de que la orden no llegue a ejecutarse si
+el precio cae muy rápido ese mismo ciclo. Mismo cambio en ambos bots.
+
+Tests actualizados en ambos bots (`calcular_precio_limite_venta`, USD y KRW con el tick de KRX).
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan
