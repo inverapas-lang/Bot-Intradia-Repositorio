@@ -1804,6 +1804,26 @@ llamador, que era el comportamiento buscado a propósito -no interrumpir el cicl
 un fallo de notificación-). No recupera avisos ya perdidos, pero a partir de ahora un fallo de
 este tipo queda visible en `/log` en vez de desaparecer en silencio.
 
+## Bug real encontrado y corregido: el propio fix de SIGTERM rompió el timeout de /actualizar (oct. 2026)
+
+Efecto colateral real, visto en producción justo al desplegar el fix de SIGTERM de más arriba: el
+usuario ejecutó `/actualizar` y Telegram respondió "Código actualizado, pero falló el reinicio de
+bot-alpaca: ... TimeoutExpired: Command ['sudo', 'systemctl', 'restart', 'bot-alpaca'] timed out
+after 20 seconds".
+
+**Causa**: `ejecutar_systemctl()` en `telegram_bot.py` llamaba a `subprocess.run(...,
+timeout=20)`. Antes del fix de SIGTERM, `systemctl restart` mataba el proceso viejo al instante
+(sin manejador, moría en el acto) y arrancaba el nuevo enseguida, así que 20s sobraba de sobra.
+Con el apagado cooperativo nuevo, el proceso viejo puede tardar hasta un ciclo completo
+(`INTERVALO_SEGUNDOS` = 130s) en salir limpiamente -es exactamente el comportamiento buscado,
+pero rompe el timeout, que ya era demasiado corto antes de que eso importara-. El reinicio seguía
+completándose bien de fondo (el repo ya estaba actualizado, como se ve en la respuesta), pero el
+mensaje de error confundía al usuario.
+
+**Fix**: `timeout_segundos = 20 if accion == "start" else 160` -`start` no tiene que esperar
+ningún apagado cooperativo, se queda rápido; `stop`/`restart` (los que SÍ pueden esperar un ciclo
+completo) suben a 160s, con margen sobre los 130s de `INTERVALO_SEGUNDOS`-.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

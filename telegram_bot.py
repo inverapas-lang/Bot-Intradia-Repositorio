@@ -112,11 +112,21 @@ def escapar_html(texto):
 
 def ejecutar_systemctl(accion):
     """Ejecuta 'sudo systemctl <accion> bot-alpaca'. Requiere que el sudoers
-    del usuario permita este comando exacto sin contraseña (ver ALPACA_NOTES.md)."""
+    del usuario permita este comando exacto sin contraseña (ver ALPACA_NOTES.md).
+
+    BUG REAL DE PRODUCCION (oct. 2026): tras añadir el apagado cooperativo a
+    bot_alpaca.py (SIGTERM ya no mata el proceso al instante, espera a que
+    termine el ciclo en curso -hasta INTERVALO_SEGUNDOS=130s-), 'stop' y
+    'restart' empezaron a tardar bastante mas de los 20s que tenia este
+    timeout -visto en produccion: /actualizar devolvia "TimeoutExpired...
+    timed out after 20 seconds" aunque el reinicio seguia en marcha de
+    fondo y acababa bien-. 'start' no tiene que esperar ningun apagado, se
+    deja con el mismo timeout corto de siempre."""
+    timeout_segundos = 20 if accion == "start" else 160
     try:
         resultado = subprocess.run(
             ["sudo", "systemctl", accion, NOMBRE_SERVICIO_BOT],
-            capture_output=True, text=True, timeout=20
+            capture_output=True, text=True, timeout=timeout_segundos
         )
         if resultado.returncode != 0:
             return f"⚠️ No se pudo {accion} el bot: {resultado.stderr.strip() or resultado.stdout.strip()}"
