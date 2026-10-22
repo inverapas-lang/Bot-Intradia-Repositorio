@@ -1243,7 +1243,7 @@ ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS = 60
 INTERVALO_CHEQUEO_CONFIRMACION_TARDIA_SEGUNDOS = 5
 
 
-def verificar_orden_no_confirmada(ticker, cantidad_antes, prefijo_log):
+def verificar_orden_no_confirmada(ticker, cantidad_antes, prefijo_log, orden_id=None):
     """BUG REAL DE PRODUCCION (sept. 2026, caso real: una compra de WMT y,
     despues, una venta de AAPL fuera de sesion regular, se ejecutaron de
     verdad pero no quedaron registradas en el historial ni avisadas por
@@ -1260,7 +1260,23 @@ def verificar_orden_no_confirmada(ticker, cantidad_antes, prefijo_log):
     solo chequeo a los 2s es demasiado poco para una orden fuera de sesion:
     ahora se reintenta cada INTERVALO_CHEQUEO_CONFIRMACION_TARDIA_SEGUNDOS
     (5s) hasta ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS (60s) en total,
-    parando en cuanto se detecta el cambio."""
+    parando en cuanto se detecta el cambio.
+
+    BUG REAL DE PRODUCCION (oct. 2026, caso real: venta de DIS el 22 oct.
+    -0,1742 acciones- que NUNCA aparecio en el historial ni en Telegram,
+    solo se descubrio por el ajuste automatico de verificar_historial_
+    completo() minutos despues, con el correo de Alpaca confirmando la
+    ejecucion real): si al cabo de los 60s de arriba la posicion TODAVIA no
+    ha cambiado, antes se daba la orden por "no ejecutada" y se abandonaba
+    SIN CANCELARLA -seguia viva en el libro de Alpaca, fuera ya de
+    cualquier seguimiento del bot-. Si esa orden acababa rellenandose mas
+    tarde por su cuenta (nada raro en una LIMITADA DAY que se queda
+    abierta), la ejecucion real quedaba completamente huerfana: ni
+    registrada ni avisada, solo visible horas despues via la reconciliacion
+    de verificar_historial_completo(). Ahora, si se pasa `orden_id`, se
+    cancela explicitamente la orden al rendirse -igual que ya hace
+    cancelar_ordenes_abiertas() antes de la SIGUIENTE orden del mismo
+    ticker, pero sin esperar a que haya una señal nueva para ese ticker-."""
     transcurrido = 0.0
     cantidad_ahora = cantidad_antes
     while transcurrido < ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS:
@@ -1274,6 +1290,14 @@ def verificar_orden_no_confirmada(ticker, cantidad_antes, prefijo_log):
             return cantidad_ahora
     log(f"{prefijo_log} - la posicion NO ha cambiado ({cantidad_ahora:g}) tras "
         f"{ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS}s: confirmado que la orden no se ejecuto.")
+    if orden_id is not None:
+        try:
+            _trading_client.cancel_order_by_id(orden_id)
+            log(f"{prefijo_log} - orden {orden_id} cancelada tras no confirmarse, para que no pueda "
+                f"rellenarse mas tarde sin que el bot se entere.")
+        except Exception as e:
+            log(f"{prefijo_log} - no se pudo cancelar la orden {orden_id} tras no confirmarse: "
+                f"{type(e).__name__}: {e}")
     return cantidad_ahora
 
 
@@ -1819,7 +1843,7 @@ def revisar_ventas():
                         "VENTA FORZADA", ticker, cantidad_real, precio_real, beneficio_pct_real, beneficio_usd_real))
                     registrar_venta_total(ticker, precio_real)
                 else:
-                    cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
+                    cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}", trade.id)
                     _registrar_venta_a_posteriori(ticker, cantidad, cantidad_ahora, precio_actual,
                                                    coste_medio, "VENTA FORZADA")
                 continue
@@ -1922,7 +1946,7 @@ def revisar_ventas():
                 elif accion == "VENTA_PARCIAL":
                     marcar_scale_out_realizado(ticker)
             else:
-                cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
+                cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}", trade.id)
                 se_vendio = _registrar_venta_a_posteriori(ticker, cantidad, cantidad_ahora, precio_actual,
                                                            coste_medio, etiqueta_accion)
                 if se_vendio and accion == "VENTA_PARCIAL":
@@ -2101,7 +2125,7 @@ def revisar_ventas_cripto():
                 elif accion == "VENTA_PARCIAL":
                     marcar_scale_out_realizado(ticker)
             else:
-                cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}")
+                cantidad_ahora = verificar_orden_no_confirmada(ticker, cantidad, f"VENTAS: {ticker}", trade.id)
                 se_vendio = _registrar_venta_a_posteriori(
                     ticker, cantidad, cantidad_ahora, precio_actual, coste_medio, etiqueta_accion,
                     calcular_comision=lambda qty, precio: (estimar_comision_cripto_alpaca(qty * coste_medio)
@@ -2283,7 +2307,7 @@ def revisar_compras():
                 # Igual que en _registrar_venta_a_posteriori(), la cantidad
                 # fiable aqui es la DIFERENCIA REAL de posicion, no el id de
                 # una orden cuyo propio estado ya hemos descartado.
-                cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra, f"COMPRAS: {ticker}")
+                cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra, f"COMPRAS: {ticker}", trade.id)
                 cantidad_real = cantidad_tras_compra - cantidad_antes_compra
                 if cantidad_real > 1e-6:
                     registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_actual)
@@ -2437,7 +2461,7 @@ def revisar_compras_cripto():
                 # obtener_ejecucion_real(trade.id, ...) con un id cuyo estado
                 # ya sabemos que no es fiable aqui.
                 cantidad_tras_compra = verificar_orden_no_confirmada(ticker, cantidad_antes_compra_cripto,
-                                                                      f"COMPRAS: {ticker}")
+                                                                      f"COMPRAS: {ticker}", trade.id)
                 cantidad_real = cantidad_tras_compra - cantidad_antes_compra_cripto
                 if cantidad_real > 1e-9:
                     registrar_operacion_historial(ticker, "COMPRA", cantidad_real, precio_actual)

@@ -1955,6 +1955,34 @@ bot.obtener_cantidad_posicion_real = obtener_cantidad_original_reintento
 
 
 # ---------------------------------------------------------------------------
+# verificar_orden_no_confirmada: cancela la orden al rendirse (bug real DIS,
+# oct. 2026: una orden que no confirmaba "filled" se abandonaba SIN cancelar,
+# asi que si se rellenaba sola mas tarde, esa ejecucion quedaba huerfana -ni
+# registrada ni avisada, solo visible horas despues via la reconciliacion de
+# verificar_historial_completo()-. Ahora, si se pasa orden_id, se cancela
+# explicitamente al confirmar que la posicion no cambio.
+# ---------------------------------------------------------------------------
+time.sleep = lambda segundos: None
+cliente_cancelacion = _TradingClientFalso()
+bot._trading_client = cliente_cancelacion
+bot.obtener_cantidad_posicion_real = lambda ticker: 0.0928533  # nunca cambia
+bot.verificar_orden_no_confirmada("AAPL", 0.0928533, "VENTAS: AAPL", "orden-huerfana-1")
+check("verificar_orden_no_confirmada: cancela la orden explicitamente si se rinde (orden_id pasado)",
+      "orden-huerfana-1" in cliente_cancelacion.ordenes_canceladas,
+      f"canceladas={cliente_cancelacion.ordenes_canceladas}")
+
+cliente_sin_cancelacion = _TradingClientFalso()
+bot._trading_client = cliente_sin_cancelacion
+bot.verificar_orden_no_confirmada("AAPL", 0.0928533, "VENTAS: AAPL")  # sin orden_id (compatibilidad)
+check("verificar_orden_no_confirmada: sin orden_id, no intenta cancelar nada",
+      cliente_sin_cancelacion.ordenes_canceladas == [])
+
+time.sleep = time_sleep_original
+bot.obtener_cantidad_posicion_real = obtener_cantidad_original_reintento
+bot._trading_client = trading_client_original
+
+
+# ---------------------------------------------------------------------------
 # puede_comprar_tras_venta / registrar_venta_total (peticion del usuario,
 # sept. 2026: casos reales META y TSLA recomprados justo tras venderse, casi
 # al mismo precio, y despues bajaban). Cooldown de COOLDOWN_RECOMPRA_MINUTOS

@@ -1842,6 +1842,41 @@ el precio cae muy rápido ese mismo ciclo. Mismo cambio en ambos bots.
 
 Tests actualizados en ambos bots (`calcular_precio_limite_venta`, USD y KRW con el tick de KRX).
 
+## Bug real encontrado y corregido: órdenes "no confirmadas" que se rellenaban solas y quedaban huérfanas (oct. 2026)
+
+Caso real reportado por el usuario: una venta de DIS (0,1742 acciones, 22 oct., confirmada por
+correo de Alpaca a las 15:58 EDT) nunca apareció en Telegram ni en el historial -solo se descubrió
+~50 minutos después por el aviso de "Historial corregido automáticamente" de
+`verificar_historial_completo()`-. El mismo patrón explicaba también por qué una compra/venta de
+TSLA del mismo día mostraba "abierta desde 23 SEP" en vez de la fecha real (el historial local
+nunca vio una venta intermedia que sí ocurrió de verdad, así que el saldo reconstruido nunca
+llegaba a 0 entre medias) y por qué DIS no mostraba línea de "abierta desde" en absoluto en
+`/cartera`.
+
+**Causa**: `verificar_orden_no_confirmada()` (ver el bug real de sept. 2026, caso AAPL, más
+arriba) reintenta hasta `ESPERA_MAXIMA_CONFIRMACION_TARDIA_SEGUNDOS` (60s) comprobando si la
+posición cambió de verdad pese a que el estado de la orden no confirmó "filled". Si pasados esos
+60s la posición TODAVÍA no había cambiado, se daba la orden por "no ejecutada" y se abandonaba
+**sin cancelarla** -seguía viva en el libro de Alpaca, fuera ya de cualquier seguimiento del bot-.
+Si esa orden (una LIMITADA DAY, que puede quedarse abierta horas) acababa rellenándose por su
+cuenta más tarde, esa ejecución real quedaba completamente huérfana: ni registrada en el
+historial ni avisada por Telegram, solo descubierta mucho después por la reconciliación
+periódica y debounced de `verificar_historial_completo()` -que corrige la cantidad, pero no
+conoce ni el precio ni la fecha real de la ejecución, así que usa una fecha/precio aproximados-.
+
+**Fix**: `verificar_orden_no_confirmada()` acepta ahora un `orden_id` opcional y, si al cabo de
+los 60s la posición sigue sin cambiar, cancela esa orden explícitamente (`cancel_order_by_id()`)
+antes de devolver el control -igual que ya hace `cancelar_ordenes_abiertas()` antes de la
+SIGUIENTE orden del mismo ticker, pero sin tener que esperar a que llegue una señal nueva para
+ese ticker-. Los 6 puntos donde se llama a esta función (ventas y compras, acciones y cripto)
+pasan ahora el id de la orden recién colocada. Solo afecta a `bot_alpaca.py` -`bot_completo.py`
+(IBKR) usa un mecanismo de confirmación de órdenes distinto (eventos de `ib_async`, no polling
+REST) y no tiene esta función-.
+
+Tests de regresión nuevos: con `orden_id`, al confirmar que la posición no cambió, se cancela esa
+orden concreta; sin `orden_id` (compatibilidad con llamadas existentes), no se intenta cancelar
+nada.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan
