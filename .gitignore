@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+historial_compras.json
+historial_operaciones_ibkr.json
+historial_operaciones_alpaca.json
+latido_bot.txt
+bot.pid
+latido_bot_alpaca.txt
+bot_alpaca.pid
+bot_completo.log
+detener_bot.flag
+estado_venta_bot_completo.json
+estado_venta_alpaca.json
+.env
