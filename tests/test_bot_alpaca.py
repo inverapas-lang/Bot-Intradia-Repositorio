@@ -599,6 +599,51 @@ check("revisar_ventas: tras cancelar la orden vieja, SI coloca la venta nueva",
 bot.ACTIVOS = activos_originales
 
 
+# --- cancelar_ordenes_abiertas: avisa si la orden vieja se rellena (del todo
+# o en parte) ganando la carrera a la cancelacion, en vez de darla por
+# cancelada sin mas (bug real, oct. 2026, misma familia que el de DIS) ---
+class _TradingClientOrdenGanaCarrera(_TradingClientFalso):
+    def __init__(self, estado_final, filled_qty=0.0, **kwargs):
+        super().__init__(**kwargs)
+        self._estado_final = estado_final
+        self._filled_qty = filled_qty
+
+    def get_order_by_id(self, order_id):
+        return types.SimpleNamespace(status=types.SimpleNamespace(value=self._estado_final),
+                                      filled_qty=self._filled_qty)
+
+
+mensajes_log_cancelacion = []
+log_original_cancelacion = bot.log
+bot.log = lambda msg: mensajes_log_cancelacion.append(msg)
+
+cliente_relleno_total = _TradingClientOrdenGanaCarrera(
+    "filled", ordenes_abiertas=[types.SimpleNamespace(id="orden-vieja-1", symbol="DIS")])
+bot._trading_client = cliente_relleno_total
+bot.cancelar_ordenes_abiertas("DIS")
+check("cancelar_ordenes_abiertas: avisa si la orden vieja se RELLENO DEL TODO en vez de cancelarse",
+      any("RELLENO DEL TODO" in m for m in mensajes_log_cancelacion), f"log={mensajes_log_cancelacion}")
+
+mensajes_log_cancelacion.clear()
+cliente_relleno_parcial = _TradingClientOrdenGanaCarrera(
+    "canceled", filled_qty=0.05, ordenes_abiertas=[types.SimpleNamespace(id="orden-vieja-2", symbol="DIS")])
+bot._trading_client = cliente_relleno_parcial
+bot.cancelar_ordenes_abiertas("DIS")
+check("cancelar_ordenes_abiertas: avisa si la orden vieja tuvo un RELLENO PARCIAL antes de cancelarse",
+      any("RELLENO PARCIAL" in m for m in mensajes_log_cancelacion), f"log={mensajes_log_cancelacion}")
+
+mensajes_log_cancelacion.clear()
+cliente_cancelacion_limpia = _TradingClientOrdenGanaCarrera(
+    "canceled", filled_qty=0.0, ordenes_abiertas=[types.SimpleNamespace(id="orden-vieja-3", symbol="DIS")])
+bot._trading_client = cliente_cancelacion_limpia
+bot.cancelar_ordenes_abiertas("DIS")
+check("cancelar_ordenes_abiertas: cancelacion limpia (sin relleno) -> NO avisa de ningun relleno",
+      not any("RELLENO" in m for m in mensajes_log_cancelacion), f"log={mensajes_log_cancelacion}")
+
+bot.log = log_original_cancelacion
+bot._trading_client = trading_client_original
+
+
 # ---------------------------------------------------------------------------
 # 8b. Criterio de venta de ACCIONES: trailing stop (principal) + refuerzo de
 #     2 velas de 5min bajistas (peticion del usuario, sept. 2026). Alpaca no

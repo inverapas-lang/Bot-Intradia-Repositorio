@@ -1350,7 +1350,21 @@ def cancelar_ordenes_abiertas(ticker):
     siguiente intento de venta, aunque la posicion siga apareciendo con
     cantidad > 0, es rechazado por la API con "insufficient qty available
     for order (... available: 0)". Cancelando cualquier orden abierta antes
-    de operar, la cantidad vuelve a estar disponible para la orden nueva."""
+    de operar, la cantidad vuelve a estar disponible para la orden nueva.
+
+    BUG REAL DE PRODUCCION (oct. 2026, misma familia que el de DIS -ver
+    verificar_orden_no_confirmada()-): entre consultar las ordenes abiertas
+    y que la cancelacion surta efecto hay una ventana de tiempo en la que
+    Alpaca puede rellenar la orden de todas formas (total o PARCIALMENTE)
+    -gana la carrera a la cancelacion-. Antes esto se registraba igual como
+    "cancelada", sin comprobar el relleno: esa ejecucion real quedaba
+    completamente invisible hasta que verificar_historial_completo() la
+    detectara (debounced, hasta 30-60 min despues). No se auto-registra
+    aqui (esta funcion no sabe si la señal que viene despues es compra o
+    venta, ni el coste medio para calcular beneficio, y el llamador en
+    revisar_ventas() captura `cantidad` ANTES de esta llamada -auto-
+    registrar aqui descuadraria esa cuenta-), pero al menos queda como un
+    AVISO inmediato en el log en vez de desaparecer sin rastro."""
     try:
         ordenes_abiertas = _trading_client.get_orders(
             filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker]))
@@ -1371,8 +1385,25 @@ def cancelar_ordenes_abiertas(ticker):
             # espera aqui a que la cancelacion llegue a un estado final
             # antes de continuar.
             estado_cancelacion = esperar_estado_final_orden(orden.id)
-            log(f"{ticker} - orden abierta anterior ({orden.id}) cancelada antes de mandar una nueva "
-                f"(estado final: {estado_cancelacion}).")
+            if estado_cancelacion == "filled":
+                log(f"{ticker} - AVISO: la orden abierta anterior ({orden.id}) se RELLENO DEL TODO "
+                    f"-gano la carrera a la cancelacion- en vez de cancelarse. Esa ejecucion real NO "
+                    f"se registra aqui (ver comentario de la funcion); verificar_historial_completo() "
+                    f"la detectara y corregira en los proximos ciclos.")
+                continue
+            filled_qty = 0.0
+            try:
+                filled_qty = float(getattr(_trading_client.get_order_by_id(orden.id), "filled_qty", 0) or 0)
+            except Exception:
+                pass
+            if filled_qty > 1e-6:
+                log(f"{ticker} - AVISO: la orden abierta anterior ({orden.id}) se cancelo con un RELLENO "
+                    f"PARCIAL de {filled_qty:g} antes de que la cancelacion surtiera efecto del todo. Esa "
+                    f"parte ejecutada NO se registra aqui (ver comentario de la funcion); "
+                    f"verificar_historial_completo() la detectara y corregira en los proximos ciclos.")
+            else:
+                log(f"{ticker} - orden abierta anterior ({orden.id}) cancelada antes de mandar una nueva "
+                    f"(estado final: {estado_cancelacion}).")
         except Exception as e:
             log(f"{ticker} - no se pudo cancelar la orden abierta {orden.id}: {type(e).__name__}: {e}")
 

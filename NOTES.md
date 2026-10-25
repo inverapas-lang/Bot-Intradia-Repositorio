@@ -1877,6 +1877,33 @@ Tests de regresión nuevos: con `orden_id`, al confirmar que la posición no cam
 orden concreta; sin `orden_id` (compatibilidad con llamadas existentes), no se intenta cancelar
 nada.
 
+## Bug real encontrado y corregido: `cancelar_ordenes_abiertas()` no comprobaba si la orden vieja se rellenaba al cancelarla (oct. 2026)
+
+Petición del usuario, a raíz de revisar el bug de DIS de más arriba: "¿qué más revisarías?" ->
+mirar si el mismo patrón (una ejecución real que queda huérfana porque la función que debería
+detectarla se rinde sin comprobar bien) existía en otro sitio. Lo había: `cancelar_ordenes_abiertas()`
+(llamada antes de CUALQUIER orden nueva, para liberar la cantidad retenida por una orden vieja sin
+rellenar) cancelaba la orden y daba por hecho que la cancelación había funcionado, sin comprobar
+si Alpaca la había rellenado (total o parcialmente) justo antes de que la cancelación surtiera
+efecto -una carrera real entre "cancelar" y "rellenar" que Alpaca no garantiza que gane siempre el
+cancelar-. Esa ejecución quedaba tan huérfana como la de DIS: ni registrada ni avisada, solo
+visible horas después vía `verificar_historial_completo()`.
+
+**Fix**: tras cancelar, se comprueba el estado final de la orden vieja. Si acabó "filled" (ganó la
+carrera del todo) o si quedó "canceled" pero con `filled_qty > 0` (relleno parcial antes de
+cancelar el resto), se registra un AVISO inmediato en el log con el detalle. **No se auto-registra
+la ejecución aquí** -a propósito: esta función no sabe si la señal que viene justo después es
+compra o venta, ni el coste medio para calcular beneficio, y en `revisar_ventas()` la variable
+`cantidad` (usada luego como base para detectar cambios de posición) se captura ANTES de llamar a
+esta función, así que auto-registrar aquí descuadraría esa cuenta más adelante en el mismo ciclo-.
+La reconciliación real la sigue haciendo `verificar_historial_completo()`, igual que con DIS, pero
+ahora al menos queda constancia inmediata en el log de que algo así ha pasado, en vez de
+desaparecer sin ningún rastro hasta la corrección automática.
+
+Tests de regresión nuevos: relleno total ("filled"), relleno parcial (`filled_qty>0` con estado
+"canceled") y cancelación limpia (sin relleno) -cada caso con su aviso correspondiente, o sin
+ningún aviso en el caso limpio-.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan
