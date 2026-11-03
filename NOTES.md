@@ -1904,6 +1904,13 @@ Tests de regresión nuevos: relleno total ("filled"), relleno parcial (`filled_q
 "canceled") y cancelación limpia (sin relleno) -cada caso con su aviso correspondiente, o sin
 ningún aviso en el caso limpio-.
 
+## Ajuste de LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT: 20% -> 15% (nov. 2026)
+
+Petición del usuario tras preguntar cuál era el límite máximo de exposición total a cripto
+(conjunto de todas las monedas, sobre el valor total de la cartera). Solo en `bot_alpaca.py`
+-`bot_completo.py` (IBKR) tiene su propio valor independiente (25%), no tocado aquí, no se
+mencionó en la petición-.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

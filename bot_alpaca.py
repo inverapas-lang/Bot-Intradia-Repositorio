@@ -623,7 +623,7 @@ COMISION_CRIPTO_ALPACA_PCT = 0.25 / 100
 # mismo LIMITE_EXPOSICION_PCT del 15% que las acciones), sobre el valor
 # TOTAL de la cuenta (acciones + cash + cripto -portfolio_value de Alpaca
 # ya las suma todas-).
-LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT = 20
+LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT = 15  # bajado de 20 (nov. 2026, peticion del usuario)
 
 UMBRAL_BENEFICIO_CRYPTO_PCT = 0.3  # cripto: umbral mas bajo que acciones (igual que en
                                     # bot_completo.py/IBKR) - 24/7 y mas rapida
