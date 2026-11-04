@@ -1911,6 +1911,31 @@ Petición del usuario tras preguntar cuál era el límite máximo de exposición
 -`bot_completo.py` (IBKR) tiene su propio valor independiente (25%), no tocado aquí, no se
 mencionó en la petición-.
 
+## Revisión de la lista de valores operados en Alpaca (nov. 2026)
+
+Petición del usuario: revisar `ACTIVOS`/`ACTIVOS_CRYPTO` de `bot_alpaca.py` contra la situación
+actual del mercado, a raíz de ver la cartera acumulando posiciones en pérdidas sin que el bot
+pudiera cerrarlas (sin stop-loss, ver más arriba). El diagnóstico real no fue "estas empresas van
+mal" -ninguna está en crisis-, sino un desajuste de perfil: varios valores de bajo beta ("value"/
+dividendo: F, T, KO, JNJ, PFE, GE) rara vez se mueven lo suficiente intradía como para llegar al
+umbral que activa el trailing stop (+0,5%), así que tendían a quedarse semanas estancados, sin
+beneficio ni pérdida que el bot pudiera cerrar -el problema de fondo, pero agravado por elegir
+valores que ya de por sí no encajan con una estrategia de salida rápida-.
+
+**Cambios en `ACTIVOS`** (solo `bot_alpaca.py`, no se tocó `bot_completo.py`/IBKR):
+- Quitados: `F`, `T`, `KO`, `JNJ`, `PFE`, `GE`.
+- Añadidos: `LLY`, `ORCL`, `CRM`, `MU`, `UBER`, `COIN` -grandes, muy líquidas, pero con más
+  recorrido intradía real que las quitadas-.
+
+**Cambios en `ACTIVOS_CRYPTO`**: quitada `LINK/USD` (de las 6 monedas, la que más tiempo llevaba
+en tendencia bajista sostenida según la investigación). Sin sustituta directa -no se añadió otra
+moneda sin confirmar antes que Alpaca la soporta de verdad para trading-.
+
+Tests actualizados: la cobertura de `_normalizar_simbolo_cripto()`/normalización de posiciones de
+cripto sin barra (bug real, sept. 2026) usaba `LINK/USD` apoyándose en que estuviera en la lista
+de producción; ahora fuerza una lista local con `LINK/USD` para no perder esa cobertura aunque ya
+no esté en `ACTIVOS_CRYPTO`.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

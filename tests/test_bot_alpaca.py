@@ -1467,6 +1467,12 @@ check("revisar_compras_cripto: 2 señales en el mismo ciclo, cada una por debajo
 # posicion de cripto ya abierta pasaba jamas por el trailing stop, por
 # grande que fuera el retroceso -caso real: LINK/USD retrocedio mas de 1.7
 # puntos sin que el bot vendiera nada-.
+# LINK/USD ya no esta en la lista de produccion (quitada nov. 2026, ver
+# ACTIVOS_CRYPTO), pero la normalizacion es generica -se prueba con ella
+# igualmente, forzando una lista local que SI la incluya, para no perder
+# la cobertura del bug real que la motivo.
+activos_cripto_originales_normalizacion = bot.ACTIVOS_CRYPTO
+bot.ACTIVOS_CRYPTO = ["LINK/USD"]
 check("_normalizar_simbolo_cripto: reconstruye la barra para un simbolo de ACTIVOS_CRYPTO",
       bot._normalizar_simbolo_cripto("LINKUSD") == "LINK/USD")
 check("_normalizar_simbolo_cripto: no toca un simbolo que ya lleva la barra",
@@ -1506,6 +1512,8 @@ if ordenes_cripto_linkusd:
     check("revisar_ventas_cripto: la orden de venta usa el simbolo CON barra (formato valido para "
           "la API de ordenes/datos), no el 'LINKUSD' crudo de la posicion",
           ordenes_cripto_linkusd[0].symbol == "LINK/USD", f"symbol={ordenes_cripto_linkusd[0].symbol}")
+
+bot.ACTIVOS_CRYPTO = activos_cripto_originales_normalizacion
 
 # --- obtener_posiciones(): la normalizacion se aplica en el punto de
 # entrada, asi que TODO el codigo que consuma posiciones (venta, cartera,

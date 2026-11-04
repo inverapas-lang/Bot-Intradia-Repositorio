@@ -583,10 +583,19 @@ MAX_POSICIONES_ABIERTAS = 12
 # ETFs usan exactamente el mismo motor de señales/compra/venta que las
 # acciones (Alpaca los opera igual, sin ningun caso especial en el codigo) ---
 ACTIVOS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD", "NFLX",
-           "INTC", "QCOM", "CSCO", "SMCI",
-           "JPM", "BAC", "WFC", "C", "V", "MA",
+           "INTC", "QCOM", "CSCO", "SMCI", "MU",
+           "JPM", "BAC", "WFC", "C", "V", "MA", "COIN",
            "XOM", "CVX",
-           "WMT", "DIS", "KO", "JNJ", "PFE", "F", "T", "GE",
+           "WMT", "DIS", "LLY", "ORCL", "CRM", "UBER",
+           # Lista revisada (nov. 2026, peticion del usuario): se quitaron
+           # KO/JNJ/PFE/F/T/GE -valores de bajo beta, tipo "dividendo", que
+           # rara vez se mueven lo suficiente intradia como para llegar al
+           # umbral de beneficio que activa el trailing stop, asi que
+           # tendian a quedarse semanas estancados en rojo sin que el bot
+           # (que no tiene stop-loss) pudiera hacer nada- a cambio de
+           # LLY/ORCL/CRM/MU/UBER/COIN, grandes y muy liquidas pero con mas
+           # recorrido intradia real, acorde a la estrategia de trailing
+           # stop rapido de este bot.
            # ETFs (sept. 2026): indices amplios (los 3 mas liquidos del
            # mercado), sectoriales (complementan la exposicion ya existente
            # en JPM/BAC/WFC/C -financiero-, XOM/CVX -energia- y las
@@ -609,7 +618,12 @@ ACTIVOS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD
 # soportados por Alpaca, SOL NO aparecía en esa lista en el momento de
 # escribir esto -si el bot la ve rechazada sistemáticamente, quitarla de
 # aquí-.
-ACTIVOS_CRYPTO = ["BTC/USD", "ETH/USD", "LTC/USD", "BCH/USD", "LINK/USD", "SOL/USD"]
+#
+# LINK/USD quitada (nov. 2026, peticion del usuario): de las 6 monedas era
+# la que mas tiempo llevaba en tendencia bajista sostenida, sin sustituta
+# directa -no se añade otra moneda en su lugar sin confirmar antes que
+# Alpaca la soporta para trading de verdad-.
+ACTIVOS_CRYPTO = ["BTC/USD", "ETH/USD", "LTC/USD", "BCH/USD", "SOL/USD"]
 
 # Comision REAL de Alpaca para cripto (a diferencia de acciones, que Alpaca
 # no cobra comision propia): tarifa "taker" del primer tramo de volumen
