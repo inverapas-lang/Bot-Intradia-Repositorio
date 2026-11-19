@@ -1936,6 +1936,48 @@ cripto sin barra (bug real, sept. 2026) usaba `LINK/USD` apoyándose en que estu
 de producción; ahora fuerza una lista local con `LINK/USD` para no perder esa cobertura aunque ya
 no esté en `ACTIVOS_CRYPTO`.
 
+## Límites propios para "alto riesgo" (apalancados/muy volátiles) + primer stop-loss del bot (nov. 2026)
+
+Petición explícita del usuario, a raíz del caso real de SOXL (comprado dos veces seguidas justo
+antes de un giro brusco del sector de semiconductores, sin ningún mecanismo para cortar la
+pérdida -ver más arriba-): para los productos apalancados/muy volátiles, nunca más de un **2%**
+de la cartera por posición individual, nunca más de un **6%** del total conjunto, y un **stop-loss
+del 3%**.
+
+**`ACTIVOS_ALTO_RIESGO`** (nov. 2026, confirmado con el usuario): `TQQQ`, `SOXL`, `SMCI` y **toda**
+la cripto (`ACTIVOS_CRYPTO` completo -ya es más volátil por naturaleza que la mayoría de
+acciones-).
+
+**Límites nuevos**:
+- `LIMITE_EXPOSICION_ALTO_RIESGO_PCT = 2`: límite por posición individual, sustituye al
+  `LIMITE_EXPOSICION_PCT` general (15%) solo para estos valores. Aplicado en `revisar_compras()`
+  (TQQQ/SOXL/SMCI) y en `revisar_compras_cripto()` (ahí aplica SIEMPRE, toda la cripto es alto
+  riesgo).
+- `LIMITE_EXPOSICION_ALTO_RIESGO_TOTAL_PCT = 6`: límite CONJUNTO sobre la suma de TODAS las
+  posiciones de alto riesgo juntas (acciones y cripto mezcladas), vía
+  `calcular_exposicion_alto_riesgo_usd()`. Se comprueba en ambos ciclos (acciones y cripto), cada
+  uno calculándolo en vivo contra el bróker al principio de su propio ciclo -mismo patrón que
+  `exposicion_cripto_actual_usd`, sin problema de concurrencia porque ambos ciclos corren
+  secuencialmente en el mismo hilo (ver la revisión de la hipótesis de desfase cripto/acciones,
+  más arriba, que concluyó que no hay condición de carrera real aquí)-. El límite de cripto en
+  solitario (`LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT`, 15%) se mantiene sin tocar, pero en la práctica
+  el nuevo límite conjunto del 6% es el que manda, al ser más estricto.
+- `STOP_LOSS_ALTO_RIESGO_PCT = 3`: **primer stop-loss real de todo el bot**. Hasta ahora,
+  `decidir_accion_venta()` tenía un suelo que impedía vender NUNCA en negativo
+  (`MARGEN_MINIMO_VENTA_PCT`, ver más arriba) -deliberado, para el resto de la cartera, pero
+  incompatible con productos apalancados que pueden caer muy rápido-. Para
+  `ACTIVOS_ALTO_RIESGO`, se comprueba ANTES que el resto de la lógica (ni siquiera hace falta que
+  el trailing esté armado): si `beneficio_pct <= -3%`, fuerza `VENTA_TOTAL` sin más.
+
+Tests de regresión nuevos: el stop-loss dispara en SOXL a -3% pero NO en un ticker normal (AAPL)
+con -8% (conserva el comportamiento de siempre fuera de este grupo); el límite por posición trunca
+el importe de SOXL a 2% cuando es menor que el importe estándar; el límite conjunto bloquea una
+compra aunque el límite individual de ESE ticker en concreto no esté agotado. El test existente de
+"2 señales de cripto en el mismo ciclo" (regresión de `exposicion_cripto_actual_usd`, oct. 2026) se
+actualizó a 4 señales/cartera más grande, porque con el nuevo límite por posición del 2% ya no era
+posible reproducir el escenario original con solo 2 señales -el límite por posición es ahora
+siempre más estricto que el límite conjunto de cripto en solitario para tan pocas señales-.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

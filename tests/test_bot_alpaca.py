@@ -807,6 +807,33 @@ check("suelo anti-perdidas: beneficio 0.49% (justo por debajo del suelo de 0.5%)
 accion, motivo = bot.decidir_accion_venta("SUELO", 0.5, bot.UMBRAL_BENEFICIO_PCT)  # justo en el suelo
 check("suelo anti-perdidas: beneficio exactamente 0.5% (el suelo) -> SI vende",
       accion == "VENTA_TOTAL", f"accion={accion}, motivo={motivo}")
+
+# --- Stop-loss de alto riesgo (nov. 2026, peticion del usuario, caso real:
+# SOXL comprado dos veces seguidas justo antes de un giro brusco sin ningun
+# stop-loss que lo frenara): a diferencia del resto de la cartera (suelo de
+# arriba, nunca vende en negativo), los valores de ACTIVOS_ALTO_RIESGO SI
+# fuerzan una venta total al superar STOP_LOSS_ALTO_RIESGO_PCT (3%) de
+# perdida, sin esperar a que el trailing este armado. ---
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
+check("SOXL esta en ACTIVOS_ALTO_RIESGO (ETF apalancado 3x)", "SOXL" in bot.ACTIVOS_ALTO_RIESGO)
+accion, motivo = bot.decidir_accion_venta("SOXL", -2.9, bot.UMBRAL_BENEFICIO_PCT)
+check("stop-loss alto riesgo: SOXL con -2.9% (por debajo del limite de -3%) -> NO vende todavia",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+accion, motivo = bot.decidir_accion_venta("SOXL", -3.0, bot.UMBRAL_BENEFICIO_PCT)
+check("stop-loss alto riesgo: SOXL con exactamente -3.0% -> VENTA_TOTAL (stop-loss, no trailing)",
+      accion == "VENTA_TOTAL" and "stop-loss" in motivo, f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+accion, motivo = bot.decidir_accion_venta("SOXL", -8.0, bot.UMBRAL_BENEFICIO_PCT)
+check("stop-loss alto riesgo: SOXL con una perdida mucho mayor (-8%) tambien dispara VENTA_TOTAL",
+      accion == "VENTA_TOTAL" and "stop-loss" in motivo, f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+accion, motivo = bot.decidir_accion_venta("AAPL", -8.0, bot.UMBRAL_BENEFICIO_PCT)
+check("stop-loss alto riesgo: un ticker NORMAL (no esta en ACTIVOS_ALTO_RIESGO) con -8% sigue sin "
+      "vender -el stop-loss de alto riesgo no le aplica, conserva el comportamiento de siempre-",
+      accion == "MANTENER", f"accion={accion}, motivo={motivo}")
+bot._maximo_beneficio_neto_por_posicion = {}
+bot._scale_out_realizado = set()
 bot._maximo_beneficio_neto_por_posicion = {}
 bot._scale_out_realizado = set()
 
@@ -1435,12 +1462,18 @@ check("revisar_compras_cripto: NO compra si superaria el limite de exposicion TO
 # juntas el limite total) solo se actualizaba en la rama "orden no
 # confirmada", y encima fuera del "si de verdad se compro algo" -asi que
 # una compra normal (estado == "filled", el caso habitual) NUNCA lo
-# actualizaba. Con 2 señales de cripto en el mismo ciclo y un limite que
-# una sola compra respeta pero las dos juntas no, el bug dejaba pasar las
-# dos; con el fix, la segunda debe bloquearse. ---
+# actualizaba. Con 4 señales de cripto en el mismo ciclo y un limite que
+# 3 compras respetan pero las 4 juntas no, el bug dejaba pasar las 4; con
+# el fix, la 4a debe bloquearse.
+#
+# Portfolio elegido (3000 USD) para que el limite POR POSICION de alto
+# riesgo (2%, ver ACTIVOS_ALTO_RIESGO/LIMITE_EXPOSICION_ALTO_RIESGO_PCT,
+# nov. 2026) no trunque el importe estandar (~51.3 USD) de cada compra, y
+# el limite CONJUNTO de alto riesgo (6% = 180 USD) sea el que de verdad
+# bloquee la 4a señal (3 compras = 153.9 USD, holgado; la 4a lo supera). ---
 activos_cripto_originales_exposicion = bot.ACTIVOS_CRYPTO
-bot.ACTIVOS_CRYPTO = ["BTC/USD", "ETH/USD"]
-portfolio_value_exposicion = 400.0  # limite 20% = 80 USD; cada compra estandar son ~51.3 USD
+bot.ACTIVOS_CRYPTO = ["BTC/USD", "ETH/USD", "LTC/USD", "BCH/USD"]
+portfolio_value_exposicion = 3000.0
 bot._trading_client = _TradingClientFalso(portfolio_value=portfolio_value_exposicion, posiciones=[])
 bot._crypto_data_client = _fake_crypto_data_client_alcista()
 try:
@@ -1452,10 +1485,10 @@ finally:
     bot._crypto_data_client = crypto_data_client_original
     bot.ACTIVOS_CRYPTO = activos_cripto_originales_exposicion
 
-check("revisar_compras_cripto: 2 señales en el mismo ciclo, cada una por debajo del limite pero "
-      "juntas por encima -> solo se coloca 1 orden (la 2a se bloquea al ver ya la exposicion "
-      "de la 1a, antes del fix se colocaban las 2)",
-      len(ordenes_compra_cripto_exposicion) == 1, f"ordenes={ordenes_compra_cripto_exposicion}")
+check("revisar_compras_cripto: 4 señales en el mismo ciclo, las 3 primeras caben en el limite "
+      "conjunto de alto riesgo (6%) pero la 4a no -> solo se colocan 3 ordenes (antes del fix del "
+      "contador compartido se habrian colocado las 4)",
+      len(ordenes_compra_cripto_exposicion) == 3, f"ordenes={ordenes_compra_cripto_exposicion}")
 
 # --- BUG REAL DE PRODUCCION (sept. 2026): Alpaca devuelve el simbolo de
 # las posiciones de cripto YA ABIERTAS sin la barra ('LINKUSD', no
@@ -1632,6 +1665,51 @@ finally:
 check("revisar_compras: si 'cash' no esta disponible en la cuenta, no lanza excepcion y sigue comprando",
       excepcion_sin_cash is None and len(ordenes_sin_atributo_cash) == 1,
       f"excepcion={excepcion_sin_cash}, ordenes={len(ordenes_sin_atributo_cash)}")
+
+# --- Alto riesgo (nov. 2026, peticion del usuario): un valor de
+# ACTIVOS_ALTO_RIESGO (SOXL, ETF apalancado 3x) usa el limite POR POSICION
+# del 2% en vez del 15% general -con una cartera de 2000 USD, el 2% (40
+# USD) es MENOR que el importe estandar (~51.3 USD), asi que se trunca-.
+bot.ACTIVOS = ["SOXL"]
+bot._trading_client = _TradingClientFalso(portfolio_value=2_000, posiciones=[])
+bot._data_client = _fake_data_client_alcista()
+try:
+    bot._cache_largas_por_dia = {}
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    ordenes_soxl_limite = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.ACTIVOS = activos_originales
+
+check("revisar_compras: SOXL (alto riesgo) trunca el importe al 2% de la cartera (40 USD), no al "
+      "15% general (que habria dejado el importe estandar de ~51.3 USD sin tocar)",
+      len(ordenes_soxl_limite) == 1 and abs(ordenes_soxl_limite[0].notional - 40.0) < 0.01,
+      f"ordenes={ordenes_soxl_limite}")
+
+# Con una posicion de TQQQ ya ocupando casi todo el limite conjunto de alto
+# riesgo (6%), una señal de SOXL (otro valor de alto riesgo) NO debe
+# comprar mas, aunque el limite INDIVIDUAL del 2% para SOXL en si mismo
+# no este alcanzado.
+bot.ACTIVOS = ["SOXL"]
+posicion_tqqq_cerca_del_limite = types.SimpleNamespace(
+    symbol="TQQQ", qty="1", avg_entry_price="50.0", market_value="590.0",
+    unrealized_pl="0.0", unrealized_plpc="0.0",
+)
+bot._trading_client = _TradingClientFalso(portfolio_value=10_000, posiciones=[posicion_tqqq_cerca_del_limite])
+bot._data_client = _fake_data_client_alcista()
+try:
+    bot._cache_largas_por_dia = {}
+    con_reloj_fijo(miercoles_regular, bot.revisar_compras)
+finally:
+    ordenes_soxl_total_alto_riesgo = bot._trading_client.ordenes
+    bot._trading_client = trading_client_original
+    bot._data_client = data_client_original
+    bot.ACTIVOS = activos_originales
+
+check("revisar_compras: NO compra SOXL si superaria el limite CONJUNTO de alto riesgo (6%), aunque "
+      "el limite individual de SOXL por si solo no este alcanzado",
+      len(ordenes_soxl_total_alto_riesgo) == 0, f"ordenes={ordenes_soxl_total_alto_riesgo}")
 
 
 # ---------------------------------------------------------------------------

@@ -396,6 +396,19 @@ def decidir_accion_venta(clave, beneficio_pct, umbral, macd_alcista_fn=None):
     maximo_neto = max(maximo_anterior, beneficio_pct)
     _maximo_beneficio_neto_por_posicion[clave] = maximo_neto
 
+    # Stop-loss de alto riesgo (nov. 2026, peticion del usuario -ver
+    # ACTIVOS_ALTO_RIESGO/STOP_LOSS_ALTO_RIESGO_PCT-): a diferencia del
+    # resto de la cartera (que nunca vende en negativo, ver puede_vender
+    # mas abajo), los productos apalancados/muy volatiles SI tienen un
+    # suelo de perdida maxima. Se comprueba ANTES que el trailing stop
+    # normal y lo ignora por completo (no hace falta que el trailing este
+    # armado, ni respeta MARGEN_MINIMO_VENTA_PCT): si la perdida ya supera
+    # el limite, se vende, punto.
+    if clave in ACTIVOS_ALTO_RIESGO and beneficio_pct <= -STOP_LOSS_ALTO_RIESGO_PCT:
+        _guardar_estado_venta()
+        return "VENTA_TOTAL", (f"stop-loss de alto riesgo: perdida de {beneficio_pct:.2f}% "
+                                f"(limite -{STOP_LOSS_ALTO_RIESGO_PCT}%)")
+
     trailing_armado = maximo_neto >= umbral
     retroceso_pct = maximo_neto - beneficio_pct
     margen_trailing = _margen_trailing_stop(maximo_neto)
@@ -643,6 +656,29 @@ UMBRAL_BENEFICIO_CRYPTO_PCT = 0.3  # cripto: umbral mas bajo que acciones (igual
                                     # bot_completo.py/IBKR) - 24/7 y mas rapida
 VALOR_MINIMO_OPERACION_CRIPTO_USD = 5.0
 DECIMALES_FRACCION_CRIPTO = 6  # mas precision que acciones: BTC/ETH suelen necesitarla
+
+# --- "Alto riesgo" (apalancados/muy volatiles): limites mas estrictos que
+# el resto de la cartera (nov. 2026, peticion del usuario, caso real: SOXL
+# comprado dos veces seguidas justo antes de un giro brusco del sector de
+# semiconductores, sin ningun stop-loss que lo frenara -ver NOTES.md-).
+# Incluye los ETFs apalancados 3x (TQQQ, SOXL), SMCI (comportamiento
+# historicamente mas erratico/volatil que el resto de ACTIVOS) y TODA la
+# cripto (ya es mas volatil por naturaleza que la mayoria de acciones).
+ACTIVOS_ALTO_RIESGO = {"TQQQ", "SOXL", "SMCI"} | set(ACTIVOS_CRYPTO)
+
+LIMITE_EXPOSICION_ALTO_RIESGO_PCT = 2        # % max del valor total de la cartera POR POSICION
+                                              # individual de alto riesgo (mas estricto que el
+                                              # LIMITE_EXPOSICION_PCT general del 15%)
+LIMITE_EXPOSICION_ALTO_RIESGO_TOTAL_PCT = 6  # % max del valor total de la cartera para el
+                                              # CONJUNTO de todo alto riesgo junto (TQQQ+SOXL+SMCI+
+                                              # cripto); mas estricto que el 15% que tenia cripto
+                                              # en solitario -ese limite de cripto sigue existiendo,
+                                              # pero este nuevo limite conjunto es mas bajo y es el
+                                              # que manda en la practica-.
+STOP_LOSS_ALTO_RIESGO_PCT = 3  # perdida maxima antes de forzar una VENTA_TOTAL, a diferencia del
+                                # resto de la cartera (que nunca vende en negativo, ver
+                                # MARGEN_MINIMO_VENTA_PCT) -el apalancamiento/volatilidad
+                                # amplifica mucho una caida que en otro valor seria manejable-.
 
 
 def es_cripto(ticker):
@@ -1204,6 +1240,17 @@ def calcular_exposicion_total_cripto_usd(posiciones):
     cripto abiertas -para el limite propio LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT,
     ver revisar_compras_cripto()."""
     return sum(float(p.market_value) for p in posiciones if es_cripto(p.symbol))
+
+
+def calcular_exposicion_alto_riesgo_usd(posiciones):
+    """Suma el valor de mercado de TODAS las posiciones -acciones Y cripto
+    juntas- que esten en ACTIVOS_ALTO_RIESGO (TQQQ/SOXL/SMCI/toda la
+    cripto). Para el limite conjunto LIMITE_EXPOSICION_ALTO_RIESGO_TOTAL_PCT
+    (nov. 2026, peticion del usuario), compartido entre revisar_compras() y
+    revisar_compras_cripto() -cada una lo calcula de nuevo al principio de
+    su propio ciclo, en vivo contra el broker, igual que ya hace
+    calcular_exposicion_total_cripto_usd()."""
+    return sum(float(p.market_value) for p in posiciones if p.symbol in ACTIVOS_ALTO_RIESGO)
 
 
 # --- Comisiones: se asume 0 EUR en compras Y en ventas (a peticion expresa
@@ -2197,9 +2244,17 @@ def revisar_compras():
         log("COMPRAS: no se pudo obtener el valor total de la cartera, se omite este ciclo.")
         return
     limite_por_valor_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_PCT / 100)
+    limite_alto_riesgo_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_ALTO_RIESGO_PCT / 100)
+    limite_alto_riesgo_total_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_ALTO_RIESGO_TOTAL_PCT / 100)
 
     posiciones = obtener_posiciones()
     fuera_sesion = fuera_de_sesion_regular_us()
+    # Exposicion conjunta de alto riesgo (TQQQ/SOXL/SMCI/toda la cripto,
+    # ver ACTIVOS_ALTO_RIESGO): se calcula UNA vez al principio del ciclo,
+    # igual que exposicion_cripto_actual_usd en revisar_compras_cripto(), y
+    # se va incrementando segun se confirma cada compra de este grupo -
+    # compartida con el ciclo de cripto, que hace lo mismo en el suyo-.
+    exposicion_alto_riesgo_actual_usd = calcular_exposicion_alto_riesgo_usd(posiciones)
 
     # Tope de posiciones simultaneas y caja disponible (ver
     # MAX_POSICIONES_ABIERTAS): se calculan UNA vez al principio del ciclo y
@@ -2245,11 +2300,18 @@ def revisar_compras():
                         f"a la baja, se omite.")
                     continue
 
+            # Alto riesgo (nov. 2026, peticion del usuario -ver
+            # ACTIVOS_ALTO_RIESGO-): limite POR POSICION mas estricto
+            # (2% en vez del 15% general).
+            es_alto_riesgo = ticker in ACTIVOS_ALTO_RIESGO
+            limite_posicion_usd = limite_alto_riesgo_usd if es_alto_riesgo else limite_por_valor_usd
             valor_posicion_actual = obtener_valor_posicion_actual_usd(posiciones, ticker)
-            margen_disponible = limite_por_valor_usd - valor_posicion_actual
+            margen_disponible = limite_posicion_usd - valor_posicion_actual
             if margen_disponible <= 0:
+                etiqueta_limite = f"{LIMITE_EXPOSICION_ALTO_RIESGO_PCT}% de alto riesgo" if es_alto_riesgo \
+                    else f"{LIMITE_EXPOSICION_PCT}%"
                 log(f"COMPRAS: {ticker} - senal de COMPRA pero ya tiene {valor_posicion_actual:.2f} USD "
-                    f"({LIMITE_EXPOSICION_PCT}% del limite = {limite_por_valor_usd:.2f} USD alcanzado) -> se omite.")
+                    f"({etiqueta_limite} del limite = {limite_posicion_usd:.2f} USD alcanzado) -> se omite.")
                 continue
 
             importe_a_usar = min(IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD, margen_disponible)
@@ -2258,6 +2320,13 @@ def revisar_compras():
                 log(f"COMPRAS: {ticker} - senal de COMPRA pero el margen disponible "
                     f"({importe_a_usar:.2f} USD) no llega al minimo de "
                     f"{VALOR_MINIMO_OPERACION_FRACCIONARIA_USD:.2f} USD por operacion, se omite.")
+                continue
+
+            if es_alto_riesgo and exposicion_alto_riesgo_actual_usd + importe_a_usar > limite_alto_riesgo_total_usd:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero comprar {importe_a_usar:.2f} USD mas "
+                    f"superaria el limite conjunto de alto riesgo ({LIMITE_EXPOSICION_ALTO_RIESGO_TOTAL_PCT}% "
+                    f"de la cartera = {limite_alto_riesgo_total_usd:.2f} USD; ya invertido en alto riesgo: "
+                    f"{exposicion_alto_riesgo_actual_usd:.2f} USD), se omite.")
                 continue
 
             # Tope de posiciones simultaneas: solo se aplica a valores NUEVOS
@@ -2290,6 +2359,8 @@ def revisar_compras():
             posiciones_abiertas_tickers.add(ticker)
             if efectivo_disponible_usd is not None:
                 efectivo_disponible_usd -= importe_a_usar
+            if es_alto_riesgo:
+                exposicion_alto_riesgo_actual_usd += importe_a_usar
 
             cantidad_estimada = round(importe_a_usar / precio_actual, DECIMALES_FRACCION)
 
@@ -2380,9 +2451,19 @@ def revisar_compras_cripto():
 
     limite_por_valor_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_PCT / 100)
     limite_cripto_total_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT / 100)
+    # Toda la cripto esta en ACTIVOS_ALTO_RIESGO (nov. 2026, peticion del
+    # usuario -ver la constante-), asi que aqui se aplica SIEMPRE el limite
+    # POR POSICION mas estricto (2% en vez del 15% general) y el limite
+    # CONJUNTO de alto riesgo (6%, compartido con TQQQ/SOXL/SMCI del ciclo
+    # de acciones) -mas estricto que el 15% exclusivo de cripto de arriba,
+    # que sigue existiendo pero en la practica el de alto riesgo manda
+    # primero-.
+    limite_alto_riesgo_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_ALTO_RIESGO_PCT / 100)
+    limite_alto_riesgo_total_usd = valor_total_cartera_usd * (LIMITE_EXPOSICION_ALTO_RIESGO_TOTAL_PCT / 100)
 
     posiciones = obtener_posiciones()
     exposicion_cripto_actual_usd = calcular_exposicion_total_cripto_usd(posiciones)
+    exposicion_alto_riesgo_actual_usd = calcular_exposicion_alto_riesgo_usd(posiciones)
 
     # Caja disponible (ver MAX_POSICIONES_ABIERTAS/obtener_efectivo_disponible_usd
     # en revisar_compras()): no hace falta un tope de NUMERO de posiciones
@@ -2420,10 +2501,11 @@ def revisar_compras_cripto():
                 continue
 
             valor_posicion_actual = obtener_valor_posicion_actual_usd(posiciones, ticker)
-            margen_disponible = limite_por_valor_usd - valor_posicion_actual
+            margen_disponible = limite_alto_riesgo_usd - valor_posicion_actual
             if margen_disponible <= 0:
                 log(f"COMPRAS: {ticker} - senal de COMPRA pero ya tiene {valor_posicion_actual:.2f} USD "
-                    f"({LIMITE_EXPOSICION_PCT}% del limite = {limite_por_valor_usd:.2f} USD alcanzado) -> se omite.")
+                    f"({LIMITE_EXPOSICION_ALTO_RIESGO_PCT}% de alto riesgo del limite = "
+                    f"{limite_alto_riesgo_usd:.2f} USD alcanzado) -> se omite.")
                 continue
 
             importe_a_usar = min(IMPORTE_EUROS * TIPO_CAMBIO_EUR_USD, margen_disponible)
@@ -2433,6 +2515,13 @@ def revisar_compras_cripto():
                     f"superaria el limite de exposicion TOTAL en cripto ({LIMITE_EXPOSICION_CRYPTO_TOTAL_PCT}% "
                     f"de la cartera = {limite_cripto_total_usd:.2f} USD; ya invertido en cripto: "
                     f"{exposicion_cripto_actual_usd:.2f} USD), se omite.")
+                continue
+
+            if exposicion_alto_riesgo_actual_usd + importe_a_usar > limite_alto_riesgo_total_usd:
+                log(f"COMPRAS: {ticker} - senal de COMPRA pero comprar {importe_a_usar:.2f} USD mas "
+                    f"superaria el limite conjunto de alto riesgo ({LIMITE_EXPOSICION_ALTO_RIESGO_TOTAL_PCT}% "
+                    f"de la cartera = {limite_alto_riesgo_total_usd:.2f} USD; ya invertido en alto riesgo: "
+                    f"{exposicion_alto_riesgo_actual_usd:.2f} USD), se omite.")
                 continue
 
             if importe_a_usar < VALOR_MINIMO_OPERACION_CRIPTO_USD:
@@ -2499,6 +2588,7 @@ def revisar_compras_cripto():
                 notificar_telegram(formatear_notificacion_compra(ticker, cantidad_real, precio_real,
                                                                    decimales_cantidad=6, unidad="unidades"))
                 exposicion_cripto_actual_usd += cantidad_real * precio_real
+                exposicion_alto_riesgo_actual_usd += cantidad_real * precio_real
             else:
                 # Mismo fallo que en la compra de acciones (ver comentario
                 # equivalente mas arriba, caso real NVDA, oct. 2026): la
@@ -2514,6 +2604,7 @@ def revisar_compras_cripto():
                         ticker, cantidad_real, precio_actual, decimales_cantidad=6, unidad="unidades",
                         sufijo="[confirmado a posteriori: el estado de la orden no fue fiable]"))
                     exposicion_cripto_actual_usd += cantidad_real * precio_actual
+                    exposicion_alto_riesgo_actual_usd += cantidad_real * precio_actual
         except Exception as e:
             log(f"COMPRAS: {ticker} - ERROR inesperado al procesar la señal de compra cripto: {type(e).__name__}: {e}. Se omite.")
             errores += 1
