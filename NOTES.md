@@ -1978,6 +1978,33 @@ actualizó a 4 señales/cartera más grande, porque con el nuevo límite por pos
 posible reproducir el escenario original con solo 2 señales -el límite por posición es ahora
 siempre más estricto que el límite conjunto de cripto en solitario para tan pocas señales-.
 
+## Bug real encontrado y corregido: "1 hora en contra" se trataba como ruido de 1 minuto (nov. 2026)
+
+Petición del usuario: verificó manualmente (con un gráfico real de Coca-Cola, MACD en 5min/15min/
+30min/1h/4h/1día/1semana) cuál sería su propio criterio de entrada -"compraría sin duda si 5min,
+15min, 30min y 1h están todas alcistas; si además 1 día lo está, probablemente también; si además
+1 semana, sin duda"- y pidió comprobar si `decidir_senal()` sigue ese mismo criterio.
+
+**Encontrado**: la excepción de "1 de 7 temporalidades en contra, pero es una CORTA -> se trata
+como un simple retroceso de ruido y se compra igual" trataba **1 hora exactamente igual que 1
+minuto**. O sea: si 1 hora era la ÚNICA temporalidad bajista (con 1min/5min/15min/30min/1día/1
+semana todas alcistas), el bot compraba igualmente, tratando el giro de 1h como ruido -cuando en
+realidad 1h es, según el propio criterio del usuario, una temporalidad que debe estar alineada SIN
+excepción, no una que se pueda saltar como el minuto.
+
+**Fix**: se saca "1 hora" de esa excepción -ahora, si 1h es la única en contra, se bloquea
+(`BLOQUEADO_TF_LARGA`), igual que si la única en contra fuera diaria o semanal-. El resto de
+cortas (1min/5min/15min/30min) siguen pudiendo saltarse como "retroceso normal" si son las únicas
+en contra, sin cambios ahí.
+
+No se ha tocado `bot_completo.py` (IBKR) -esta sesión ha sido exclusivamente sobre Alpaca-, aunque
+tiene la misma lógica duplicada y podría beneficiarse del mismo fix si se decide aplicarlo allí
+también.
+
+Tests actualizados: el caso "1h bajista con largas conocidas" cambia de esperar `COMPRA` a esperar
+`BLOQUEADO_TF_LARGA`; test nuevo confirmando que 30 minutos (no 1h) SIGUE beneficiándose de la
+excepción de retroceso normal sin cambios.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

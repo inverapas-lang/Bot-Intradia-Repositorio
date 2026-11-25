@@ -909,12 +909,21 @@ def decidir_senal(detalle):
     if total_false == 1:
         # Peticion del usuario (sept. 2026): la excepcion de "1 de 7 en
         # contra" solo vale si la discrepancia es en una temporalidad CORTA
-        # (1min-1h) -un retroceso normal, a menudo mejor precio de entrada-.
-        # Si la unica en contra es la diaria o semanal, NO se compra: seria
-        # entrar contra la tendencia dominante, la peor categoria de
-        # entrada (antes esto se trataba igual que un "1 minuto en contra",
-        # bug real corregido aqui).
-        if tf_en_contra is not None and tf_en_contra["tipo"] == "corta":
+        # (1min-30min) -un retroceso normal, a menudo mejor precio de
+        # entrada-. Si la unica en contra es la diaria o semanal, NO se
+        # compra: seria entrar contra la tendencia dominante, la peor
+        # categoria de entrada (antes esto se trataba igual que un "1
+        # minuto en contra", bug real corregido aqui).
+        #
+        # Peticion del usuario (nov. 2026): "1 hora" se saca de esta
+        # excepcion -se trataba exactamente igual que "1 minuto", como un
+        # simple retroceso de ruido, cuando en realidad el usuario exige 1h
+        # alineada SIN excepcion (criterio real: 5min/15min/30min/1h todas
+        # alcistas -> entrada clara; si ademas 1 dia o 1 semana lo estan,
+        # mejor todavia). Si la UNICA temporalidad en contra es la hora,
+        # ahora se bloquea igual que si fuera diaria o semanal -ya no es
+        # "ruido de 1 minuto", es la tendencia de medio plazo girando-.
+        if tf_en_contra is not None and tf_en_contra["tipo"] == "corta" and tf_en_contra["nombre"] != "1 hora":
             return "COMPRA"
         return "BLOQUEADO_TF_LARGA"
     if cortas_ok and not largas_ok:

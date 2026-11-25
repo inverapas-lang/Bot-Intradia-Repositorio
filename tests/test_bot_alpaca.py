@@ -59,17 +59,25 @@ check("decidir_senal: las 7 temporalidades alcistas -> COMPRA",
       bot.decidir_senal(todas_alcistas) == "COMPRA")
 
 # Con 1h DENTRO del atajo (fix oct. 2026, ver NOMBRES_CORTAS_ATAJO), este
-# caso ya NO dispara el atajo -pero el resultado final sigue siendo COMPRA,
-# a traves de la excepcion independiente de "1 de 7 en contra y es corta"
-# (retroceso normal, peticion del usuario sept. 2026) mas abajo. El fix de
-# 1h NO cambia este caso -1h bajista con largas CONOCIDAS (True) sigue
-# comprando igual, es lo esperado-; donde SI cambia el resultado es cuando
-# ademas falta un dato de una larga (ver siguiente test).
+# caso ya NO dispara el atajo. Y desde el fix de nov. 2026 (peticion del
+# usuario: "si la 1h no esta alcista, no entraria, sin excepcion"), tampoco
+# dispara ya la excepcion de "1 de 7 en contra y es corta" -1h se saco de
+# esa excepcion, se trata como una larga para este caso concreto-, asi que
+# el resultado correcto ahora es BLOQUEADO_TF_LARGA, no COMPRA.
 una_hora_bajista_largas_ok = dict(todas_alcistas)
 una_hora_bajista_largas_ok["1 hora"] = False
-check("decidir_senal: 1h bajista con largas CONOCIDAS (dia/semana True) -> COMPRA igual, via "
-      "la excepcion de '1 de 7 en contra y es corta' (no via el atajo, que ya no dispara)",
-      bot.decidir_senal(una_hora_bajista_largas_ok) == "COMPRA")
+check("decidir_senal: 1h bajista con largas CONOCIDAS (dia/semana True) -> BLOQUEADO_TF_LARGA "
+      "(fix nov. 2026: 1h ya no cuenta como 'retroceso de ruido', se exige alineada sin excepcion)",
+      bot.decidir_senal(una_hora_bajista_largas_ok) == "BLOQUEADO_TF_LARGA")
+
+# Con una CORTA de verdad (p.ej. 30 minutos, no 1h) como unica en contra,
+# la excepcion de "retroceso normal" SI sigue aplicando -no se ha tocado
+# para el resto de cortas, solo para 1 hora-.
+treinta_min_bajista_largas_ok = dict(todas_alcistas)
+treinta_min_bajista_largas_ok["30 minutos"] = False
+check("decidir_senal: 30min bajista (no 1h) con largas CONOCIDAS -> COMPRA igual, via la excepcion "
+      "de '1 de 7 en contra y es corta' (fix nov. 2026 solo saca 1 hora de esta excepcion)",
+      bot.decidir_senal(treinta_min_bajista_largas_ok) == "COMPRA")
 
 # --- Bug real corregido (oct. 2026, peticion del usuario): con el atajo
 # viejo (NOMBRES_4_CORTAS sin 1h), si 1h era bajista Y ademas faltaba el
