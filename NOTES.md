@@ -2005,6 +2005,13 @@ Tests actualizados: el caso "1h bajista con largas conocidas" cambia de esperar 
 `BLOQUEADO_TF_LARGA`; test nuevo confirmando que 30 minutos (no 1h) SIGUE beneficiándose de la
 excepción de retroceso normal sin cambios.
 
+## Ajuste de LIMITE_EXPOSICION_PCT: 15% -> 5% (nov. 2026)
+
+Petición del usuario, tras preguntar cuál era el límite máximo por posición individual. Solo
+afecta al límite GENERAL (`bot_alpaca.py`); el límite propio de "alto riesgo" (2% individual / 6%
+conjunto, ver más arriba) no se toca, sigue siendo más estricto que este para TQQQ/SOXL/SMCI/
+cripto.
+
 ## Preguntas abiertas / sin decidir
 
 - ¿Desactivar HK y/o KR para la cuenta real de 300€, dado que probablemente no puedan

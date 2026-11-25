@@ -565,7 +565,8 @@ CRYPTO_INTERVALO_SEGUNDOS = 60  # cripto revisa cada 1 minuto, en su propia cade
 INTERVALO_REVISION_HISTORIAL_SEGUNDOS = 1800  # 30 min: comprobacion periodica de que el
                                  # historial local explica todas las acciones que Alpaca dice
                                  # tener (ver verificar_historial_completo(), bug real T sept. 2026)
-LIMITE_EXPOSICION_PCT = 15   # % maximo del total de cartera por valor
+LIMITE_EXPOSICION_PCT = 5   # % maximo del total de cartera por valor -bajado de 15 (nov. 2026,
+                             # peticion del usuario)
 IMPORTE_EUROS = 45           # presupuesto maximo por operacion (convertido a USD) - ajustado
                               # para capital real de ~300 EUR (antes 1000, pensado para el
                               # saldo simulado de $100.000 de la cuenta paper)
